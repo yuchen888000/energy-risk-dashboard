@@ -3,6 +3,12 @@ import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import nltk
+import feedparser
+nltk.download('vader_lexicon', quiet=True)
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
 st.title("European Energy Risk Dashboard")
 st.write("Monitoring TTF Natural Gas vs Carbon Price")
@@ -52,18 +58,16 @@ else:
     col2.metric("Average Volatility", f"{avg_vol:.2f}%")
     col3.metric("Correlation", f"{df['Gas Price'].corr(df['Carbon Proxy']):.2f}")
 
-    # Macro events
     macro_events = {
         "2021-07-14": "EU Fit for 55 Package",
         "2022-02-24": "Russia invades Ukraine",
         "2022-06-01": "EU bans Russian oil",
         "2022-09-26": "Nord Stream sabotage",
         "2023-01-01": "EU gas price cap",
-        "2024-01-01": "EU ETS reform",
         "2023-04-18": "EU ETS 2 legislation passed",
+        "2024-01-01": "EU ETS reform",
     }
 
-    # Price chart with macro events
     st.subheader("Price Trends with Key Events")
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(df.index, df['Gas Price'], color='steelblue', label='TTF Gas Price', linewidth=1.5)
@@ -90,42 +94,91 @@ else:
 
     st.subheader("30-Day Rolling Correlation")
     st.line_chart(df['Rolling Correlation'].dropna())
-    from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
-import numpy as np
 
-st.subheader("Market Regime Clustering (AI)")
-st.write("K-Means unsupervised learning identifies 3 market states based on volatility patterns")
+    st.subheader("Market Regime Clustering (AI)")
+    st.write("K-Means unsupervised learning identifies 3 market states based on volatility patterns")
 
-# Prepare features
-features = df[['Volatility', 'Rolling Correlation']].dropna()
-scaler = StandardScaler()
-scaled = scaler.fit_transform(features)
+    features = df[['Volatility', 'Rolling Correlation']].dropna()
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(features)
 
-# K-Means
-kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-features = features.copy()
-features['Cluster'] = kmeans.fit_predict(scaled)
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+    features = features.copy()
+    features['Cluster'] = kmeans.fit_predict(scaled)
 
-# Label clusters by average volatility
-cluster_vol = features.groupby('Cluster')['Volatility'].mean().sort_values()
-labels = {cluster_vol.index[0]: '🟢 Calm', 
-          cluster_vol.index[1]: '🟡 Volatile', 
-          cluster_vol.index[2]: '🔴 Crisis'}
-features['Regime'] = features['Cluster'].map(labels)
+    cluster_vol = features.groupby('Cluster')['Volatility'].mean().sort_values()
+    labels = {cluster_vol.index[0]: '🟢 Calm',
+              cluster_vol.index[1]: '🟡 Volatile',
+              cluster_vol.index[2]: '🔴 Crisis'}
+    features['Regime'] = features['Cluster'].map(labels)
 
-# Current regime
-current_regime = features['Regime'].iloc[-1]
-st.markdown(f"### Current Market Regime: {current_regime}")
+    current_regime = features['Regime'].iloc[-1]
+    st.markdown(f"### Current Market Regime: {current_regime}")
 
-# Plot
-fig2, ax3 = plt.subplots(figsize=(12, 4))
-colors = {'🟢 Calm': 'green', '🟡 Volatile': 'orange', '🔴 Crisis': 'red'}
-for regime, group in features.groupby('Regime'):
-    ax3.scatter(group.index, group['Volatility'], 
-               c=colors[regime], label=regime, alpha=0.5, s=10)
-ax3.set_ylabel('30-Day Volatility (%)')
-ax3.set_title('Market Regime Detection')
-ax3.legend()
-plt.tight_layout()
-st.pyplot(fig2)
+    fig2, ax3 = plt.subplots(figsize=(12, 4))
+    colors = {'🟢 Calm': 'green', '🟡 Volatile': 'orange', '🔴 Crisis': 'red'}
+    for regime, group in features.groupby('Regime'):
+        ax3.scatter(group.index, group['Volatility'],
+                   c=colors[regime], label=regime, alpha=0.5, s=10)
+    ax3.set_ylabel('30-Day Volatility (%)')
+    ax3.set_title('Market Regime Detection')
+    ax3.legend()
+    plt.tight_layout()
+    st.pyplot(fig2)
+
+    st.subheader("Energy News Sentiment (NLP)")
+    st.write("Analyzing latest energy news headlines using VADER sentiment analysis")
+
+    energy_keywords = ['energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF', 'power']
+
+    rss_feeds = [
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "https://finance.yahoo.com/news/sector-energy/?format=rss",
+    "https://oilprice.com/rss/main",
+]
+
+    headlines = []
+    for url in rss_feeds:
+        feed = feedparser.parse(url)
+        for entry in feed.entries[:30]:
+            title = entry.title
+            if any(kw.lower() in title.lower() for kw in energy_keywords):
+                headlines.append(title)
+        if len(headlines) >= 5:
+            break
+
+    if not headlines:
+        headlines = [
+            "European gas prices surge amid supply concerns",
+            "EU carbon market faces regulatory uncertainty",
+            "TTF natural gas futures decline on mild weather",
+            "Energy crisis pushes European inflation higher",
+            "Renewable energy investment hits record in Europe"
+        ]
+        st.caption("⚠️ Live feed unavailable — showing sample headlines")
+
+    sia = SentimentIntensityAnalyzer()
+    scores = [sia.polarity_scores(h)['compound'] for h in headlines]
+    avg_score = sum(scores) / len(scores) if scores else 0
+
+    if avg_score > 0.05:
+        sentiment_label = "🟢 Bullish"
+        sentiment_color = "green"
+    elif avg_score < -0.05:
+        sentiment_label = "🔴 Bearish"
+        sentiment_color = "red"
+    else:
+        sentiment_label = "🟡 Neutral"
+        sentiment_color = "orange"
+
+    st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
+                unsafe_allow_html=True)
+    st.metric("Average Sentiment Score", f"{avg_score:.3f}")
+
+    st.write("**Latest energy headlines analyzed:**")
+    for h in headlines[:5]:
+        score = sia.polarity_scores(h)['compound']
+        emoji = "🟢" if score > 0.05 else "🔴" if score < -0.05 else "🟡"
+        st.write(f"{emoji} {h}")
+
+        
