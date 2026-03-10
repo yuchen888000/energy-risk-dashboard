@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import nltk
 import feedparser
 nltk.download('vader_lexicon', quiet=True)
@@ -95,7 +94,7 @@ else:
     st.subheader("30-Day Rolling Correlation")
     st.line_chart(df['Rolling Correlation'].dropna())
 
-    st.subheader("Market Regime Clustering (AI)")
+    st.subheader("Market Regime Clustering")
     st.write("K-Means unsupervised learning identifies 3 market states based on volatility patterns")
 
     features = df[['Volatility', 'Rolling Correlation']].dropna()
@@ -107,16 +106,19 @@ else:
     features['Cluster'] = kmeans.fit_predict(scaled)
 
     cluster_vol = features.groupby('Cluster')['Volatility'].mean().sort_values()
-    labels = {cluster_vol.index[0]: '🟢 Calm',
-              cluster_vol.index[1]: '🟡 Volatile',
-              cluster_vol.index[2]: '🔴 Crisis'}
+    labels = {cluster_vol.index[0]: 'Calm',
+              cluster_vol.index[1]: 'Volatile',
+              cluster_vol.index[2]: 'Crisis'}
     features['Regime'] = features['Cluster'].map(labels)
 
     current_regime = features['Regime'].iloc[-1]
-    st.markdown(f"### Current Market Regime: {current_regime}")
+    regime_colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
+    regime_color = regime_colors.get(current_regime, 'gray')
+    st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
+                unsafe_allow_html=True)
 
     fig2, ax3 = plt.subplots(figsize=(12, 4))
-    colors = {'🟢 Calm': 'green', '🟡 Volatile': 'orange', '🔴 Crisis': 'red'}
+    colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
     for regime, group in features.groupby('Regime'):
         ax3.scatter(group.index, group['Volatility'],
                    c=colors[regime], label=regime, alpha=0.5, s=10)
@@ -126,16 +128,16 @@ else:
     plt.tight_layout()
     st.pyplot(fig2)
 
-    st.subheader("Energy News Sentiment (NLP)")
+    st.subheader("Energy News Sentiment")
     st.write("Analyzing latest energy news headlines using VADER sentiment analysis")
 
     energy_keywords = ['energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF', 'power']
 
     rss_feeds = [
-    "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://finance.yahoo.com/news/sector-energy/?format=rss",
-    "https://oilprice.com/rss/main",
-]
+        "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "https://finance.yahoo.com/news/sector-energy/?format=rss",
+        "https://oilprice.com/rss/main",
+    ]
 
     headlines = []
     for url in rss_feeds:
@@ -144,8 +146,6 @@ else:
             title = entry.title
             if any(kw.lower() in title.lower() for kw in energy_keywords):
                 headlines.append(title)
-        if len(headlines) >= 5:
-            break
 
     if not headlines:
         headlines = [
@@ -155,20 +155,20 @@ else:
             "Energy crisis pushes European inflation higher",
             "Renewable energy investment hits record in Europe"
         ]
-        st.caption("⚠️ Live feed unavailable — showing sample headlines")
+        st.caption("Live feed unavailable — showing sample headlines")
 
     sia = SentimentIntensityAnalyzer()
     scores = [sia.polarity_scores(h)['compound'] for h in headlines]
     avg_score = sum(scores) / len(scores) if scores else 0
 
     if avg_score > 0.05:
-        sentiment_label = "🟢 Bullish"
+        sentiment_label = "Bullish"
         sentiment_color = "green"
     elif avg_score < -0.05:
-        sentiment_label = "🔴 Bearish"
+        sentiment_label = "Bearish"
         sentiment_color = "red"
     else:
-        sentiment_label = "🟡 Neutral"
+        sentiment_label = "Neutral"
         sentiment_color = "orange"
 
     st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
@@ -178,7 +178,5 @@ else:
     st.write("**Latest energy headlines analyzed:**")
     for h in headlines[:5]:
         score = sia.polarity_scores(h)['compound']
-        emoji = "🟢" if score > 0.05 else "🔴" if score < -0.05 else "🟡"
-        st.write(f"{emoji} {h}")
-
-        
+        marker = "+" if score > 0.05 else "-" if score < -0.05 else "~"
+        st.write(f"[{marker}] {h}")
