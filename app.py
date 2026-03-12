@@ -20,11 +20,12 @@ with st.sidebar:
     **Data Sources**
     - **TTF Natural Gas Futures** (`TTF=F`): Dutch Title Transfer Facility, 
       the European benchmark for natural gas pricing.
-    - **Clean Energy Proxy** (`ICLN`): iShares Global Clean Energy ETF. 
-      Used as a market proxy for the energy transition trade — not a direct 
-      carbon price, but tracks investor sentiment on renewables vs fossil fuels. 
-      When gas prices spike, clean energy stocks often move inversely, 
-      reflecting the fossil-to-renewable substitution dynamic.
+    - **EU Carbon Allowance** (`KEUA`): KraneShares European Carbon Allowance 
+      Strategy ETF — directly tracks EU ETS carbon futures (EUA). This is a 
+      real carbon price proxy, not a clean energy equity fund.
+    - **Fallback: Clean Energy Proxy** (`ICLN`): If KEUA data is unavailable 
+      for the selected date range, ICLN (iShares Global Clean Energy ETF) is 
+      used as a secondary proxy tracking the energy transition trade.
 
     **Risk Metrics**
     - **30-Day Rolling Volatility**: Standard deviation of daily returns 
@@ -50,7 +51,7 @@ with st.sidebar:
 
 # ─── Title ───
 st.title("European Energy Risk Dashboard")
-st.markdown("Monitoring TTF Natural Gas vs Clean Energy Transition Proxy (ICLN)")
+st.markdown("Monitoring TTF Natural Gas vs EU Carbon Allowance Price")
 
 # ─── Date Selection ───
 col1, col2 = st.columns(2)
@@ -63,30 +64,50 @@ with col2:
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
 def load_data(start, end):
     gas = yf.download("TTF=F", start=start, end=end, progress=False)
-    carbon = yf.download("ICLN", start=start, end=end, progress=False)
+    carbon_etf = yf.download("KEUA", start=start, end=end, progress=False)
+    clean = yf.download("ICLN", start=start, end=end, progress=False)
+
     gas_price = gas['Close'].squeeze()
-    carbon_price = carbon['Close'].squeeze()
+    carbon_price = carbon_etf['Close'].squeeze()
+    clean_price = clean['Close'].squeeze()
+
     df = pd.DataFrame({
         'Gas Price': gas_price,
-        'Clean Energy Proxy': carbon_price
-    }).dropna()
+        'Carbon Price (KEUA)': carbon_price,
+        'Clean Energy (ICLN)': clean_price,
+    }).dropna(subset=['Gas Price'])
     return df
 
 df = load_data(start_date, end_date)
 
-if len(df) < 30:
+has_keua = df['Carbon Price (KEUA)'].notna().sum() > 30
+carbon_col = 'Carbon Price (KEUA)' if has_keua else 'Clean Energy (ICLN)'
+
+if has_keua:
+    df_analysis = df[['Gas Price', 'Carbon Price (KEUA)']].dropna()
+    carbon_label = 'EU Carbon Allowance (KEUA)'
+    carbon_unit = '$/share (tracks EUA futures)'
+else:
+    df_analysis = df[['Gas Price', 'Clean Energy (ICLN)']].dropna()
+    carbon_label = 'Clean Energy Proxy (ICLN)'
+    carbon_unit = '$/share'
+    st.info("KEUA data unavailable for selected range — using ICLN as fallback proxy.")
+
+df_analysis.columns = ['Gas Price', 'Carbon Proxy']
+
+if len(df_analysis) < 30:
     st.warning("Please select a longer time range (at least 30 days of data required).")
 else:
     # ─── Core Calculations ───
-    df['Gas Returns'] = df['Gas Price'].pct_change()
-    df['Volatility'] = df['Gas Returns'].rolling(30).std() * 100
-    df['Rolling Correlation'] = df['Gas Price'].rolling(30).corr(df['Clean Energy Proxy'])
+    df_analysis['Gas Returns'] = df_analysis['Gas Price'].pct_change()
+    df_analysis['Volatility'] = df_analysis['Gas Returns'].rolling(30).std() * 100
+    df_analysis['Rolling Correlation'] = df_analysis['Gas Price'].rolling(30).corr(df_analysis['Carbon Proxy'])
 
-    latest_vol = df['Volatility'].dropna().iloc[-1]
-    avg_vol = df['Volatility'].dropna().mean()
+    latest_vol = df_analysis['Volatility'].dropna().iloc[-1]
+    avg_vol = df_analysis['Volatility'].dropna().mean()
 
     # VaR calculation (95% historical)
-    returns_clean = df['Gas Returns'].dropna()
+    returns_clean = df_analysis['Gas Returns'].dropna()
     var_95 = np.percentile(returns_clean, 5) * 100
     var_99 = np.percentile(returns_clean, 1) * 100
 
@@ -108,7 +129,7 @@ else:
     mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
     mc2.metric("Average Volatility", f"{avg_vol:.2f}%")
-    mc3.metric("Correlation", f"{df['Gas Price'].corr(df['Clean Energy Proxy']):.2f}")
+    mc3.metric("Correlation", f"{df_analysis['Gas Price'].corr(df_analysis['Carbon Proxy']):.2f}")
     mc4.metric("VaR (95%, 1-day)", f"{var_95:.2f}%")
 
     # ─── Section 2: Price Chart with Macro Events ───
@@ -127,24 +148,25 @@ else:
 
     st.subheader("Price Trends with Key EU Policy Events")
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(df.index, df['Gas Price'], color='steelblue', label='TTF Gas Price (€/MWh)', linewidth=1.5)
+    ax.plot(df_analysis.index, df_analysis['Gas Price'], color='steelblue',
+            label='TTF Gas Price (€/MWh)', linewidth=1.5)
     ax2 = ax.twinx()
-    ax2.plot(df.index, df['Clean Energy Proxy'], color='seagreen',
-             label='ICLN Clean Energy Proxy ($)', linewidth=1.5, alpha=0.7)
+    ax2.plot(df_analysis.index, df_analysis['Carbon Proxy'], color='seagreen',
+             label=f'{carbon_label} ({carbon_unit})', linewidth=1.5, alpha=0.7)
 
     for date_str, label in macro_events.items():
         event_date = pd.to_datetime(date_str)
-        if df.index.min() <= event_date <= df.index.max():
+        if df_analysis.index.min() <= event_date <= df_analysis.index.max():
             ax.axvline(x=event_date, color='gray', linestyle='--', alpha=0.5)
             ax.text(event_date, ax.get_ylim()[1] * 0.9, label,
                    rotation=90, fontsize=7, color='gray', va='top')
 
     ax.set_ylabel('TTF Gas Price (€/MWh)', color='steelblue')
-    ax2.set_ylabel('ICLN Clean Energy ETF ($)', color='seagreen')
+    ax2.set_ylabel(carbon_label, color='seagreen')
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8)
-    ax.set_title('TTF Natural Gas vs Clean Energy Transition Proxy (2020–present)')
+    ax.set_title(f'TTF Natural Gas vs {carbon_label} (2020–present)')
     plt.tight_layout()
     st.pyplot(fig)
 
@@ -152,10 +174,10 @@ else:
     vcol1, vcol2 = st.columns(2)
     with vcol1:
         st.subheader("30-Day Rolling Volatility")
-        st.line_chart(df['Volatility'].dropna())
+        st.line_chart(df_analysis['Volatility'].dropna())
     with vcol2:
         st.subheader("30-Day Rolling Correlation")
-        st.line_chart(df['Rolling Correlation'].dropna())
+        st.line_chart(df_analysis['Rolling Correlation'].dropna())
 
     # ─── Section 4: Value at Risk ───
     st.subheader("Value at Risk (VaR) Analysis")
@@ -194,7 +216,7 @@ else:
     st.subheader("Market Regime Clustering (AI)")
     st.write("Hybrid approach: K-Means clustering + absolute volatility thresholds for regime labeling")
 
-    features = df[['Volatility', 'Rolling Correlation']].dropna()
+    features = df_analysis[['Volatility', 'Rolling Correlation']].dropna()
     scaler = StandardScaler()
     scaled = scaler.fit_transform(features)
 
@@ -389,8 +411,8 @@ else:
     # ─── Section 7: Data Export ───
     st.subheader("Export Data")
 
-    export_df = df[['Gas Price', 'Clean Energy Proxy', 'Volatility', 'Rolling Correlation']].copy()
-    export_df['Gas_Daily_Return_%'] = df['Gas Returns'] * 100
+    export_df = df_analysis[['Gas Price', 'Carbon Proxy', 'Volatility', 'Rolling Correlation']].copy()
+    export_df['Gas_Daily_Return_%'] = df_analysis['Gas Returns'] * 100
 
     if 'Regime' in features.columns:
         export_df = export_df.join(features[['Regime']], how='left')

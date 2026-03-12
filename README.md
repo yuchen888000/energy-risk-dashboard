@@ -6,7 +6,7 @@ A real-time risk monitoring tool for European energy markets, built with Python 
 
 ## What It Does
 
-This dashboard tracks the relationship between TTF natural gas futures (the European benchmark) and the clean energy transition trade (via ICLN ETF), combining quantitative risk metrics with AI-driven market regime detection and NLP sentiment analysis.
+This dashboard tracks the relationship between TTF natural gas futures (the European benchmark) and EU carbon allowance prices (via KEUA ETF, which directly tracks EU ETS futures), combining quantitative risk metrics with AI-driven market regime detection and NLP sentiment analysis.
 
 ### Features
 
@@ -21,7 +21,7 @@ This dashboard tracks the relationship between TTF natural gas futures (the Euro
 
 | Component | Technology |
 |-----------|-----------|
-| Data | yfinance (TTF=F, ICLN) |
+| Data | yfinance (TTF=F, KEUA, ICLN) |
 | Framework | Streamlit |
 | Risk Analytics | NumPy, Pandas |
 | Machine Learning | scikit-learn (KMeans, StandardScaler) |
@@ -31,11 +31,11 @@ This dashboard tracks the relationship between TTF natural gas futures (the Euro
 
 ## Methodology
 
-**Why ICLN as a proxy?** ICLN is not a direct carbon price — it's a clean energy equity ETF. It captures the fossil-to-renewable substitution dynamic: when gas prices spike, clean energy equities often move inversely, reflecting market repricing of the energy transition. This divergence/convergence pattern is itself a risk signal.
+**Why KEUA?** KEUA is a KraneShares ETF that directly tracks EU ETS carbon allowance (EUA) futures — this is the actual carbon price, not a proxy. When KEUA data is unavailable for the selected date range (it launched in late 2020), the dashboard falls back to ICLN (iShares Global Clean Energy ETF) as a secondary proxy capturing the fossil-to-renewable substitution dynamic.
 
 **VaR approach:** Historical simulation using the full sample of daily TTF returns. The 5th percentile of the return distribution gives the 95% VaR — the maximum expected daily loss not exceeded 95% of the time.
 
-**Regime clustering:** KMeans (k=3) on standardized volatility and rolling correlation features. Clusters are labeled by ascending mean volatility: Calm → Volatile → Crisis. This provides an unsupervised, data-driven view of market states without requiring predefined thresholds.
+**Regime clustering:** Hybrid approach — KMeans (k=3) on standardized volatility and rolling correlation features for pattern detection, combined with absolute volatility thresholds for regime labeling (Calm < 6%, Volatile 6–12%, Crisis > 12%). This avoids the pure-relative problem where moderate volatility gets mislabeled as Crisis simply because it's the highest in the current sample.
 
 **Sentiment model:** VADER is a rule-based model designed for social media and news text. It scores headlines on a compound scale from -1 to +1. Headlines are filtered by energy-related keywords from live RSS feeds.
 
