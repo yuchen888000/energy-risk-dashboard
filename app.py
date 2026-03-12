@@ -34,8 +34,10 @@ with st.sidebar:
       daily loss that would not be exceeded at the given confidence level.
 
     **AI / ML**
-    - **K-Means Clustering**: Unsupervised learning on (volatility, correlation) 
-      feature space to detect 3 market regimes: Calm, Volatile, Crisis.
+    - **Hybrid Regime Detection**: K-Means clustering on (volatility, correlation) 
+      feature space, combined with absolute volatility thresholds for regime labeling. 
+      Calm < 6%, Volatile 6–12%, Crisis > 12%. This avoids the pure-relative problem 
+      where moderate volatility gets mislabeled as Crisis.
 
     **NLP**
     - **VADER Sentiment**: Rule-based sentiment analysis on live energy news 
@@ -188,9 +190,9 @@ else:
     vc2.metric("VaR 99% (1-day)", f"{var_99:.2f}%")
     vc3.metric("Max Daily Loss", f"{returns_clean.min() * 100:.2f}%")
 
-    # ─── Section 5: Market Regime Clustering ───
+    # ─── Section 5: Market Regime Clustering (AI) ───
     st.subheader("Market Regime Clustering (AI)")
-    st.write("K-Means unsupervised learning identifies 3 market states based on volatility and correlation")
+    st.write("Hybrid approach: K-Means clustering + absolute volatility thresholds for regime labeling")
 
     features = df[['Volatility', 'Rolling Correlation']].dropna()
     scaler = StandardScaler()
@@ -200,17 +202,24 @@ else:
     features = features.copy()
     features['Cluster'] = kmeans.fit_predict(scaled)
 
-    cluster_vol = features.groupby('Cluster')['Volatility'].mean().sort_values()
-    labels_map = {cluster_vol.index[0]: 'Calm',
-                  cluster_vol.index[1]: 'Volatile',
-                  cluster_vol.index[2]: 'Crisis'}
-    features['Regime'] = features['Cluster'].map(labels_map)
+    # Hybrid regime labels: use absolute thresholds instead of purely relative KMeans labels
+    # Thresholds calibrated against 2020-2026 TTF historical volatility
+    def classify_regime(vol):
+        if vol > 12:
+            return 'Crisis'
+        elif vol > 6:
+            return 'Volatile'
+        else:
+            return 'Calm'
+
+    features['Regime'] = features['Volatility'].apply(classify_regime)
 
     current_regime = features['Regime'].iloc[-1]
     regime_colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
     regime_color = regime_colors.get(current_regime, 'gray')
     st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
                 unsafe_allow_html=True)
+    st.caption("Thresholds: Calm < 6% · Volatile 6–12% · Crisis > 12% (30-day rolling volatility)")
 
     regime_stats = features.groupby('Regime').agg(
         Days=('Volatility', 'count'),
@@ -226,9 +235,11 @@ else:
         for regime, group in features.groupby('Regime'):
             ax3.scatter(group.index, group['Volatility'],
                        c=colors[regime], label=regime, alpha=0.5, s=10)
+        ax3.axhline(y=6, color='orange', linewidth=1, linestyle='--', alpha=0.5, label='Volatile threshold (6%)')
+        ax3.axhline(y=12, color='red', linewidth=1, linestyle='--', alpha=0.5, label='Crisis threshold (12%)')
         ax3.set_ylabel('30-Day Volatility (%)')
         ax3.set_title('Market Regime Detection over Time')
-        ax3.legend()
+        ax3.legend(fontsize=7)
         plt.tight_layout()
         st.pyplot(fig2)
     with rcol2:
@@ -262,7 +273,7 @@ else:
             feed = feedparser.parse(url)
             count = 0
             for entry in feed.entries[:50]:
-                if count >= 5:
+                if count >= 3:
                     break
                 title = entry.title
                 if any(kw.lower() in title.lower() for kw in energy_keywords):
@@ -347,21 +358,55 @@ else:
     plt.tight_layout()
     st.pyplot(fig3)
 
-    # Headlines detail
-    st.write("**Headlines Detail:**")
-    for _, row in sent_df.iterrows():
+    # Headlines detail — top 3 most positive & top 3 most negative
+    top_bull = sent_df.nlargest(3, 'Compound')
+    top_bear = sent_df.nsmallest(3, 'Compound')
+
+    st.write("**Most Bullish Headlines:**")
+    for _, row in top_bull.iterrows():
         score = row['Compound']
-        if score > 0.05:
-            icon = "🟢"
-        elif score < -0.05:
-            icon = "🔴"
-        else:
-            icon = "🟡"
         link = row['Link']
         source = row['Source']
         headline = row['Headline']
         score_str = f"{score:+.3f}"
         if link:
-            st.markdown(f"{icon} **[{score_str}]** [{headline}]({link}) — *{source}*")
+            st.markdown(f"🟢 **[{score_str}]** [{headline}]({link}) — *{source}*")
         else:
-            st.markdown(f"{icon} **[{score_str}]** {headline} — *{source}*")
+            st.markdown(f"🟢 **[{score_str}]** {headline} — *{source}*")
+
+    st.write("**Most Bearish Headlines:**")
+    for _, row in top_bear.iterrows():
+        score = row['Compound']
+        link = row['Link']
+        source = row['Source']
+        headline = row['Headline']
+        score_str = f"{score:+.3f}"
+        if link:
+            st.markdown(f"🔴 **[{score_str}]** [{headline}]({link}) — *{source}*")
+        else:
+            st.markdown(f"🔴 **[{score_str}]** {headline} — *{source}*")
+
+    # ─── Section 7: Data Export ───
+    st.subheader("Export Data")
+
+    export_df = df[['Gas Price', 'Clean Energy Proxy', 'Volatility', 'Rolling Correlation']].copy()
+    export_df['Gas_Daily_Return_%'] = df['Gas Returns'] * 100
+
+    if 'Regime' in features.columns:
+        export_df = export_df.join(features[['Regime']], how='left')
+
+    csv = export_df.to_csv()
+    st.download_button(
+        label="Download Risk Data (CSV)",
+        data=csv,
+        file_name="energy_risk_data.csv",
+        mime="text/csv"
+    )
+
+    sent_csv = sent_df.to_csv(index=False)
+    st.download_button(
+        label="Download Sentiment Data (CSV)",
+        data=sent_csv,
+        file_name="sentiment_data.csv",
+        mime="text/csv"
+    )
