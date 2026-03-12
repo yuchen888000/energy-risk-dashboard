@@ -129,31 +129,45 @@ else:
     st.pyplot(fig2)
 
     st.subheader("Energy News Sentiment (NLP)")
-    st.write("Analyzing latest energy news headlines using VADER sentiment analysis")
+    st.write("Real-time sentiment analysis of energy market headlines via VADER NLP model")
 
-    energy_keywords = ['energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF', 'power']
-
-    rss_feeds = [
-        "https://feeds.bbci.co.uk/news/business/rss.xml",
-        "https://finance.yahoo.com/news/sector-energy/?format=rss",
-        "https://oilprice.com/rss/main",
+    energy_keywords = [
+        'energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF',
+        'power', 'electricity', 'renewable', 'wind', 'solar', 'nuclear', 'coal',
+        'emission', 'EU ETS', 'natural gas', 'crude', 'OPEC', 'hydrogen', 'fuel'
     ]
+
+    rss_feeds = {
+        "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "Yahoo Energy": "https://finance.yahoo.com/news/sector-energy/?format=rss",
+        "OilPrice": "https://oilprice.com/rss/main",
+        "Reuters Business": "https://www.reutersagency.com/feed/?best-topics=business-finance&post_type=best",
+        "CNBC Energy": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19836572",
+    }
 
     headlines = []
     headline_links = []
-    for url in rss_feeds:
-        feed = feedparser.parse(url)
-        count = 0
-        for entry in feed.entries[:30]:
-            if count >= 2:
-                break
-            title = entry.title
-            if any(kw.lower() in title.lower() for kw in energy_keywords):
-                headlines.append(title)
-                headline_links.append(entry.get('link', ''))
-                count += 1
+    headline_sources = []
 
+    for source_name, url in rss_feeds.items():
+        try:
+            feed = feedparser.parse(url)
+            count = 0
+            for entry in feed.entries[:50]:
+                if count >= 5:
+                    break
+                title = entry.title
+                if any(kw.lower() in title.lower() for kw in energy_keywords):
+                    headlines.append(title)
+                    headline_links.append(entry.get('link', ''))
+                    headline_sources.append(source_name)
+                    count += 1
+        except Exception:
+            continue
+
+    is_live = True
     if not headlines:
+        is_live = False
         headlines = [
             "European gas prices surge amid supply concerns",
             "EU carbon market faces regulatory uncertainty",
@@ -162,11 +176,27 @@ else:
             "Renewable energy investment hits record in Europe"
         ]
         headline_links = [''] * len(headlines)
-        st.caption("Live feed unavailable — showing sample headlines")
+        headline_sources = ['Sample'] * len(headlines)
 
     sia = SentimentIntensityAnalyzer()
-    scores = [sia.polarity_scores(h)['compound'] for h in headlines]
-    avg_score = sum(scores) / len(scores) if scores else 0
+    sentiment_data = []
+    for i, h in enumerate(headlines):
+        sc = sia.polarity_scores(h)
+        sentiment_data.append({
+            'Headline': h,
+            'Source': headline_sources[i],
+            'Link': headline_links[i],
+            'Compound': sc['compound'],
+            'Positive': sc['pos'],
+            'Negative': sc['neg'],
+            'Neutral': sc['neu'],
+        })
+
+    sent_df = pd.DataFrame(sentiment_data)
+    avg_score = sent_df['Compound'].mean()
+    n_bull = (sent_df['Compound'] > 0.05).sum()
+    n_bear = (sent_df['Compound'] < -0.05).sum()
+    n_neut = len(sent_df) - n_bull - n_bear
 
     if avg_score > 0.05:
         sentiment_label = "Bullish"
@@ -180,11 +210,50 @@ else:
 
     st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
                 unsafe_allow_html=True)
-    st.metric("Average Sentiment Score", f"{avg_score:.3f}")
 
-    st.write("**Latest energy headlines analyzed:**")
-    for i, h in enumerate(headlines[:5]):
-        score = sia.polarity_scores(h)['compound']
-        marker = "+" if score > 0.05 else "-" if score < -0.05 else "~"
-        link = headline_links[i] if i < len(headline_links) else "#"
-        st.markdown(f"[{marker}] [{h}]({link})")
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Avg Sentiment", f"{avg_score:.3f}")
+    sc2.metric("Bullish", f"{n_bull}")
+    sc3.metric("Bearish", f"{n_bear}")
+    sc4.metric("Neutral", f"{n_neut}")
+
+    if is_live:
+        st.caption(f"Analyzing {len(sent_df)} live headlines from {len(set(headline_sources))} sources")
+    else:
+        st.caption("Live feeds unavailable — showing sample headlines")
+
+    # Sentiment distribution chart
+    fig3, ax4 = plt.subplots(figsize=(12, 3))
+    bar_colors = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
+                  for s in sent_df['Compound']]
+    ax4.barh(range(len(sent_df)), sent_df['Compound'], color=bar_colors, height=0.6)
+    ax4.set_yticks(range(len(sent_df)))
+    ax4.set_yticklabels([h[:60] + '...' if len(h) > 60 else h for h in sent_df['Headline']],
+                        fontsize=7)
+    ax4.axvline(x=0, color='black', linewidth=0.5)
+    ax4.axvline(x=0.05, color='green', linewidth=0.5, linestyle='--', alpha=0.4)
+    ax4.axvline(x=-0.05, color='red', linewidth=0.5, linestyle='--', alpha=0.4)
+    ax4.set_xlabel('Sentiment Score (VADER Compound)')
+    ax4.set_title('Per-Headline Sentiment Distribution')
+    ax4.invert_yaxis()
+    plt.tight_layout()
+    st.pyplot(fig3)
+
+    # Headline table
+    st.write("**Headlines Detail:**")
+    for _, row in sent_df.iterrows():
+        score = row['Compound']
+        if score > 0.05:
+            icon = "🟢"
+        elif score < -0.05:
+            icon = "🔴"
+        else:
+            icon = "🟡"
+        link = row['Link']
+        source = row['Source']
+        headline = row['Headline']
+        score_str = f"{score:+.3f}"
+        if link:
+            st.markdown(f"{icon} **[{score_str}]** [{headline}]({link}) — *{source}*")
+        else:
+            st.markdown(f"{icon} **[{score_str}]** {headline} — *{source}*")
