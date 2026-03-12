@@ -94,7 +94,7 @@ else:
     st.subheader("30-Day Rolling Correlation")
     st.line_chart(df['Rolling Correlation'].dropna())
 
-    st.subheader("Market Regime Clustering")
+    st.subheader("Market Regime Clustering (AI)")
     st.write("K-Means unsupervised learning identifies 3 market states based on volatility patterns")
 
     features = df[['Volatility', 'Rolling Correlation']].dropna()
@@ -128,7 +128,7 @@ else:
     plt.tight_layout()
     st.pyplot(fig2)
 
-    st.subheader("Energy News Sentiment")
+    st.subheader("Energy News Sentiment (NLP)")
     st.write("Analyzing latest energy news headlines using VADER sentiment analysis")
 
     energy_keywords = ['energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF', 'power']
@@ -140,12 +140,18 @@ else:
     ]
 
     headlines = []
+    headline_links = []
     for url in rss_feeds:
         feed = feedparser.parse(url)
+        count = 0
         for entry in feed.entries[:30]:
+            if count >= 2:
+                break
             title = entry.title
             if any(kw.lower() in title.lower() for kw in energy_keywords):
                 headlines.append(title)
+                headline_links.append(entry.get('link', ''))
+                count += 1
 
     if not headlines:
         headlines = [
@@ -155,6 +161,7 @@ else:
             "Energy crisis pushes European inflation higher",
             "Renewable energy investment hits record in Europe"
         ]
+        headline_links = [''] * len(headlines)
         st.caption("Live feed unavailable — showing sample headlines")
 
     sia = SentimentIntensityAnalyzer()
@@ -176,7 +183,8 @@ else:
     st.metric("Average Sentiment Score", f"{avg_score:.3f}")
 
     st.write("**Latest energy headlines analyzed:**")
-    for h in headlines[:5]:
+    for i, h in enumerate(headlines[:5]):
         score = sia.polarity_scores(h)['compound']
         marker = "+" if score > 0.05 else "-" if score < -0.05 else "~"
-        st.write(f"[{marker}] {h}")
+        link = headline_links[i] if i < len(headline_links) else "#"
+        st.markdown(f"[{marker}] [{h}]({link})")
