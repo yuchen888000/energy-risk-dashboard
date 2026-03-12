@@ -33,6 +33,10 @@ with st.sidebar:
     - **Rolling Correlation**: Pearson correlation between TTF and ICLN over 30 days.
     - **Value at Risk (VaR)**: 95% and 99% historical VaR — the maximum expected 
       daily loss that would not be exceeded at the given confidence level.
+    - **GARCH(1,1) Forecast**: Generalized Autoregressive Conditional 
+      Heteroskedasticity model — predicts future volatility based on 
+      recent shocks (α) and volatility persistence (β). Standard in 
+      energy trading risk desks.
 
     **AI / ML**
     - **Hybrid Regime Detection**: K-Means clustering on (volatility, correlation) 
@@ -211,6 +215,66 @@ else:
     vc1.metric("VaR 95% (1-day)", f"{var_95:.2f}%")
     vc2.metric("VaR 99% (1-day)", f"{var_99:.2f}%")
     vc3.metric("Max Daily Loss", f"{returns_clean.min() * 100:.2f}%")
+
+    # ─── Section 4b: GARCH Volatility Forecast ───
+    st.subheader("GARCH Volatility Forecast")
+    st.write("Forward-looking volatility prediction using GARCH(1,1) — the standard model in energy risk management")
+
+    from arch import arch_model
+
+    # Fit GARCH(1,1) on TTF daily returns (scaled to percentage)
+    garch_returns = returns_clean.dropna() * 100
+    try:
+        model = arch_model(garch_returns, vol='Garch', p=1, q=1, dist='normal', rescale=False)
+        result = model.fit(disp='off')
+
+        # Forecast next 10 trading days
+        forecast = result.forecast(horizon=10)
+        forecast_var = forecast.variance.iloc[-1]
+        forecast_vol = np.sqrt(forecast_var)
+
+        # Current conditional volatility from model
+        current_cond_vol = np.sqrt(result.conditional_volatility.iloc[-1] ** 2)
+
+        gc1, gc2, gc3 = st.columns(3)
+        gc1.metric("Current GARCH Vol (daily)", f"{current_cond_vol:.2f}%")
+        gc2.metric("5-Day Forecast Vol", f"{forecast_vol.iloc[4]:.2f}%")
+        gc3.metric("10-Day Forecast Vol", f"{forecast_vol.iloc[9]:.2f}%")
+
+        fig_garch, (ax_cv, ax_fc) = plt.subplots(1, 2, figsize=(14, 4))
+
+        # Left: historical conditional volatility
+        cond_vol = result.conditional_volatility
+        ax_cv.plot(cond_vol.index, cond_vol, color='purple', linewidth=0.8, alpha=0.8)
+        ax_cv.set_ylabel('Conditional Volatility (daily %)')
+        ax_cv.set_title('GARCH(1,1) Conditional Volatility')
+        ax_cv.fill_between(cond_vol.index, cond_vol, 0, alpha=0.1, color='purple')
+
+        # Right: 10-day forecast
+        forecast_days = list(range(1, 11))
+        ax_fc.plot(forecast_days, forecast_vol.values, color='purple', linewidth=2, marker='o', markersize=5)
+        ax_fc.fill_between(forecast_days, forecast_vol.values * 0.7, forecast_vol.values * 1.3,
+                          alpha=0.15, color='purple', label='±30% confidence band')
+        ax_fc.set_xlabel('Days Ahead')
+        ax_fc.set_ylabel('Forecast Volatility (daily %)')
+        ax_fc.set_title('10-Day Volatility Forecast')
+        ax_fc.set_xticks(forecast_days)
+        ax_fc.legend(fontsize=8)
+
+        plt.tight_layout()
+        st.pyplot(fig_garch)
+
+        # Model summary
+        with st.expander("GARCH(1,1) Model Parameters"):
+            st.write(f"**omega (ω):** {result.params['omega']:.6f}")
+            st.write(f"**alpha (α):** {result.params['alpha[1]']:.4f} — reaction to recent shocks")
+            st.write(f"**beta (β):** {result.params['beta[1]']:.4f} — persistence of volatility")
+            st.write(f"**α + β = {result.params['alpha[1]'] + result.params['beta[1]']:.4f}** — "
+                     f"{'high persistence (close to 1)' if result.params['alpha[1]'] + result.params['beta[1]'] > 0.95 else 'moderate persistence'}")
+            st.write(f"**Log-Likelihood:** {result.loglikelihood:.2f}")
+
+    except Exception as e:
+        st.warning(f"GARCH model could not be fitted: {e}")
 
     # ─── Section 5: Market Regime Clustering (AI) ───
     st.subheader("Market Regime Clustering (AI)")
