@@ -5,57 +5,86 @@ import numpy as np
 import matplotlib.pyplot as plt
 import nltk
 import feedparser
+import requests as req
+import time
 nltk.download('vader_lexicon', quiet=True)
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 # ─── Page Config ───
-st.set_page_config(page_title="European Energy Risk Dashboard", layout="wide")
+st.set_page_config(page_title="European Energy & Commodity Risk Dashboard", layout="wide")
 
-# ─── Sidebar: Methodology ───
+# ─── Commodity Definitions ───
+COMMODITIES = {
+    "TTF Natural Gas": {
+        "ticker": "TTF=F",
+        "unit": "€/MWh",
+        "color": "steelblue",
+        "keywords": ['gas', 'TTF', 'LNG', 'pipeline', 'natural gas', 'methane'],
+        "rss_query": "natural+gas+Europe+price",
+    },
+    "WTI Crude Oil": {
+        "ticker": "CL=F",
+        "unit": "$/barrel",
+        "color": "saddlebrown",
+        "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'barrel', 'refinery'],
+        "rss_query": "crude+oil+Europe+price",
+    },
+    "Brent Crude Oil": {
+        "ticker": "BZ=F",
+        "unit": "$/barrel",
+        "color": "darkred",
+        "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'barrel', 'North Sea'],
+        "rss_query": "brent+oil+Europe+price",
+    },
+    "EU Carbon Allowance": {
+        "ticker": "KEUA",
+        "unit": "$/share (EUA futures)",
+        "color": "seagreen",
+        "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
+        "rss_query": "EU+carbon+ETS+emission+price",
+    },
+}
+
+# ─── Sidebar ───
 with st.sidebar:
+    st.title("Settings")
+    selected_commodity = st.selectbox("Select Commodity", list(COMMODITIES.keys()))
+    commodity = COMMODITIES[selected_commodity]
+
+    st.markdown("---")
     st.title("Methodology")
-    st.markdown("""
-    **Data Sources**
-    - **TTF Natural Gas Futures** (`TTF=F`): Dutch Title Transfer Facility, 
-      the European benchmark for natural gas pricing.
-    - **EU Carbon Allowance** (`KEUA`): KraneShares European Carbon Allowance 
-      Strategy ETF — directly tracks EU ETS carbon futures (EUA). This is a 
-      real carbon price proxy, not a clean energy equity fund.
-    - **Fallback: Clean Energy Proxy** (`ICLN`): If KEUA data is unavailable 
-      for the selected date range, ICLN (iShares Global Clean Energy ETF) is 
-      used as a secondary proxy tracking the energy transition trade.
+    st.markdown(f"""
+    **Selected: {selected_commodity}** (`{commodity['ticker']}`)
+
+    **Comparison**: EU Carbon Allowance (`KEUA`) — directly tracks 
+    EU ETS carbon futures. Falls back to ICLN if unavailable.
 
     **Risk Metrics**
-    - **30-Day Rolling Volatility**: Standard deviation of daily returns 
-      over a rolling 30-day window, expressed as percentage.
-    - **Rolling Correlation**: Pearson correlation between TTF and ICLN over 30 days.
-    - **Value at Risk (VaR)**: 95% and 99% historical VaR — the maximum expected 
-      daily loss that would not be exceeded at the given confidence level.
-    - **GARCH(1,1) Forecast**: Generalized Autoregressive Conditional 
-      Heteroskedasticity model — predicts future volatility based on 
-      recent shocks (α) and volatility persistence (β). Standard in 
-      energy trading risk desks.
+    - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
+    - **Rolling Correlation**: Pearson correlation with EU carbon over 30 days.
+    - **Value at Risk (VaR)**: 95% and 99% historical VaR.
+    - **GARCH(1,1) Forecast**: Predicts future volatility from recent 
+      shocks (α) and persistence (β). Standard on energy trading desks.
 
     **AI / ML**
-    - **Hybrid Regime Detection**: K-Means clustering on (volatility, correlation) 
-      feature space, combined with absolute volatility thresholds for regime labeling. 
-      Calm < 6%, Volatile 6–12%, Crisis > 12%. This avoids the pure-relative problem 
-      where moderate volatility gets mislabeled as Crisis.
+    - **Hybrid Regime Detection**: K-Means clustering + absolute 
+      volatility thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%).
 
     **NLP**
-    - **VADER Sentiment**: Rule-based sentiment analysis on live energy news 
-      headlines from RSS feeds. Compound score: -1 (most negative) to +1 (most positive).
+    - **FinBERT Sentiment**: Transformer model fine-tuned on financial 
+      text (ProsusAI/finbert via HuggingFace). Falls back to VADER 
+      if API unavailable.
 
     ---
-    *Built by Yuchen · IHEID Master's in International Economics*  
-    *Python · Streamlit · yfinance · scikit-learn · NLTK*
+    *Built by Yuchen · IHEID Master's in International Economics*
+    *Python · Streamlit · yfinance · scikit-learn · FinBERT · GARCH*
     """)
 
 # ─── Title ───
-st.title("European Energy Risk Dashboard")
-st.markdown("Monitoring TTF Natural Gas vs EU Carbon Allowance Price")
+st.title("European Energy & Commodity Risk Dashboard")
+st.markdown(f"Analyzing **{selected_commodity}** vs EU Carbon Allowance Price")
 
 # ─── Date Selection ───
 col1, col2 = st.columns(2)
@@ -66,52 +95,55 @@ with col2:
 
 # ─── Data Download (cached) ───
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
-def load_data(start, end):
-    gas = yf.download("TTF=F", start=start, end=end, progress=False)
+def load_data(ticker, start, end):
+    primary = yf.download(ticker, start=start, end=end, progress=False)
     carbon_etf = yf.download("KEUA", start=start, end=end, progress=False)
     clean = yf.download("ICLN", start=start, end=end, progress=False)
 
-    gas_price = gas['Close'].squeeze()
+    primary_price = primary['Close'].squeeze()
     carbon_price = carbon_etf['Close'].squeeze()
     clean_price = clean['Close'].squeeze()
 
     df = pd.DataFrame({
-        'Gas Price': gas_price,
-        'Carbon Price (KEUA)': carbon_price,
+        'Price': primary_price,
+        'Carbon (KEUA)': carbon_price,
         'Clean Energy (ICLN)': clean_price,
-    }).dropna(subset=['Gas Price'])
+    }).dropna(subset=['Price'])
     return df
 
-df = load_data(start_date, end_date)
+df = load_data(commodity['ticker'], start_date, end_date)
 
-has_keua = df['Carbon Price (KEUA)'].notna().sum() > 30
-carbon_col = 'Carbon Price (KEUA)' if has_keua else 'Clean Energy (ICLN)'
+# Determine carbon comparison
+has_keua = df['Carbon (KEUA)'].notna().sum() > 30
 
-if has_keua:
-    df_analysis = df[['Gas Price', 'Carbon Price (KEUA)']].dropna()
-    carbon_label = 'EU Carbon Allowance (KEUA)'
-    carbon_unit = '$/share (tracks EUA futures)'
+if commodity['ticker'] == 'KEUA':
+    # If user selected carbon, compare against TTF gas instead
+    compare_data = yf.download("TTF=F", start=start_date, end=end_date, progress=False)
+    df['Compare'] = compare_data['Close'].squeeze()
+    compare_label = 'TTF Natural Gas (€/MWh)'
+    df_analysis = df[['Price', 'Compare']].dropna()
+elif has_keua:
+    df['Compare'] = df['Carbon (KEUA)']
+    compare_label = 'EU Carbon Allowance (KEUA)'
+    df_analysis = df[['Price', 'Compare']].dropna()
 else:
-    df_analysis = df[['Gas Price', 'Clean Energy (ICLN)']].dropna()
-    carbon_label = 'Clean Energy Proxy (ICLN)'
-    carbon_unit = '$/share'
-    st.info("KEUA data unavailable for selected range — using ICLN as fallback proxy.")
-
-df_analysis.columns = ['Gas Price', 'Carbon Proxy']
+    df['Compare'] = df['Clean Energy (ICLN)']
+    compare_label = 'Clean Energy Proxy (ICLN)'
+    df_analysis = df[['Price', 'Compare']].dropna()
+    st.info("KEUA data unavailable for selected range — using ICLN as fallback.")
 
 if len(df_analysis) < 30:
     st.warning("Please select a longer time range (at least 30 days of data required).")
 else:
     # ─── Core Calculations ───
-    df_analysis['Gas Returns'] = df_analysis['Gas Price'].pct_change()
-    df_analysis['Volatility'] = df_analysis['Gas Returns'].rolling(30).std() * 100
-    df_analysis['Rolling Correlation'] = df_analysis['Gas Price'].rolling(30).corr(df_analysis['Carbon Proxy'])
+    df_analysis['Returns'] = df_analysis['Price'].pct_change()
+    df_analysis['Volatility'] = df_analysis['Returns'].rolling(30).std() * 100
+    df_analysis['Rolling Correlation'] = df_analysis['Price'].rolling(30).corr(df_analysis['Compare'])
 
     latest_vol = df_analysis['Volatility'].dropna().iloc[-1]
     avg_vol = df_analysis['Volatility'].dropna().mean()
 
-    # VaR calculation (95% historical)
-    returns_clean = df_analysis['Gas Returns'].dropna()
+    returns_clean = df_analysis['Returns'].dropna()
     var_95 = np.percentile(returns_clean, 5) * 100
     var_99 = np.percentile(returns_clean, 1) * 100
 
@@ -126,17 +158,17 @@ else:
         risk_color = "green"
 
     # ─── Section 1: Risk Signal ───
-    st.subheader("Current Risk Signal")
+    st.subheader(f"Current Risk Signal — {selected_commodity}")
     st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
                 unsafe_allow_html=True)
 
     mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
     mc2.metric("Average Volatility", f"{avg_vol:.2f}%")
-    mc3.metric("Correlation", f"{df_analysis['Gas Price'].corr(df_analysis['Carbon Proxy']):.2f}")
+    mc3.metric("Correlation", f"{df_analysis['Price'].corr(df_analysis['Compare']):.2f}")
     mc4.metric("VaR (95%, 1-day)", f"{var_95:.2f}%")
 
-    # ─── Section 2: Price Chart with Macro Events ───
+    # ─── Section 2: Price Chart ───
     macro_events = {
         "2021-07-14": "EU Fit for 55",
         "2022-02-24": "Russia invades Ukraine",
@@ -152,29 +184,29 @@ else:
 
     st.subheader("Price Trends with Key EU Policy Events")
     fig, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(df_analysis.index, df_analysis['Gas Price'], color='steelblue',
-            label='TTF Gas Price (€/MWh)', linewidth=1.5)
+    ax.plot(df_analysis.index, df_analysis['Price'], color=commodity['color'],
+            label=f'{selected_commodity} ({commodity["unit"]})', linewidth=1.5)
     ax2 = ax.twinx()
-    ax2.plot(df_analysis.index, df_analysis['Carbon Proxy'], color='seagreen',
-             label=f'{carbon_label} ({carbon_unit})', linewidth=1.5, alpha=0.7)
+    ax2.plot(df_analysis.index, df_analysis['Compare'], color='gray',
+             label=compare_label, linewidth=1.2, alpha=0.6)
 
     for date_str, label in macro_events.items():
         event_date = pd.to_datetime(date_str)
         if df_analysis.index.min() <= event_date <= df_analysis.index.max():
-            ax.axvline(x=event_date, color='gray', linestyle='--', alpha=0.5)
+            ax.axvline(x=event_date, color='gray', linestyle='--', alpha=0.4)
             ax.text(event_date, ax.get_ylim()[1] * 0.9, label,
                    rotation=90, fontsize=7, color='gray', va='top')
 
-    ax.set_ylabel('TTF Gas Price (€/MWh)', color='steelblue')
-    ax2.set_ylabel(carbon_label, color='seagreen')
+    ax.set_ylabel(f'{selected_commodity} ({commodity["unit"]})', color=commodity['color'])
+    ax2.set_ylabel(compare_label, color='gray')
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8)
-    ax.set_title(f'TTF Natural Gas vs {carbon_label} (2020–present)')
+    ax.set_title(f'{selected_commodity} vs {compare_label}')
     plt.tight_layout()
     st.pyplot(fig)
 
-    # ─── Section 3: Volatility & Correlation side by side ───
+    # ─── Section 3: Volatility & Correlation ───
     vcol1, vcol2 = st.columns(2)
     with vcol1:
         st.subheader("30-Day Rolling Volatility")
@@ -184,23 +216,21 @@ else:
         st.line_chart(df_analysis['Rolling Correlation'].dropna())
 
     # ─── Section 4: Value at Risk ───
-    st.subheader("Value at Risk (VaR) Analysis")
-    st.write("Historical simulation VaR — estimating worst-case daily losses on TTF gas positions")
+    st.subheader(f"Value at Risk (VaR) — {selected_commodity}")
+    st.write(f"Historical simulation VaR — worst-case daily losses on {selected_commodity} positions")
 
     fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
-    # Return distribution + VaR lines
-    ax_hist.hist(returns_clean * 100, bins=80, color='steelblue', alpha=0.7, edgecolor='white')
+    ax_hist.hist(returns_clean * 100, bins=80, color=commodity['color'], alpha=0.7, edgecolor='white')
     ax_hist.axvline(x=var_95, color='red', linewidth=2, linestyle='--',
                     label=f'95% VaR: {var_95:.2f}%')
     ax_hist.axvline(x=var_99, color='darkred', linewidth=2, linestyle=':',
                     label=f'99% VaR: {var_99:.2f}%')
     ax_hist.set_xlabel('Daily Returns (%)')
     ax_hist.set_ylabel('Frequency')
-    ax_hist.set_title('TTF Daily Return Distribution')
+    ax_hist.set_title(f'{selected_commodity} Daily Return Distribution')
     ax_hist.legend(fontsize=8)
 
-    # Rolling VaR time series
     rolling_var = returns_clean.rolling(60).quantile(0.05) * 100
     ax_ts.plot(rolling_var.index, rolling_var, color='red', linewidth=1, alpha=0.8)
     ax_ts.fill_between(rolling_var.index, rolling_var, 0, alpha=0.15, color='red')
@@ -216,24 +246,21 @@ else:
     vc2.metric("VaR 99% (1-day)", f"{var_99:.2f}%")
     vc3.metric("Max Daily Loss", f"{returns_clean.min() * 100:.2f}%")
 
-    # ─── Section 4b: GARCH Volatility Forecast ───
+    # ─── Section 4b: GARCH ───
     st.subheader("GARCH Volatility Forecast")
-    st.write("Forward-looking volatility prediction using GARCH(1,1) — the standard model in energy risk management")
+    st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1)")
 
     from arch import arch_model
 
-    # Fit GARCH(1,1) on TTF daily returns (scaled to percentage)
     garch_returns = returns_clean.dropna() * 100
     try:
         model = arch_model(garch_returns, vol='Garch', p=1, q=1, dist='normal', rescale=False)
         result = model.fit(disp='off')
 
-        # Forecast next 10 trading days
         forecast = result.forecast(horizon=10)
         forecast_var = forecast.variance.iloc[-1]
         forecast_vol = np.sqrt(forecast_var)
 
-        # Current conditional volatility from model
         current_cond_vol = np.sqrt(result.conditional_volatility.iloc[-1] ** 2)
 
         gc1, gc2, gc3 = st.columns(3)
@@ -243,14 +270,12 @@ else:
 
         fig_garch, (ax_cv, ax_fc) = plt.subplots(1, 2, figsize=(14, 4))
 
-        # Left: historical conditional volatility
         cond_vol = result.conditional_volatility
         ax_cv.plot(cond_vol.index, cond_vol, color='purple', linewidth=0.8, alpha=0.8)
         ax_cv.set_ylabel('Conditional Volatility (daily %)')
         ax_cv.set_title('GARCH(1,1) Conditional Volatility')
         ax_cv.fill_between(cond_vol.index, cond_vol, 0, alpha=0.1, color='purple')
 
-        # Right: 10-day forecast
         forecast_days = list(range(1, 11))
         ax_fc.plot(forecast_days, forecast_vol.values, color='purple', linewidth=2, marker='o', markersize=5)
         ax_fc.fill_between(forecast_days, forecast_vol.values * 0.7, forecast_vol.values * 1.3,
@@ -264,19 +289,19 @@ else:
         plt.tight_layout()
         st.pyplot(fig_garch)
 
-        # Model summary
         with st.expander("GARCH(1,1) Model Parameters"):
             st.write(f"**omega (ω):** {result.params['omega']:.6f}")
             st.write(f"**alpha (α):** {result.params['alpha[1]']:.4f} — reaction to recent shocks")
             st.write(f"**beta (β):** {result.params['beta[1]']:.4f} — persistence of volatility")
-            st.write(f"**α + β = {result.params['alpha[1]'] + result.params['beta[1]']:.4f}** — "
-                     f"{'high persistence (close to 1)' if result.params['alpha[1]'] + result.params['beta[1]'] > 0.95 else 'moderate persistence'}")
+            persistence = result.params['alpha[1]'] + result.params['beta[1]']
+            st.write(f"**α + β = {persistence:.4f}** — "
+                     f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
             st.write(f"**Log-Likelihood:** {result.loglikelihood:.2f}")
 
     except Exception as e:
         st.warning(f"GARCH model could not be fitted: {e}")
 
-    # ─── Section 5: Market Regime Clustering (AI) ───
+    # ─── Section 5: Market Regime Clustering ───
     st.subheader("Market Regime Clustering (AI)")
     st.write("Hybrid approach: K-Means clustering + absolute volatility thresholds for regime labeling")
 
@@ -288,8 +313,6 @@ else:
     features = features.copy()
     features['Cluster'] = kmeans.fit_predict(scaled)
 
-    # Hybrid regime labels: use absolute thresholds instead of purely relative KMeans labels
-    # Thresholds calibrated against 2020-2026 TTF historical volatility
     def classify_regime(vol):
         if vol > 12:
             return 'Crisis'
@@ -324,7 +347,7 @@ else:
         ax3.axhline(y=6, color='orange', linewidth=1, linestyle='--', alpha=0.5, label='Volatile threshold (6%)')
         ax3.axhline(y=12, color='red', linewidth=1, linestyle='--', alpha=0.5, label='Crisis threshold (12%)')
         ax3.set_ylabel('30-Day Volatility (%)')
-        ax3.set_title('Market Regime Detection over Time')
+        ax3.set_title(f'{selected_commodity} — Market Regime Detection')
         ax3.legend(fontsize=7)
         plt.tight_layout()
         st.pyplot(fig2)
@@ -332,22 +355,21 @@ else:
         st.write("**Regime Statistics:**")
         st.dataframe(regime_stats, use_container_width=True)
 
-    # ─── Section 6: NLP Sentiment ───
-    st.subheader("Energy News Sentiment (NLP)")
-    st.write("Real-time sentiment analysis of energy market headlines via VADER NLP model")
+    # ─── Section 6: NLP Sentiment (FinBERT) ───
+    st.subheader(f"Energy News Sentiment — {selected_commodity}")
+    st.write("Real-time sentiment analysis using FinBERT (financial domain transformer model)")
 
-    energy_keywords = [
-        'energy', 'gas', 'oil', 'carbon', 'climate', 'LNG', 'pipeline', 'TTF',
-        'power', 'electricity', 'renewable', 'wind', 'solar', 'nuclear', 'coal',
-        'emission', 'EU ETS', 'natural gas', 'crude', 'OPEC', 'hydrogen', 'fuel'
-    ]
+    # Commodity-specific + general energy keywords
+    general_keywords = ['energy', 'power', 'electricity', 'renewable', 'climate',
+                        'emission', 'fuel', 'Europe', 'European']
+    nlp_keywords = commodity['keywords'] + general_keywords
 
     rss_feeds = {
         "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
         "OilPrice": "https://oilprice.com/rss/main",
-        "Google Energy": "https://news.google.com/rss/search?q=energy+market+europe&hl=en",
-        "Google Gas": "https://news.google.com/rss/search?q=natural+gas+price&hl=en",
-        "Google Carbon": "https://news.google.com/rss/search?q=EU+carbon+ETS&hl=en",
+        f"Google ({selected_commodity})": f"https://news.google.com/rss/search?q={commodity['rss_query']}&hl=en",
+        "Google EU Energy": "https://news.google.com/rss/search?q=European+energy+market&hl=en",
+        "Google EU Carbon": "https://news.google.com/rss/search?q=EU+carbon+ETS&hl=en",
     }
 
     headlines = []
@@ -362,7 +384,7 @@ else:
                 if count >= 3:
                     break
                 title = entry.title
-                if any(kw.lower() in title.lower() for kw in energy_keywords):
+                if any(kw.lower() in title.lower() for kw in nlp_keywords):
                     headlines.append(title)
                     headline_links.append(entry.get('link', ''))
                     headline_sources.append(source_name)
@@ -376,38 +398,101 @@ else:
         headlines = [
             "European gas prices surge amid supply concerns",
             "EU carbon market faces regulatory uncertainty",
-            "TTF natural gas futures decline on mild weather",
             "Energy crisis pushes European inflation higher",
-            "Renewable energy investment hits record in Europe"
+            "Renewable energy investment hits record in Europe",
+            "Oil prices rise on Middle East tensions",
         ]
         headline_links = [''] * len(headlines)
         headline_sources = ['Sample'] * len(headlines)
 
-    sia = SentimentIntensityAnalyzer()
-    sentiment_data = []
-    for i, h in enumerate(headlines):
-        sc = sia.polarity_scores(h)
-        sentiment_data.append({
-            'Headline': h,
-            'Source': headline_sources[i],
-            'Link': headline_links[i],
-            'Compound': sc['compound'],
-            'Positive': sc['pos'],
-            'Negative': sc['neg'],
-            'Neutral': sc['neu'],
-        })
+    # ─── FinBERT via HuggingFace Inference API ───
+    @st.cache_data(ttl=1800, show_spinner="Running FinBERT sentiment analysis...")
+    def finbert_analyze(texts):
+        API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
+        scores = []
+        labels = []
+
+        # Try batch request
+        try:
+            response = req.post(API_URL, json={"inputs": texts}, timeout=30)
+
+            if response.status_code == 503:
+                # Model loading — wait and retry
+                wait_time = response.json().get('estimated_time', 20)
+                time.sleep(min(wait_time, 30))
+                response = req.post(API_URL, json={"inputs": texts}, timeout=30)
+
+            if response.status_code == 200:
+                results = response.json()
+                for result in results:
+                    if isinstance(result, list):
+                        best = max(result, key=lambda x: x['score'])
+                        lbl = best['label'].lower()
+                        sc = best['score']
+                        if lbl == 'negative':
+                            scores.append(-sc)
+                            labels.append('Negative')
+                        elif lbl == 'positive':
+                            scores.append(sc)
+                            labels.append('Positive')
+                        else:
+                            scores.append(0.0)
+                            labels.append('Neutral')
+                    else:
+                        scores.append(0.0)
+                        labels.append('Neutral')
+                return scores, labels, True
+        except Exception:
+            pass
+
+        return None, None, False
+
+    finbert_scores, finbert_labels, finbert_success = finbert_analyze(headlines)
+
+    if finbert_success:
+        nlp_model_name = "FinBERT (ProsusAI/finbert)"
+        sentiment_data = []
+        for i, h in enumerate(headlines):
+            sentiment_data.append({
+                'Headline': h,
+                'Source': headline_sources[i],
+                'Link': headline_links[i],
+                'Score': finbert_scores[i],
+                'Label': finbert_labels[i],
+            })
+    else:
+        # Fallback to VADER
+        nlp_model_name = "VADER (fallback — FinBERT API unavailable)"
+        sia = SentimentIntensityAnalyzer()
+        sentiment_data = []
+        for i, h in enumerate(headlines):
+            sc = sia.polarity_scores(h)
+            score = sc['compound']
+            if score > 0.05:
+                label = 'Positive'
+            elif score < -0.05:
+                label = 'Negative'
+            else:
+                label = 'Neutral'
+            sentiment_data.append({
+                'Headline': h,
+                'Source': headline_sources[i],
+                'Link': headline_links[i],
+                'Score': score,
+                'Label': label,
+            })
 
     sent_df = pd.DataFrame(sentiment_data)
-    avg_score = sent_df['Compound'].mean()
-    n_bull = (sent_df['Compound'] > 0.05).sum()
-    n_bear = (sent_df['Compound'] < -0.05).sum()
-    n_neut = len(sent_df) - n_bull - n_bear
+    avg_score = sent_df['Score'].mean()
+    n_pos = (sent_df['Label'] == 'Positive').sum()
+    n_neg = (sent_df['Label'] == 'Negative').sum()
+    n_neut = (sent_df['Label'] == 'Neutral').sum()
 
     if avg_score > 0.05:
-        sentiment_label = "Bullish"
+        sentiment_label = "Positive"
         sentiment_color = "green"
     elif avg_score < -0.05:
-        sentiment_label = "Bearish"
+        sentiment_label = "Negative"
         sentiment_color = "red"
     else:
         sentiment_label = "Neutral"
@@ -418,74 +503,67 @@ else:
 
     sc1, sc2, sc3, sc4 = st.columns(4)
     sc1.metric("Avg Sentiment", f"{avg_score:.3f}")
-    sc2.metric("Bullish", f"{n_bull}")
-    sc3.metric("Bearish", f"{n_bear}")
+    sc2.metric("Positive", f"{n_pos}")
+    sc3.metric("Negative", f"{n_neg}")
     sc4.metric("Neutral", f"{n_neut}")
 
     if is_live:
-        st.caption(f"Analyzing {len(sent_df)} live headlines from {len(set(headline_sources))} sources")
+        st.caption(f"Analyzing {len(sent_df)} live headlines from {len(set(headline_sources))} sources · Model: {nlp_model_name}")
     else:
-        st.caption("Live feeds unavailable — showing sample headlines")
+        st.caption(f"Live feeds unavailable — showing sample headlines · Model: {nlp_model_name}")
 
     # Sentiment chart
     fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
     bar_colors = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
-                  for s in sent_df['Compound']]
-    ax4.barh(range(len(sent_df)), sent_df['Compound'], color=bar_colors, height=0.6)
+                  for s in sent_df['Score']]
+    ax4.barh(range(len(sent_df)), sent_df['Score'], color=bar_colors, height=0.6)
     ax4.set_yticks(range(len(sent_df)))
     ax4.set_yticklabels([h[:55] + '...' if len(h) > 55 else h for h in sent_df['Headline']],
                         fontsize=7)
     ax4.axvline(x=0, color='black', linewidth=0.5)
     ax4.axvline(x=0.05, color='green', linewidth=0.5, linestyle='--', alpha=0.4)
     ax4.axvline(x=-0.05, color='red', linewidth=0.5, linestyle='--', alpha=0.4)
-    ax4.set_xlabel('Sentiment Score (VADER Compound)')
+    ax4.set_xlabel(f'Sentiment Score ({nlp_model_name.split(" (")[0]})')
     ax4.set_title('Per-Headline Sentiment Distribution')
     ax4.invert_yaxis()
     plt.tight_layout()
     st.pyplot(fig3)
 
-    # Headlines detail — top 3 most positive & top 3 most negative
-    top_bull = sent_df.nlargest(3, 'Compound')
-    top_bear = sent_df.nsmallest(3, 'Compound')
+    # Top positive & negative headlines
+    top_pos = sent_df.nlargest(3, 'Score')
+    top_neg = sent_df.nsmallest(3, 'Score')
 
-    st.write("**Most Bullish Headlines:**")
-    for _, row in top_bull.iterrows():
-        score = row['Compound']
-        link = row['Link']
-        source = row['Source']
-        headline = row['Headline']
-        score_str = f"{score:+.3f}"
-        if link:
-            st.markdown(f"🟢 **[{score_str}]** [{headline}]({link}) — *{source}*")
+    st.write("**Most Positive Headlines:**")
+    for _, row in top_pos.iterrows():
+        score_str = f"{row['Score']:+.3f}"
+        if row['Link']:
+            st.markdown(f"🟢 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
         else:
-            st.markdown(f"🟢 **[{score_str}]** {headline} — *{source}*")
+            st.markdown(f"🟢 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
-    st.write("**Most Bearish Headlines:**")
-    for _, row in top_bear.iterrows():
-        score = row['Compound']
-        link = row['Link']
-        source = row['Source']
-        headline = row['Headline']
-        score_str = f"{score:+.3f}"
-        if link:
-            st.markdown(f"🔴 **[{score_str}]** [{headline}]({link}) — *{source}*")
+    st.write("**Most Negative Headlines:**")
+    for _, row in top_neg.iterrows():
+        score_str = f"{row['Score']:+.3f}"
+        if row['Link']:
+            st.markdown(f"🔴 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
         else:
-            st.markdown(f"🔴 **[{score_str}]** {headline} — *{source}*")
+            st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
     # ─── Section 7: Data Export ───
     st.subheader("Export Data")
 
-    export_df = df_analysis[['Gas Price', 'Carbon Proxy', 'Volatility', 'Rolling Correlation']].copy()
-    export_df['Gas_Daily_Return_%'] = df_analysis['Gas Returns'] * 100
+    export_df = df_analysis[['Price', 'Compare', 'Volatility', 'Rolling Correlation']].copy()
+    export_df.columns = [selected_commodity, compare_label, 'Volatility (%)', 'Rolling Correlation']
+    export_df['Daily_Return_%'] = df_analysis['Returns'] * 100
 
     if 'Regime' in features.columns:
         export_df = export_df.join(features[['Regime']], how='left')
 
     csv = export_df.to_csv()
     st.download_button(
-        label="Download Risk Data (CSV)",
+        label=f"Download {selected_commodity} Risk Data (CSV)",
         data=csv,
-        file_name="energy_risk_data.csv",
+        file_name=f"{selected_commodity.lower().replace(' ', '_')}_risk_data.csv",
         mime="text/csv"
     )
 
