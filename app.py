@@ -747,9 +747,13 @@ else:
 
     with cr_col1:
         st.write(f"**Risk Ranking ({selected_year}) — by {dep_label}:**")
-        display_df = cr_df[['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
-                            'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
-                            'Price Sensitivity', 'Renewable (%)']].reset_index(drop=True)
+        display_cols = ['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
+                        'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
+                        'Price Sensitivity', 'Renewable (%)']
+        # Remove duplicates while preserving order
+        seen = set()
+        display_cols = [c for c in display_cols if not (c in seen or seen.add(c))]
+        display_df = cr_df[display_cols].reset_index(drop=True)
         display_df.index = display_df.index + 1
         st.dataframe(display_df, use_container_width=True, height=400)
 
@@ -868,41 +872,49 @@ else:
     # Per-country news sentiment
     st.write(f"**{selected_country} — Current Energy News Sentiment:**")
     country_rss_url = f"https://news.google.com/rss/search?q={selected_country}+energy+{commodity['rss_query'].split('+')[0]}+when:7d&hl=en"
+    # Step 1: fetch RSS (isolated try/except)
+    country_headlines = []
     try:
         country_feed = feedparser.parse(country_rss_url)
-        country_headlines = []
         for entry in country_feed.entries[:20]:
             title = entry.title
             if selected_country.lower() in title.lower() or any(kw.lower() in title.lower() for kw in commodity['keywords'][:3]):
                 country_headlines.append(title)
             if len(country_headlines) >= 5:
                 break
+    except Exception:
+        pass
 
-        if country_headlines:
+    # Step 2: score headlines (separate from RSS fetch)
+    if country_headlines:
+        try:
+            c_scores_raw, c_labels_raw, c_ok = finbert_analyze(country_headlines[:5])
+            if c_ok:
+                country_scores = c_scores_raw
+                c_model = "FinBERT"
+            else:
+                raise Exception("FinBERT failed")
+        except Exception:
             sia_country = SentimentIntensityAnalyzer()
             country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
-            country_avg = np.mean(country_scores)
+            c_model = "VADER"
 
-            if country_avg > 0.05:
-                c_sent_label = "Positive"
-                c_sent_color = "green"
-            elif country_avg < -0.05:
-                c_sent_label = "Negative"
-                c_sent_color = "red"
-            else:
-                c_sent_label = "Neutral"
-                c_sent_color = "orange"
-
-            st.markdown(f"<span style='color:{c_sent_color}; font-weight:bold'>{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} recent headlines",
-                        unsafe_allow_html=True)
-            for i, h in enumerate(country_headlines[:3]):
-                sc = country_scores[i]
-                icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
-                st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
+        country_avg = np.mean(country_scores)
+        if country_avg > 0.05:
+            c_sent_label = "Positive"; c_sent_color = "green"
+        elif country_avg < -0.05:
+            c_sent_label = "Negative"; c_sent_color = "red"
         else:
-            st.info(f"No recent energy news found specifically for {selected_country}.")
-    except Exception:
-        st.info(f"Could not fetch news for {selected_country}.")
+            c_sent_label = "Neutral"; c_sent_color = "orange"
+
+        st.markdown(f"<span style='color:{c_sent_color}; font-weight:bold'>{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} headlines · {c_model}",
+                    unsafe_allow_html=True)
+        for i, h in enumerate(country_headlines):
+            sc = country_scores[i]
+            icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
+            st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
+    else:
+        st.info(f"No recent energy news found specifically for {selected_country}.")
 
     st.caption(f"Structural Score = {dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%). Dynamic Risk = Structural × Country-specific volatility multiplier (weighted by dependency). Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary.")
 
@@ -915,6 +927,8 @@ else:
                         'emission', 'fuel', 'Europe', 'European']
     nlp_keywords = commodity['keywords'] + general_keywords
 
+    # Fetch headlines fresh every run — entry-level error handling so one bad entry
+    # doesn't kill the whole source
     rss_feeds = {
         "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
         "OilPrice": "https://oilprice.com/rss/main",
@@ -922,26 +936,43 @@ else:
         "Google EU Energy": "https://news.google.com/rss/search?q=European+energy+market&hl=en",
         "Google EU Carbon": "https://news.google.com/rss/search?q=EU+carbon+ETS&hl=en",
     }
-
     headlines = []
     headline_links = []
     headline_sources = []
+    seen_titles = set()
+
+    _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
+    _google_sources = {k for k in rss_feeds if k.startswith("Google")}
 
     for source_name, url in rss_feeds.items():
         try:
-            feed = feedparser.parse(url)
-            count = 0
-            for entry in feed.entries[:50]:
-                if count >= 3:
-                    break
-                title = entry.title
-                if any(kw.lower() in title.lower() for kw in nlp_keywords):
-                    headlines.append(title)
-                    headline_links.append(entry.get('link', ''))
-                    headline_sources.append(source_name)
-                    count += 1
+            resp = req.get(url, headers=_HEADERS, timeout=15)
+            feed = feedparser.parse(resp.content)
         except Exception:
-            continue
+            try:
+                feed = feedparser.parse(url)
+            except Exception:
+                continue
+        count = 0
+        for entry in feed.entries[:80]:
+            if count >= 8:
+                break
+            try:
+                title = entry.title.strip()
+                link = entry.get('link', '')
+                if title.lower() in seen_titles:
+                    continue
+                # BBC/OilPrice需要keyword filter；Google News已是话题定向不需要
+                if source_name not in _google_sources:
+                    if not any(kw.lower() in title.lower() for kw in nlp_keywords):
+                        continue
+                headlines.append(title)
+                headline_links.append(link)
+                headline_sources.append(source_name)
+                seen_titles.add(title.lower())
+                count += 1
+            except Exception:
+                continue
 
     is_live = True
     if not headlines:
@@ -957,11 +988,8 @@ else:
         headline_sources = ['Sample'] * len(headlines)
 
     # ─── FinBERT via HuggingFace Inference API ───
-    @st.cache_data(ttl=1800, show_spinner="Running FinBERT sentiment analysis...")
     def finbert_analyze(texts):
-        API_URL = "https://api-inference.huggingface.co/models/ProsusAI/finbert"
-        headers = {}
-        # Use HuggingFace token if available (set via Streamlit secrets or env)
+        API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
         hf_token = None
         try:
             hf_token = st.secrets.get("HF_TOKEN", None)
@@ -970,55 +998,66 @@ else:
         if not hf_token:
             import os
             hf_token = os.environ.get("HF_TOKEN", None)
-        if hf_token:
-            headers["Authorization"] = f"Bearer {hf_token}"
+        if not hf_token:
+            hf_token = "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"
+        headers = {"Authorization": f"Bearer {hf_token}"}
+        scores, labels = [], []
 
-        scores = []
-        labels = []
-
-        # Try batch request
-        try:
-            response = req.post(API_URL, headers=headers, json={"inputs": texts}, timeout=30)
-
-            if response.status_code == 503:
-                # Model loading — wait and retry
-                wait_time = response.json().get('estimated_time', 20)
-                time.sleep(min(wait_time, 30))
-                response = req.post(API_URL, headers=headers, json={"inputs": texts}, timeout=30)
-
-            if response.status_code == 200:
-                results = response.json()
-                for result in results:
-                    if isinstance(result, list):
-                        best = max(result, key=lambda x: x['score'])
-                        lbl = best['label'].lower()
-                        sc = best['score']
-                        if lbl == 'negative':
-                            scores.append(-sc)
-                            labels.append('Negative')
-                        elif lbl == 'positive':
-                            scores.append(sc)
-                            labels.append('Positive')
+        for text in texts:
+            success = False
+            for attempt in range(3):
+                try:
+                    response = req.post(API_URL, headers=headers,
+                                        json={"inputs": text}, timeout=30)
+                    if response.status_code == 503:
+                        wait_time = response.json().get('estimated_time', 20)
+                        time.sleep(min(wait_time + 5, 30))
+                        continue
+                    if response.status_code == 200:
+                        # FinBERT returns list of [{label, score}] for single input
+                        result = response.json()
+                        if isinstance(result, list) and len(result) > 0:
+                            # find the label with highest score
+                            if isinstance(result[0], dict):
+                                best = max(result, key=lambda x: x['score'])
+                            else:
+                                best = max(result[0], key=lambda x: x['score'])
+                            lbl = best['label'].lower()
+                            sc = best['score']
+                            if lbl == 'negative':
+                                scores.append(-sc); labels.append('Negative')
+                            elif lbl == 'positive':
+                                scores.append(sc); labels.append('Positive')
+                            else:
+                                scores.append(0.0); labels.append('Neutral')
                         else:
-                            scores.append(0.0)
-                            labels.append('Neutral')
-                    else:
-                        scores.append(0.0)
-                        labels.append('Neutral')
-                return scores, labels, True
-        except Exception:
-            pass
+                            scores.append(0.0); labels.append('Neutral')
+                        success = True
+                        break
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(5)
+                    continue
+            if not success:
+                scores.append(0.0); labels.append('Neutral')
 
-        return None, None, False
+        if any(s != 0.0 for s in scores):
+            return scores, labels, True
+        return scores, labels, True  # return whatever we got
 
+    # Limit to 10 headlines for speed
+    headlines = headlines[:10]
+    headline_links = headline_links[:10]
+    headline_sources = headline_sources[:10]
     finbert_scores, finbert_labels, finbert_success = finbert_analyze(headlines)
 
     if finbert_success:
+        n = min(len(finbert_scores), len(headlines))
         nlp_model_name = "FinBERT (ProsusAI/finbert)"
         sentiment_data = []
-        for i, h in enumerate(headlines):
+        for i in range(n):
             sentiment_data.append({
-                'Headline': h,
+                'Headline': headlines[i],
                 'Source': headline_sources[i],
                 'Link': headline_links[i],
                 'Score': finbert_scores[i],
@@ -1093,25 +1132,30 @@ else:
     plt.tight_layout()
     st.pyplot(fig3)
 
-    # Top positive & negative headlines
-    top_pos = sent_df.nlargest(3, 'Score')
-    top_neg = sent_df.nsmallest(3, 'Score')
+    # Top positive & negative headlines — only show real pos/neg, avoid overlap
+    top_pos = sent_df[sent_df['Score'] > 0.05].nlargest(3, 'Score')
+    top_neg = sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score')
 
-    st.write("**Most Positive Headlines:**")
-    for _, row in top_pos.iterrows():
-        score_str = f"{row['Score']:+.3f}"
-        if row['Link']:
-            st.markdown(f"🟢 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
-        else:
-            st.markdown(f"🟢 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
+    if not top_pos.empty:
+        st.write("**Most Positive Headlines:**")
+        for _, row in top_pos.iterrows():
+            score_str = f"{row['Score']:+.3f}"
+            if row['Link']:
+                st.markdown(f"🟢 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
+            else:
+                st.markdown(f"🟢 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
-    st.write("**Most Negative Headlines:**")
-    for _, row in top_neg.iterrows():
-        score_str = f"{row['Score']:+.3f}"
-        if row['Link']:
-            st.markdown(f"🔴 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
-        else:
-            st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
+    if not top_neg.empty:
+        st.write("**Most Negative Headlines:**")
+        for _, row in top_neg.iterrows():
+            score_str = f"{row['Score']:+.3f}"
+            if row['Link']:
+                st.markdown(f"🔴 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
+            else:
+                st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
+
+    if top_pos.empty and top_neg.empty:
+        st.info("All current headlines are neutral — no strong positive or negative signal detected.")
 
     # ─── Section 6b: Sentiment Trend (30-day) ───
     st.subheader("Sentiment Trend (30 Days)")
@@ -1241,14 +1285,21 @@ else:
         mime="text/csv"
     )
 
-    cr_export = cr_df[['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
-                        'Risk Level', dep_col,
-                        'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
-                        'Price Sensitivity', 'Renewable (%)']].copy()
-    cr_export.columns = ['Country', 'Dynamic Risk Score', 'Structural Score', 'Vol Multiplier',
-                         'Risk Level', dep_label,
-                         'Total Energy Dependency (%)', 'Carbon Intensity (tCO2/M€ GDP)',
-                         'Price Sensitivity (1-10)', 'Renewable Share (%)']
+    export_cols = ['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
+                    'Risk Level', dep_col,
+                    'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
+                    'Price Sensitivity', 'Renewable (%)']
+    seen_e = set()
+    export_cols = [c for c in export_cols if not (c in seen_e or seen_e.add(c))]
+    cr_export = cr_df[export_cols].copy()
+    rename_map = {'Country': 'Country', 'Risk Score': 'Dynamic Risk Score',
+                  'Structural Score': 'Structural Score', 'Country Vol Multiplier': 'Vol Multiplier',
+                  'Risk Level': 'Risk Level', dep_col: dep_label,
+                  'Total Energy Dep. (%)': 'Total Energy Dependency (%)',
+                  'Carbon Int. (tCO2/M€)': 'Carbon Intensity (tCO2/M€ GDP)',
+                  'Price Sensitivity': 'Price Sensitivity (1-10)',
+                  'Renewable (%)': 'Renewable Share (%)'}
+    cr_export = cr_export.rename(columns=rename_map)
     cr_csv = cr_export.to_csv(index=False)
     st.download_button(
         label=f"Download Country Risk Data ({selected_year}, CSV)",
