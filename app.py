@@ -549,6 +549,108 @@ else:
         else:
             st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
+    # ─── Section 6b: Sentiment Trend (30-day) ───
+    st.subheader("Sentiment Trend (30 Days)")
+    st.write(f"Daily average sentiment for {selected_commodity}-related European energy news over the past 30 days")
+
+    @st.cache_data(ttl=7200, show_spinner="Fetching 30-day news history...")
+    def get_sentiment_trend(rss_query, keywords):
+        """Fetch past 30 days of news via Google News RSS and compute daily sentiment."""
+        from datetime import datetime, timedelta
+
+        sia_trend = SentimentIntensityAnalyzer()
+        daily_scores = {}
+
+        # Google News RSS with 'when:30d' fetches past 30 days
+        trend_url = f"https://news.google.com/rss/search?q={rss_query}+when:30d&hl=en"
+        try:
+            feed = feedparser.parse(trend_url)
+            for entry in feed.entries[:100]:
+                title = entry.title
+                if not any(kw.lower() in title.lower() for kw in keywords):
+                    continue
+
+                # Parse published date
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
+                else:
+                    continue
+
+                score = sia_trend.polarity_scores(title)['compound']
+
+                if pub_date not in daily_scores:
+                    daily_scores[pub_date] = []
+                daily_scores[pub_date].append(score)
+        except Exception:
+            pass
+
+        # Also add a second query for broader coverage
+        trend_url2 = f"https://news.google.com/rss/search?q=European+energy+{rss_query.split('+')[0]}+when:30d&hl=en"
+        try:
+            feed2 = feedparser.parse(trend_url2)
+            for entry in feed2.entries[:100]:
+                title = entry.title
+                if not any(kw.lower() in title.lower() for kw in keywords):
+                    continue
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
+                else:
+                    continue
+                score = sia_trend.polarity_scores(title)['compound']
+                if pub_date not in daily_scores:
+                    daily_scores[pub_date] = []
+                daily_scores[pub_date].append(score)
+        except Exception:
+            pass
+
+        if not daily_scores:
+            return None
+
+        trend_df = pd.DataFrame([
+            {'Date': date, 'Avg Sentiment': np.mean(scores), 'Headlines Count': len(scores)}
+            for date, scores in daily_scores.items()
+        ])
+        trend_df['Date'] = pd.to_datetime(trend_df['Date'])
+        trend_df = trend_df.sort_values('Date')
+        return trend_df
+
+    trend_keywords = commodity['keywords'] + ['energy', 'Europe', 'European']
+    trend_df = get_sentiment_trend(commodity['rss_query'], trend_keywords)
+
+    if trend_df is not None and len(trend_df) > 3:
+        # Today's sentiment
+        today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+        today_sent = trend_df[trend_df['Date'] == today_str]
+        avg_30d = trend_df['Avg Sentiment'].mean()
+
+        tc1, tc2, tc3 = st.columns(3)
+        if len(today_sent) > 0:
+            tc1.metric("Today's Avg Sentiment", f"{today_sent['Avg Sentiment'].iloc[0]:.3f}")
+            tc2.metric("Today's Headlines", f"{int(today_sent['Headlines Count'].iloc[0])}")
+        else:
+            tc1.metric("Today's Avg Sentiment", "N/A")
+            tc2.metric("Today's Headlines", "0")
+        tc3.metric("30-Day Avg Sentiment", f"{avg_30d:.3f}")
+
+        # Trend chart
+        fig_trend, ax_trend = plt.subplots(figsize=(14, 4))
+        colors_trend = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
+                        for s in trend_df['Avg Sentiment']]
+        ax_trend.bar(trend_df['Date'], trend_df['Avg Sentiment'], color=colors_trend, alpha=0.7, width=0.8)
+        ax_trend.axhline(y=0, color='black', linewidth=0.5)
+        ax_trend.axhline(y=avg_30d, color='blue', linewidth=1, linestyle='--', alpha=0.5,
+                        label=f'30-day avg: {avg_30d:.3f}')
+        ax_trend.set_ylabel('Daily Avg Sentiment')
+        ax_trend.set_title(f'{selected_commodity} — 30-Day Sentiment Trend')
+        ax_trend.legend(fontsize=8)
+        ax_trend.tick_params(axis='x', rotation=45)
+        plt.tight_layout()
+        st.pyplot(fig_trend)
+
+        st.caption(f"Based on {int(trend_df['Headlines Count'].sum())} headlines over {len(trend_df)} days · Scored with VADER (trend) + FinBERT (current)")
+    else:
+        st.info("Not enough historical headline data to generate trend. This improves over time as more news is collected.")
+
     # ─── Section 7: Data Export ───
     st.subheader("Export Data")
 
