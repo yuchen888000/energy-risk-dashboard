@@ -16,6 +16,7 @@ Multi-commodity risk analytics platform supporting TTF Natural Gas, WTI Crude Oi
 - **GARCH Volatility Forecast** — Forward-looking 10-day volatility prediction using GARCH(1,1)
 - **Price Trends** — Dual-axis chart with annotated EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM)
 - **Market Regime Detection** — K-Means clustering + absolute volatility thresholds: Calm, Volatile, Crisis
+- **Country Energy Risk** — Composite risk scoring for 25 EU countries based on gas dependency, carbon intensity, energy imports, and renewable share. Interactive ranking + country detail view.
 - **FinBERT Sentiment** — Transformer-based financial sentiment analysis on live European energy news (fallback to VADER)
 - **Data Export** — Download risk and sentiment data as CSV
 

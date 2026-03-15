@@ -71,6 +71,10 @@ with st.sidebar:
     **AI / ML**
     - **Hybrid Regime Detection**: K-Means clustering + absolute 
       volatility thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%).
+    - **Country Risk Scoring**: Composite index of gas/oil dependency, 
+      carbon intensity, energy import share, renewable share across 29 
+      European countries. Structural scores are multiplied by real-time 
+      market volatility to create dynamic risk assessment.
 
     **NLP**
     - **FinBERT Sentiment**: Transformer model fine-tuned on financial 
@@ -354,6 +358,300 @@ else:
     with rcol2:
         st.write("**Regime Statistics:**")
         st.dataframe(regime_stats, use_container_width=True)
+
+
+    # ─── Section 5b: European Country Energy Risk ───
+    st.subheader("European Country Energy Risk Exposure")
+    st.write("Which European countries are most vulnerable to energy price shocks?")
+    st.caption("Coverage: EU-27 + Switzerland, UK, Norway, Turkey · Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren), IEA, EEA")
+
+    COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
+                 'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
+                 'Hungary', 'Romania', 'Bulgaria', 'Finland', 'Sweden',
+                 'Denmark', 'Ireland', 'Portugal', 'Lithuania', 'Latvia',
+                 'Estonia', 'Slovakia', 'Croatia', 'Slovenia', 'Luxembourg',
+                 'Switzerland', 'United Kingdom', 'Norway', 'Turkey']
+
+    # Eurostat nrg_ind_id G3000 — Gas import dependency (%)
+    gas_dep = {
+        2020: [89,98,93,99,0,79,100,82,99,98,85,78,96,97,6,67,100,100,100,100,100,86,55,99,100,100,48,0,99],
+        2021: [91,98,93,99,5,82,100,81,99,97,85,76,94,96,8,60,100,100,100,100,100,85,57,99,100,100,47,0,99],
+        2022: [95,98,93,99,15,78,100,80,99,97,85,75,92,95,10,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
+        2023: [95,98,93,99,68,78,100,80,99,97,85,75,92,95,12,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
+        2024: [94,98,93,99,70,77,100,80,99,97,84,74,91,94,12,54,100,100,100,100,100,84,58,99,100,100,46,0,99],
+    }
+    # Eurostat nrg_ind_id O4100_TOT — Oil import dependency (%)
+    oil_dep = {
+        2020: [96,98,92,99,95,97,99,93,100,97,82,45,100,91,100,100,100,100,100,100,60,92,82,100,100,100,92,0,93],
+        2021: [96,98,92,99,96,97,99,93,100,97,83,44,100,90,100,100,100,100,100,100,58,92,80,100,100,100,93,0,93],
+        2022: [96,98,93,99,96,97,99,94,100,97,84,42,100,90,100,100,100,100,100,100,55,92,78,100,100,100,94,0,92],
+        2023: [97,98,93,99,96,97,99,94,100,97,84,40,100,90,100,100,100,100,100,100,52,92,76,100,100,100,95,0,92],
+        2024: [97,98,93,99,96,97,99,94,100,97,84,39,100,90,100,100,100,100,100,100,50,92,75,100,100,100,95,0,92],
+    }
+    # Eurostat sdg_07_50 — Total energy dependency (%)
+    total_dep = {
+        2020: [64,47,73,73,45,42,78,60,81,37,55,28,37,42,33,44,86,65,74,46,10,54,53,48,95,75,36,-580,72],
+        2021: [64,47,74,73,46,41,78,61,81,37,55,28,37,43,31,45,86,65,74,45,8,53,52,48,95,75,35,-600,72],
+        2022: [63,47,75,73,46,40,78,62,83,37,55,28,37,45,29,47,86,65,74,45,6,53,52,48,95,75,35,-620,72],
+        2023: [63,47,75,73,46,40,78,62,81,37,55,28,37,45,29,47,86,65,74,45,3,53,52,48,95,75,35,-650,72],
+        2024: [62,46,74,72,45,39,77,61,80,36,54,27,36,44,28,46,85,64,73,44,3,52,51,47,94,74,34,-660,71],
+    }
+    # Eurostat nrg_ind_ren — Renewable share (%)
+    ren_share = {
+        2020: [19,19,20,21,14,16,13,37,22,17,14,24,23,44,60,42,16,34,26,42,28,17,31,25,11,28,13,78,18],
+        2021: [19,19,19,21,13,16,13,36,22,17,14,24,23,44,63,42,12,34,27,42,28,17,31,25,11,29,14,80,18],
+        2022: [21,21,19,22,15,17,13,36,22,18,14,24,23,47,60,42,13,34,28,43,30,17,31,25,12,30,15,85,19],
+        2023: [22,22,19,24,17,17,14,36,23,18,14,28,24,48,66,44,14,35,30,44,38,18,32,26,12,32,16,98,20],
+        2024: [23,23,20,25,18,18,15,37,24,19,15,29,25,49,67,45,15,36,32,45,40,19,33,27,13,33,17,98,21],
+    }
+    # EEA / Eurostat — Carbon intensity (tCO2/M€ GDP)
+    carbon_int = {
+        2020: [195,100,150,130,170,400,160,120,220,300,260,340,480,140,65,110,115,130,200,180,370,250,175,170,100,60,135,80,320],
+        2021: [190,98,148,125,165,395,158,118,215,295,255,335,470,135,62,108,112,128,198,178,365,245,172,168,98,58,132,78,315],
+        2022: [185,96,145,122,162,385,156,116,212,292,252,325,460,132,60,106,110,126,196,176,355,242,170,166,96,56,130,76,312],
+        2023: [180,95,145,120,160,380,155,115,210,290,250,320,450,130,58,105,108,125,195,175,350,240,170,165,95,55,128,75,310],
+        2024: [176,93,142,118,157,375,152,113,208,287,247,315,445,128,56,103,106,123,192,172,345,237,168,163,93,54,126,73,305],
+    }
+
+    # Energy Price Sensitivity (1-10 scale) — measures economic exposure to energy price shocks
+    # Based on: energy intensity of GDP (Eurostat nrg_ind_ei), gas share in energy mix, industry gas consumption
+    price_sens = {
+        2020: [9.0,7.2,8.5,7.0,8.2,7.0,7.8,7.5,8.2,7.2,7.5,6.8,7.5,7.5,3.2,5.5,6.8,6.5,8.0,7.2,7.5,7.0,5.8,6.2,6.0,6.8,7.8,2.2,8.5],
+        2021: [9.1,7.3,8.6,7.1,8.3,7.0,7.9,7.6,8.3,7.1,7.5,6.7,7.4,7.6,3.3,5.6,6.9,6.6,8.1,7.3,7.6,7.1,5.9,6.3,6.1,6.9,7.9,2.1,8.5],
+        2022: [9.5,7.8,9.0,7.5,8.8,7.2,8.2,8.0,8.8,7.3,7.8,6.8,7.5,8.0,3.5,5.8,7.2,7.0,8.5,7.8,8.0,7.3,6.2,6.8,6.5,7.2,8.2,2.0,8.8],
+        2023: [9.2,7.5,8.8,7.2,8.5,6.8,8.0,7.8,8.5,7.0,7.5,6.5,7.2,7.8,3.5,5.8,7.0,6.8,8.2,7.5,7.8,7.2,6.0,6.5,6.2,7.0,8.0,2.0,8.5],
+        2024: [9.0,7.3,8.6,7.0,8.3,6.6,7.8,7.6,8.3,6.8,7.3,6.3,7.0,7.6,3.4,5.6,6.8,6.6,8.0,7.3,7.6,7.0,5.8,6.3,6.0,6.8,7.8,1.8,8.3],
+    }
+
+    selected_year = st.slider("Select Year", min_value=2020, max_value=2024, value=2024, step=1)
+
+    cr_df = pd.DataFrame({
+        'Country': COUNTRIES,
+        'Gas Dep. (%)': gas_dep[selected_year],
+        'Oil Dep. (%)': oil_dep[selected_year],
+        'Total Energy Dep. (%)': total_dep[selected_year],
+        'Renewable (%)': ren_share[selected_year],
+        'Carbon Int. (tCO2/M€)': carbon_int[selected_year],
+        'Price Sensitivity': price_sens[selected_year],
+    })
+
+    # Commodity-aware dependency column
+    if selected_commodity in ['TTF Natural Gas']:
+        dep_col = 'Gas Dep. (%)'
+        dep_label = 'Gas Import Dependency'
+    elif selected_commodity in ['WTI Crude Oil', 'Brent Crude Oil']:
+        dep_col = 'Oil Dep. (%)'
+        dep_label = 'Oil Import Dependency'
+    else:
+        dep_col = 'Total Energy Dep. (%)'
+        dep_label = 'Total Energy Dependency'
+
+    cr_df['Dep Clipped'] = cr_df[dep_col].clip(lower=0)
+    cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)
+
+    # Static structural risk score
+    cr_df['Structural Score'] = (
+        cr_df['Dep Clipped'] * 0.25 +
+        cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.15 +
+        cr_df['Total Clipped'] * 0.15 +
+        (100 - cr_df['Renewable (%)']) * 0.15 +
+        cr_df['Dep Clipped'].rank(pct=True) * 100 * 0.15 +
+        cr_df['Price Sensitivity'] * 10 * 0.15
+    ).round(1)
+
+    # Dynamic risk = structural vulnerability × country-specific volatility impact
+    # Countries with higher dependency feel the same market volatility much more
+    vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
+    vol_ratio_clamped = min(max(vol_ratio, 0.5), 3.0)
+
+    # Country-specific multiplier: base vol_ratio weighted by dependency
+    # High dependency country (99%) gets full multiplier, low dependency (10%) gets much less
+    cr_df['Country Vol Multiplier'] = (
+        0.5 + 0.5 * vol_ratio_clamped * (cr_df['Dep Clipped'] / 100)
+    ).round(2)
+    # Floor at 0.5 so no country goes to zero risk
+
+    cr_df['Risk Score'] = (cr_df['Structural Score'] * cr_df['Country Vol Multiplier']).round(1)
+
+    cr_df = cr_df.sort_values('Risk Score', ascending=False)
+
+    def risk_category(score):
+        if score > 70:
+            return '🔴 High'
+        elif score > 50:
+            return '🟡 Medium'
+        else:
+            return '🟢 Low'
+
+    cr_df['Risk Level'] = cr_df['Risk Score'].apply(risk_category)
+
+    st.markdown(f"**Real-time risk adjustment:** Current {selected_commodity} volatility is **{latest_vol:.1f}%** "
+                f"vs average **{avg_vol:.1f}%** → base volatility ratio = **{vol_ratio_clamped:.2f}x**")
+    st.caption("Each country's multiplier is weighted by its own dependency — high-dependency countries "
+               "feel the same market volatility much more than low-dependency ones.")
+
+    cr_col1, cr_col2 = st.columns([1, 1])
+
+    with cr_col1:
+        st.write(f"**Risk Ranking ({selected_year}) — by {dep_label}:**")
+        display_df = cr_df[['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
+                            'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
+                            'Price Sensitivity', 'Renewable (%)']].reset_index(drop=True)
+        display_df.index = display_df.index + 1
+        st.dataframe(display_df, use_container_width=True, height=400)
+
+    with cr_col2:
+        selected_country = st.selectbox("Select Country for Detail", cr_df['Country'].tolist())
+        country_data = cr_df[cr_df['Country'] == selected_country].iloc[0]
+
+        # Country-specific real-time risk signal (same format as top section)
+        country_dep_val = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
+        country_adj_vol = latest_vol * country_dep_val
+        country_adj_var = var_95 * country_dep_val
+
+        if country_adj_vol > 6:
+            c_risk_level = "🔴 HIGH RISK"
+            c_risk_color = "red"
+        elif country_adj_vol > 3:
+            c_risk_level = "🟡 MEDIUM RISK"
+            c_risk_color = "orange"
+        else:
+            c_risk_level = "🟢 LOW RISK"
+            c_risk_color = "green"
+
+        st.markdown(f"### {selected_country} ({selected_year})")
+        st.markdown(f"<h3 style='color:{c_risk_color}'>{c_risk_level}</h3>",
+                    unsafe_allow_html=True)
+
+        cr_m1, cr_m2 = st.columns(2)
+        cr_m1.metric("Adjusted Volatility (live)", f"{country_adj_vol:.2f}%")
+        cr_m2.metric("Adjusted VaR 95% (live)", f"{country_adj_var:.2f}%")
+
+        cd1, cd2 = st.columns(2)
+        cd1.metric(dep_label, f"{country_data[dep_col]:.0f}%")
+        cd2.metric("Carbon Intensity", f"{country_data['Carbon Int. (tCO2/M€)']:.0f} tCO2/M€")
+        cd3, cd4 = st.columns(2)
+        cd3.metric("Total Energy Dep.", f"{country_data['Total Energy Dep. (%)']:.0f}%")
+        cd4.metric("Renewable Share", f"{country_data['Renewable (%)']:.0f}%")
+        cd5, cd6 = st.columns(2)
+        cd5.metric("Price Sensitivity", f"{country_data['Price Sensitivity']:.1f}/10")
+        cd6.metric("Structural Score", f"{country_data['Structural Score']:.1f}")
+        cd7, cd8 = st.columns(2)
+        cd7.metric("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x")
+        cd8.metric("Dynamic Risk Score", f"{country_data['Risk Score']:.1f}")
+
+    # Bar chart
+    fig_cr, ax_cr = plt.subplots(figsize=(14, 6))
+    top_n = cr_df.head(20)
+    bar_colors_cr = ['red' if s > 70 else 'orange' if s > 50 else 'green' for s in top_n['Risk Score']]
+    ax_cr.barh(range(len(top_n)), top_n['Risk Score'], color=bar_colors_cr, height=0.6)
+    ax_cr.set_yticks(range(len(top_n)))
+    ax_cr.set_yticklabels(top_n['Country'], fontsize=9)
+    ax_cr.set_xlabel('Composite Energy Risk Score')
+    ax_cr.set_title(f'European Countries — Energy Risk Ranking ({selected_year}, by {dep_label})')
+    ax_cr.axvline(x=70, color='red', linewidth=1, linestyle='--', alpha=0.4, label='High risk')
+    ax_cr.axvline(x=50, color='orange', linewidth=1, linestyle='--', alpha=0.4, label='Medium risk')
+    ax_cr.legend(fontsize=8)
+    ax_cr.invert_yaxis()
+    plt.tight_layout()
+    st.pyplot(fig_cr)
+
+    # Year-over-year trend for selected country
+    st.write(f"**{selected_country} — Risk Trend 2020–2024:**")
+    trend_data = []
+    for yr in [2020, 2021, 2022, 2023, 2024]:
+        idx = COUNTRIES.index(selected_country)
+        if selected_commodity in ['TTF Natural Gas']:
+            dep_val = gas_dep[yr][idx]
+        elif selected_commodity in ['WTI Crude Oil', 'Brent Crude Oil']:
+            dep_val = oil_dep[yr][idx]
+        else:
+            dep_val = max(total_dep[yr][idx], 0)
+        trend_data.append({
+            'Year': yr,
+            dep_label + ' (%)': dep_val,
+            'Renewable (%)': ren_share[yr][idx],
+            'Carbon Intensity': carbon_int[yr][idx],
+        })
+    trend_cr = pd.DataFrame(trend_data)
+
+    fig_tcr, (ax_t1, ax_t2) = plt.subplots(1, 2, figsize=(14, 3.5))
+    ax_t1.plot(trend_cr['Year'], trend_cr[dep_label + ' (%)'], 'o-', color='red', label=dep_label)
+    ax_t1.plot(trend_cr['Year'], trend_cr['Renewable (%)'], 's-', color='green', label='Renewable Share')
+    ax_t1.set_ylabel('Percentage (%)')
+    ax_t1.set_title(f'{selected_country} — Dependency vs Renewables')
+    ax_t1.legend(fontsize=8)
+    ax_t1.set_xticks([2020, 2021, 2022, 2023, 2024])
+
+    ax_t2.bar(trend_cr['Year'], trend_cr['Carbon Intensity'], color='gray', alpha=0.7)
+    ax_t2.set_ylabel('tCO2/M€ GDP')
+    ax_t2.set_title(f'{selected_country} — Carbon Intensity Trend')
+    ax_t2.set_xticks([2020, 2021, 2022, 2023, 2024])
+
+    plt.tight_layout()
+    st.pyplot(fig_tcr)
+
+    # Per-country real-time adjusted volatility
+    st.write(f"**{selected_country} — Real-Time Adjusted Volatility:**")
+    country_dep_pct = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
+    country_vol = df_analysis['Volatility'].dropna() * country_dep_pct
+
+    fig_cvol, ax_cvol = plt.subplots(figsize=(14, 3.5))
+    ax_cvol.plot(df_analysis['Volatility'].dropna().index, df_analysis['Volatility'].dropna(),
+                 color='gray', linewidth=0.8, alpha=0.4, label=f'{selected_commodity} raw volatility')
+    ax_cvol.plot(country_vol.index, country_vol,
+                 color='red', linewidth=1.5, label=f'{selected_country} adjusted ({country_data[dep_col]:.0f}% dep.)')
+    ax_cvol.axhline(y=6, color='orange', linewidth=0.8, linestyle='--', alpha=0.4)
+    ax_cvol.axhline(y=12, color='red', linewidth=0.8, linestyle='--', alpha=0.4)
+    ax_cvol.set_ylabel('Adjusted Volatility (%)')
+    ax_cvol.set_title(f'{selected_country} — Dependency-Weighted Volatility (Live)')
+    ax_cvol.legend(fontsize=8)
+    ax_cvol.fill_between(country_vol.index, country_vol, 0, alpha=0.1, color='red')
+    plt.tight_layout()
+    st.pyplot(fig_cvol)
+    st.caption(f"Adjusted volatility = {selected_commodity} 30-day rolling volatility × {selected_country}'s {dep_label.lower()} ({country_data[dep_col]:.0f}%). "
+               f"Current: {country_vol.iloc[-1]:.2f}%")
+
+    # Per-country news sentiment
+    st.write(f"**{selected_country} — Current Energy News Sentiment:**")
+    country_rss_url = f"https://news.google.com/rss/search?q={selected_country}+energy+{commodity['rss_query'].split('+')[0]}+when:7d&hl=en"
+    try:
+        country_feed = feedparser.parse(country_rss_url)
+        country_headlines = []
+        for entry in country_feed.entries[:20]:
+            title = entry.title
+            if selected_country.lower() in title.lower() or any(kw.lower() in title.lower() for kw in commodity['keywords'][:3]):
+                country_headlines.append(title)
+            if len(country_headlines) >= 5:
+                break
+
+        if country_headlines:
+            sia_country = SentimentIntensityAnalyzer()
+            country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
+            country_avg = np.mean(country_scores)
+
+            if country_avg > 0.05:
+                c_sent_label = "Positive"
+                c_sent_color = "green"
+            elif country_avg < -0.05:
+                c_sent_label = "Negative"
+                c_sent_color = "red"
+            else:
+                c_sent_label = "Neutral"
+                c_sent_color = "orange"
+
+            st.markdown(f"<span style='color:{c_sent_color}; font-weight:bold'>{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} recent headlines",
+                        unsafe_allow_html=True)
+            for i, h in enumerate(country_headlines[:3]):
+                sc = country_scores[i]
+                icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
+                st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
+        else:
+            st.info(f"No recent energy news found specifically for {selected_country}.")
+    except Exception:
+        st.info(f"Could not fetch news for {selected_country}.")
+
+    st.caption(f"Structural Score = {dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%). Dynamic Risk = Structural × Country-specific volatility multiplier (weighted by dependency). Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary.")
 
     # ─── Section 6: NLP Sentiment (FinBERT) ───
     st.subheader(f"Energy News Sentiment — {selected_commodity}")
@@ -674,5 +972,21 @@ else:
         label="Download Sentiment Data (CSV)",
         data=sent_csv,
         file_name="sentiment_data.csv",
+        mime="text/csv"
+    )
+
+    cr_export = cr_df[['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
+                        'Risk Level', dep_col,
+                        'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
+                        'Price Sensitivity', 'Renewable (%)']].copy()
+    cr_export.columns = ['Country', 'Dynamic Risk Score', 'Structural Score', 'Vol Multiplier',
+                         'Risk Level', dep_label,
+                         'Total Energy Dependency (%)', 'Carbon Intensity (tCO2/M€ GDP)',
+                         'Price Sensitivity (1-10)', 'Renewable Share (%)']
+    cr_csv = cr_export.to_csv(index=False)
+    st.download_button(
+        label=f"Download Country Risk Data ({selected_year}, CSV)",
+        data=cr_csv,
+        file_name=f"country_risk_{selected_year}.csv",
         mime="text/csv"
     )
