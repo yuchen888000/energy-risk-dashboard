@@ -40,7 +40,7 @@ COMMODITIES = {
     },
     "EU Carbon Allowance": {
         "ticker": "KEUA",
-        "unit": "$/share (EUA futures)",
+        "unit": "€/tCO2",
         "color": "seagreen",
         "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
         "rss_query": "EU+carbon+ETS+emission+price",
@@ -55,15 +55,15 @@ with st.sidebar:
 
     st.markdown("---")
     st.title("Methodology")
+    compare_text = "TTF Natural Gas (`TTF=F`)" if commodity['ticker'] == 'KEUA' else "EU Carbon Allowance (`KEUA`) — directly tracks EU ETS carbon futures. Falls back to ICLN if unavailable."
     st.markdown(f"""
     **Selected: {selected_commodity}** (`{commodity['ticker']}`)
 
-    **Comparison**: EU Carbon Allowance (`KEUA`) — directly tracks 
-    EU ETS carbon futures. Falls back to ICLN if unavailable.
+    **Comparison**: {compare_text}
 
     **Risk Metrics**
     - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
-    - **Rolling Correlation**: Pearson correlation with EU carbon over 30 days.
+    - **Rolling Correlation**: Pearson correlation with comparison asset over 30 days.
     - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs 30-day).
     - **Value at Risk (VaR)**: 95% and 99% historical VaR.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent 
@@ -93,7 +93,8 @@ with st.sidebar:
 
 # ─── Title ───
 st.title("European Energy & Commodity Risk Dashboard")
-st.markdown(f"Analyzing **{selected_commodity}** vs EU Carbon Allowance Price")
+subtitle_compare = "TTF Natural Gas" if commodity['ticker'] == 'KEUA' else "EU Carbon Allowance"
+st.markdown(f"Analyzing **{selected_commodity}** vs {subtitle_compare}")
 
 # ─── Date Selection ───
 col1, col2 = st.columns(2)
@@ -579,7 +580,7 @@ else:
     port_returns = get_portfolio_returns(start_date, end_date)
 
     if port_returns is not None and len(port_returns.columns) >= 2:
-        st.write("**Set Portfolio Weights (must sum to 100%):**")
+        st.write("**Set Portfolio Weights:**")
         pw1, pw2, pw3, pw4 = st.columns(4)
         w_gas = pw1.number_input("TTF Gas %", min_value=0, max_value=100, value=40, step=5)
         w_wti = pw2.number_input("WTI Oil %", min_value=0, max_value=100, value=30, step=5)
@@ -588,9 +589,11 @@ else:
 
         total_weight = w_gas + w_wti + w_brent + w_carbon
 
-        if total_weight != 100:
-            st.warning(f"Weights sum to {total_weight}% — please adjust to 100%.")
+        if total_weight == 0:
+            st.warning("Please set at least one weight above 0%.")
         else:
+            if total_weight != 100:
+                st.caption(f"Weights sum to {total_weight}% — auto-normalized to 100% for calculation.")
             weights = {}
             if 'TTF Gas' in port_returns.columns:
                 weights['TTF Gas'] = w_gas / 100
