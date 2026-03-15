@@ -70,6 +70,8 @@ with st.sidebar:
       shocks (α) and persistence (β). Standard on energy trading desks.
     - **Stress Test**: Simulate price shocks and see impact on volatility, 
       VaR, regime, and country risk.
+    - **Portfolio VaR**: Combined risk of holding multiple commodities, 
+      accounting for cross-commodity correlations. Shows diversification benefit.
 
     **AI / ML**
     - **Hybrid Regime Detection**: K-Means clustering + absolute 
@@ -554,6 +556,126 @@ else:
     st.dataframe(stress_df.head(10).reset_index(drop=True), use_container_width=True)
     st.caption(f"Stressed volatility = current volatility × shock multiplier ({shock_vol_multiplier:.2f}x), "
                f"then weighted by each country's {dep_label.lower()}.")
+
+    # ─── Section 5ab: Portfolio VaR ───
+    st.subheader("Portfolio Value at Risk")
+    st.write("If you hold multiple energy commodities, what is the combined portfolio risk?")
+
+    @st.cache_data(ttl=3600, show_spinner="Computing portfolio returns...")
+    def get_portfolio_returns(start, end):
+        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", "EU Carbon": "KEUA"}
+        returns = {}
+        for name, ticker in tickers.items():
+            try:
+                data = yf.download(ticker, start=start, end=end, progress=False)
+                if len(data) > 30:
+                    returns[name] = data['Close'].squeeze().pct_change()
+            except Exception:
+                continue
+        if len(returns) < 2:
+            return None
+        return pd.DataFrame(returns).dropna()
+
+    port_returns = get_portfolio_returns(start_date, end_date)
+
+    if port_returns is not None and len(port_returns.columns) >= 2:
+        st.write("**Set Portfolio Weights (must sum to 100%):**")
+        pw1, pw2, pw3, pw4 = st.columns(4)
+        w_gas = pw1.number_input("TTF Gas %", min_value=0, max_value=100, value=40, step=5)
+        w_wti = pw2.number_input("WTI Oil %", min_value=0, max_value=100, value=30, step=5)
+        w_brent = pw3.number_input("Brent Oil %", min_value=0, max_value=100, value=20, step=5)
+        w_carbon = pw4.number_input("EU Carbon %", min_value=0, max_value=100, value=10, step=5)
+
+        total_weight = w_gas + w_wti + w_brent + w_carbon
+
+        if total_weight != 100:
+            st.warning(f"Weights sum to {total_weight}% — please adjust to 100%.")
+        else:
+            weights = {}
+            if 'TTF Gas' in port_returns.columns:
+                weights['TTF Gas'] = w_gas / 100
+            if 'WTI Oil' in port_returns.columns:
+                weights['WTI Oil'] = w_wti / 100
+            if 'Brent Oil' in port_returns.columns:
+                weights['Brent Oil'] = w_brent / 100
+            if 'EU Carbon' in port_returns.columns:
+                weights['EU Carbon'] = w_carbon / 100
+
+            # Normalize weights for available commodities
+            available = [k for k in weights if k in port_returns.columns]
+            w_array = np.array([weights[k] for k in available])
+            if w_array.sum() > 0:
+                w_array = w_array / w_array.sum()  # re-normalize
+
+            # Portfolio returns (weighted sum)
+            port_ret = (port_returns[available] * w_array).sum(axis=1)
+
+            # Portfolio metrics
+            port_vol = port_ret.rolling(30).std().dropna().iloc[-1] * 100
+            port_var_95 = np.percentile(port_ret.dropna(), 5) * 100
+            port_var_99 = np.percentile(port_ret.dropna(), 1) * 100
+            port_max_loss = port_ret.dropna().min() * 100
+
+            # Individual VaRs for comparison
+            individual_vars = {}
+            for col in available:
+                individual_vars[col] = np.percentile(port_returns[col].dropna(), 5) * 100
+
+            # Diversification benefit
+            undiversified_var = sum(abs(individual_vars[k]) * weights[k] for k in available)
+            diversification_benefit = undiversified_var - abs(port_var_95)
+
+            pv1, pv2, pv3, pv4 = st.columns(4)
+            pv1.metric("Portfolio Volatility", f"{port_vol:.2f}%")
+            pv2.metric("Portfolio VaR 95%", f"{port_var_95:.2f}%")
+            pv3.metric("Portfolio VaR 99%", f"{port_var_99:.2f}%")
+            pv4.metric("Diversification Benefit", f"{diversification_benefit:.2f}%",
+                       help="Risk reduction from holding multiple commodities vs single")
+
+            # Portfolio return distribution
+            fig_pvar, (ax_pd, ax_pc) = plt.subplots(1, 2, figsize=(14, 4))
+
+            ax_pd.hist(port_ret.dropna() * 100, bins=60, color='navy', alpha=0.7, edgecolor='white')
+            ax_pd.axvline(x=port_var_95, color='red', linewidth=2, linestyle='--',
+                          label=f'95% VaR: {port_var_95:.2f}%')
+            ax_pd.axvline(x=port_var_99, color='darkred', linewidth=2, linestyle=':',
+                          label=f'99% VaR: {port_var_99:.2f}%')
+            ax_pd.set_xlabel('Daily Portfolio Returns (%)')
+            ax_pd.set_ylabel('Frequency')
+            ax_pd.set_title('Portfolio Return Distribution')
+            ax_pd.legend(fontsize=8)
+
+            # Compare individual vs portfolio VaR
+            compare_names = available + ['Portfolio']
+            compare_vars = [individual_vars[k] for k in available] + [port_var_95]
+            compare_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)] + ['navy']
+            ax_pc.barh(range(len(compare_names)), [abs(v) for v in compare_vars],
+                       color=compare_colors, height=0.5)
+            ax_pc.set_yticks(range(len(compare_names)))
+            ax_pc.set_yticklabels(compare_names, fontsize=9)
+            ax_pc.set_xlabel('VaR 95% (absolute %)')
+            ax_pc.set_title('Individual vs Portfolio VaR')
+            ax_pc.invert_yaxis()
+
+            plt.tight_layout()
+            st.pyplot(fig_pvar)
+
+            # Weight composition pie chart
+            st.write("**Portfolio Composition:**")
+            fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
+            pie_labels = [f"{k}\n({weights[k]*100:.0f}%)" for k in available]
+            pie_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)]
+            ax_pie.pie([weights[k] for k in available], labels=pie_labels, colors=pie_colors,
+                      autopct='', startangle=90)
+            ax_pie.set_title('Portfolio Weight Allocation')
+            plt.tight_layout()
+            st.pyplot(fig_pie)
+
+            st.caption(f"Portfolio VaR accounts for cross-commodity correlations — "
+                       f"diversification reduces risk by {diversification_benefit:.2f}% compared to "
+                       f"holding each commodity independently. Weights are user-adjustable.")
+    else:
+        st.info("Not enough multi-commodity data to compute Portfolio VaR.")
 
 
     # ─── Section 5b: European Country Energy Risk ───

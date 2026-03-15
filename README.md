@@ -21,6 +21,7 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 **Cross-Commodity & Stress Testing**
 - **Correlation Matrix** — 4×4 heatmap showing how TTF Gas, WTI, Brent, and EU Carbon move relative to each other. Full-period vs last 30 days to detect regime shifts.
 - **Stress Test Scenario** — Slider to simulate price shocks (-50% to +100%). Shows stressed volatility, VaR, regime shift, and top 10 most impacted countries.
+- **Portfolio VaR** — Set custom weights across 4 commodities. Calculates combined portfolio risk accounting for cross-commodity correlations, with diversification benefit analysis.
 
 **Country Risk**
 - **29 European Countries** — EU-27 + Switzerland, UK, Norway, Turkey.
@@ -71,6 +72,8 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 **Country risk:** Composite structural score from 6 factors (commodity dependency, carbon intensity, total energy dependency, renewable share, price sensitivity, dependency rank), multiplied by country-specific volatility multiplier. Countries with higher dependency feel the same market shock more intensely.
 
 **FinBERT:** ProsusAI/finbert via HuggingFace Inference API. Unlike rule-based VADER, FinBERT understands financial context.
+
+**Portfolio VaR:** Weighted portfolio returns computed from individual commodity returns. VaR is calculated on the combined return series, automatically capturing cross-commodity correlations. Diversification benefit = sum of individual weighted VaRs minus portfolio VaR.
 
 ## Run Locally
 
