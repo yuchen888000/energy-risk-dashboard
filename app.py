@@ -64,9 +64,12 @@ with st.sidebar:
     **Risk Metrics**
     - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
     - **Rolling Correlation**: Pearson correlation with EU carbon over 30 days.
+    - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs 30-day).
     - **Value at Risk (VaR)**: 95% and 99% historical VaR.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent 
       shocks (α) and persistence (β). Standard on energy trading desks.
+    - **Stress Test**: Simulate price shocks and see impact on volatility, 
+      VaR, regime, and country risk.
 
     **AI / ML**
     - **Hybrid Regime Detection**: K-Means clustering + absolute 
@@ -161,6 +164,68 @@ else:
         risk_level = "🟢 LOW RISK"
         risk_color = "green"
 
+    # ─── Country Data (used by Stress Test and Country Risk sections) ───
+    COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
+                 'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
+                 'Hungary', 'Romania', 'Bulgaria', 'Finland', 'Sweden',
+                 'Denmark', 'Ireland', 'Portugal', 'Lithuania', 'Latvia',
+                 'Estonia', 'Slovakia', 'Croatia', 'Slovenia', 'Luxembourg',
+                 'Switzerland', 'United Kingdom', 'Norway', 'Turkey']
+
+    gas_dep = {
+        2020: [89,98,93,99,0,79,100,82,99,98,85,78,96,97,6,67,100,100,100,100,100,86,55,99,100,100,48,0,99],
+        2021: [91,98,93,99,5,82,100,81,99,97,85,76,94,96,8,60,100,100,100,100,100,85,57,99,100,100,47,0,99],
+        2022: [95,98,93,99,15,78,100,80,99,97,85,75,92,95,10,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
+        2023: [95,98,93,99,68,78,100,80,99,97,85,75,92,95,12,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
+        2024: [94,98,93,99,70,77,100,80,99,97,84,74,91,94,12,54,100,100,100,100,100,84,58,99,100,100,46,0,99],
+    }
+    oil_dep = {
+        2020: [96,98,92,99,95,97,99,93,100,97,82,45,100,91,100,100,100,100,100,100,60,92,82,100,100,100,92,0,93],
+        2021: [96,98,92,99,96,97,99,93,100,97,83,44,100,90,100,100,100,100,100,100,58,92,80,100,100,100,93,0,93],
+        2022: [96,98,93,99,96,97,99,94,100,97,84,42,100,90,100,100,100,100,100,100,55,92,78,100,100,100,94,0,92],
+        2023: [97,98,93,99,96,97,99,94,100,97,84,40,100,90,100,100,100,100,100,100,52,92,76,100,100,100,95,0,92],
+        2024: [97,98,93,99,96,97,99,94,100,97,84,39,100,90,100,100,100,100,100,100,50,92,75,100,100,100,95,0,92],
+    }
+    total_dep = {
+        2020: [64,47,73,73,45,42,78,60,81,37,55,28,37,42,33,44,86,65,74,46,10,54,53,48,95,75,36,-580,72],
+        2021: [64,47,74,73,46,41,78,61,81,37,55,28,37,43,31,45,86,65,74,45,8,53,52,48,95,75,35,-600,72],
+        2022: [63,47,75,73,46,40,78,62,83,37,55,28,37,45,29,47,86,65,74,45,6,53,52,48,95,75,35,-620,72],
+        2023: [63,47,75,73,46,40,78,62,81,37,55,28,37,45,29,47,86,65,74,45,3,53,52,48,95,75,35,-650,72],
+        2024: [62,46,74,72,45,39,77,61,80,36,54,27,36,44,28,46,85,64,73,44,3,52,51,47,94,74,34,-660,71],
+    }
+    ren_share = {
+        2020: [19,19,20,21,14,16,13,37,22,17,14,24,23,44,60,42,16,34,26,42,28,17,31,25,11,28,13,78,18],
+        2021: [19,19,19,21,13,16,13,36,22,17,14,24,23,44,63,42,12,34,27,42,28,17,31,25,11,29,14,80,18],
+        2022: [21,21,19,22,15,17,13,36,22,18,14,24,23,47,60,42,13,34,28,43,30,17,31,25,12,30,15,85,19],
+        2023: [22,22,19,24,17,17,14,36,23,18,14,28,24,48,66,44,14,35,30,44,38,18,32,26,12,32,16,98,20],
+        2024: [23,23,20,25,18,18,15,37,24,19,15,29,25,49,67,45,15,36,32,45,40,19,33,27,13,33,17,98,21],
+    }
+    carbon_int = {
+        2020: [195,100,150,130,170,400,160,120,220,300,260,340,480,140,65,110,115,130,200,180,370,250,175,170,100,60,135,80,320],
+        2021: [190,98,148,125,165,395,158,118,215,295,255,335,470,135,62,108,112,128,198,178,365,245,172,168,98,58,132,78,315],
+        2022: [185,96,145,122,162,385,156,116,212,292,252,325,460,132,60,106,110,126,196,176,355,242,170,166,96,56,130,76,312],
+        2023: [180,95,145,120,160,380,155,115,210,290,250,320,450,130,58,105,108,125,195,175,350,240,170,165,95,55,128,75,310],
+        2024: [176,93,142,118,157,375,152,113,208,287,247,315,445,128,56,103,106,123,192,172,345,237,168,163,93,54,126,73,305],
+    }
+    price_sens = {
+        2020: [9.0,7.2,8.5,7.0,8.2,7.0,7.8,7.5,8.2,7.2,7.5,6.8,7.5,7.5,3.2,5.5,6.8,6.5,8.0,7.2,7.5,7.0,5.8,6.2,6.0,6.8,7.8,2.2,8.5],
+        2021: [9.1,7.3,8.6,7.1,8.3,7.0,7.9,7.6,8.3,7.1,7.5,6.7,7.4,7.6,3.3,5.6,6.9,6.6,8.1,7.3,7.6,7.1,5.9,6.3,6.1,6.9,7.9,2.1,8.5],
+        2022: [9.5,7.8,9.0,7.5,8.8,7.2,8.2,8.0,8.8,7.3,7.8,6.8,7.5,8.0,3.5,5.8,7.2,7.0,8.5,7.8,8.0,7.3,6.2,6.8,6.5,7.2,8.2,2.0,8.8],
+        2023: [9.2,7.5,8.8,7.2,8.5,6.8,8.0,7.8,8.5,7.0,7.5,6.5,7.2,7.8,3.5,5.8,7.0,6.8,8.2,7.5,7.8,7.2,6.0,6.5,6.2,7.0,8.0,2.0,8.5],
+        2024: [9.0,7.3,8.6,7.0,8.3,6.6,7.8,7.6,8.3,6.8,7.3,6.3,7.0,7.6,3.4,5.6,6.8,6.6,8.0,7.3,7.6,7.0,5.8,6.3,6.0,6.8,7.8,1.8,8.3],
+    }
+
+    # Commodity-aware dependency column
+    if selected_commodity in ['TTF Natural Gas']:
+        dep_col = 'Gas Dep. (%)'
+        dep_label = 'Gas Import Dependency'
+    elif selected_commodity in ['WTI Crude Oil', 'Brent Crude Oil']:
+        dep_col = 'Oil Dep. (%)'
+        dep_label = 'Oil Import Dependency'
+    else:
+        dep_col = 'Total Energy Dep. (%)'
+        dep_label = 'Total Energy Dependency'
+
     # ─── Section 1: Risk Signal ───
     st.subheader(f"Current Risk Signal — {selected_commodity}")
     st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
@@ -218,6 +283,74 @@ else:
     with vcol2:
         st.subheader("30-Day Rolling Correlation")
         st.line_chart(df_analysis['Rolling Correlation'].dropna())
+
+    # ─── Section 3b: Cross-Commodity Correlation Matrix ───
+    st.subheader("Cross-Commodity Correlation Matrix")
+    st.write("How are European energy commodities moving relative to each other right now?")
+
+    @st.cache_data(ttl=3600, show_spinner="Computing cross-commodity correlations...")
+    def get_correlation_matrix(start, end):
+        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", "EU Carbon": "KEUA"}
+        prices = {}
+        for name, ticker in tickers.items():
+            try:
+                data = yf.download(ticker, start=start, end=end, progress=False)
+                if len(data) > 30:
+                    prices[name] = data['Close'].squeeze().pct_change()
+            except Exception:
+                continue
+        if len(prices) < 2:
+            return None, None
+        returns_df = pd.DataFrame(prices).dropna()
+        corr_full = returns_df.corr().round(3)
+        corr_30d = returns_df.tail(30).corr().round(3)
+        return corr_full, corr_30d
+
+    corr_full, corr_30d = get_correlation_matrix(start_date, end_date)
+
+    if corr_full is not None:
+        cm1, cm2 = st.columns(2)
+
+        with cm1:
+            st.write("**Full Period Correlation:**")
+            fig_corr1, ax_corr1 = plt.subplots(figsize=(5, 4))
+            im1 = ax_corr1.imshow(corr_full, cmap='RdYlGn', vmin=-1, vmax=1)
+            ax_corr1.set_xticks(range(len(corr_full.columns)))
+            ax_corr1.set_yticks(range(len(corr_full.columns)))
+            ax_corr1.set_xticklabels(corr_full.columns, fontsize=9, rotation=45, ha='right')
+            ax_corr1.set_yticklabels(corr_full.columns, fontsize=9)
+            for i in range(len(corr_full)):
+                for j in range(len(corr_full)):
+                    ax_corr1.text(j, i, f"{corr_full.iloc[i, j]:.2f}",
+                                  ha='center', va='center', fontsize=10, fontweight='bold',
+                                  color='white' if abs(corr_full.iloc[i, j]) > 0.5 else 'black')
+            plt.colorbar(im1, ax=ax_corr1, shrink=0.8)
+            ax_corr1.set_title('Full Period')
+            plt.tight_layout()
+            st.pyplot(fig_corr1)
+
+        with cm2:
+            st.write("**Last 30 Days Correlation:**")
+            fig_corr2, ax_corr2 = plt.subplots(figsize=(5, 4))
+            im2 = ax_corr2.imshow(corr_30d, cmap='RdYlGn', vmin=-1, vmax=1)
+            ax_corr2.set_xticks(range(len(corr_30d.columns)))
+            ax_corr2.set_yticks(range(len(corr_30d.columns)))
+            ax_corr2.set_xticklabels(corr_30d.columns, fontsize=9, rotation=45, ha='right')
+            ax_corr2.set_yticklabels(corr_30d.columns, fontsize=9)
+            for i in range(len(corr_30d)):
+                for j in range(len(corr_30d)):
+                    ax_corr2.text(j, i, f"{corr_30d.iloc[i, j]:.2f}",
+                                  ha='center', va='center', fontsize=10, fontweight='bold',
+                                  color='white' if abs(corr_30d.iloc[i, j]) > 0.5 else 'black')
+            plt.colorbar(im2, ax=ax_corr2, shrink=0.8)
+            ax_corr2.set_title('Last 30 Days')
+            plt.tight_layout()
+            st.pyplot(fig_corr2)
+
+        st.caption("Green = positive correlation (move together). Red = negative (move inversely). "
+                   "Compare full-period vs 30-day to detect regime shifts in cross-commodity relationships.")
+    else:
+        st.info("Not enough data to compute cross-commodity correlations.")
 
     # ─── Section 4: Value at Risk ───
     st.subheader(f"Value at Risk (VaR) — {selected_commodity}")
@@ -359,69 +492,74 @@ else:
         st.write("**Regime Statistics:**")
         st.dataframe(regime_stats, use_container_width=True)
 
+    # ─── Section 5a: Stress Test Scenario ───
+    st.subheader("Stress Test Scenario")
+    st.write(f"What happens if {selected_commodity} prices spike? Simulate the impact on volatility, VaR, and country risk.")
+
+    stress_pct = st.slider("Simulate price shock (%)", min_value=-50, max_value=100, value=30, step=5,
+                            help="Positive = price spike, Negative = price crash")
+
+    # Estimate stressed volatility: current vol * shock multiplier
+    # Empirical relationship: a 50% price shock roughly doubles short-term volatility
+    shock_vol_multiplier = 1 + abs(stress_pct) / 50
+    stressed_vol = latest_vol * shock_vol_multiplier
+    stressed_var_95 = var_95 * shock_vol_multiplier
+    stressed_var_99 = var_99 * shock_vol_multiplier
+
+    st1, st2, st3, st4 = st.columns(4)
+    st1.metric("Current Volatility", f"{latest_vol:.2f}%")
+    st2.metric("Stressed Volatility", f"{stressed_vol:.2f}%",
+               delta=f"+{stressed_vol - latest_vol:.2f}%")
+    st3.metric("Stressed VaR 95%", f"{stressed_var_95:.2f}%",
+               delta=f"{stressed_var_95 - var_95:.2f}%")
+    st4.metric("Stressed VaR 99%", f"{stressed_var_99:.2f}%",
+               delta=f"{stressed_var_99 - var_99:.2f}%")
+
+    # Stressed regime
+    if stressed_vol > 12:
+        stressed_regime = "🔴 Crisis"
+    elif stressed_vol > 6:
+        stressed_regime = "🟡 Volatile"
+    else:
+        stressed_regime = "🟢 Calm"
+
+    st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime shifts to **{stressed_regime}** "
+                f"(from {current_regime})")
+
+    # Top 5 most impacted countries under stress
+    st.write("**Most impacted countries under this scenario:**")
+
+    if selected_commodity in ['TTF Natural Gas']:
+        dep_vals = gas_dep.get(2024, gas_dep[2023])
+    elif selected_commodity in ['WTI Crude Oil', 'Brent Crude Oil']:
+        dep_vals = oil_dep.get(2024, oil_dep[2023])
+    else:
+        dep_vals = [max(x, 0) for x in total_dep.get(2024, total_dep[2023])]
+
+    stress_impact = []
+    for i, country in enumerate(COUNTRIES):
+        dep_pct = max(dep_vals[i], 0) / 100
+        country_stressed_vol = stressed_vol * dep_pct
+        normal_vol = latest_vol * dep_pct
+        stress_impact.append({
+            'Country': country,
+            'Normal Adj. Vol': f"{normal_vol:.1f}%",
+            'Stressed Adj. Vol': f"{country_stressed_vol:.1f}%",
+            'Vol Increase': f"+{country_stressed_vol - normal_vol:.1f}%",
+            dep_label: f"{dep_vals[i]:.0f}%",
+        })
+    stress_df = pd.DataFrame(stress_impact)
+    stress_df['sort_key'] = [float(x.replace('%', '').replace('+', '')) for x in stress_df['Vol Increase']]
+    stress_df = stress_df.sort_values('sort_key', ascending=False).drop('sort_key', axis=1)
+    st.dataframe(stress_df.head(10).reset_index(drop=True), use_container_width=True)
+    st.caption(f"Stressed volatility = current volatility × shock multiplier ({shock_vol_multiplier:.2f}x), "
+               f"then weighted by each country's {dep_label.lower()}.")
+
 
     # ─── Section 5b: European Country Energy Risk ───
     st.subheader("European Country Energy Risk Exposure")
     st.write("Which European countries are most vulnerable to energy price shocks?")
     st.caption("Coverage: EU-27 + Switzerland, UK, Norway, Turkey · Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren), IEA, EEA")
-
-    COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
-                 'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
-                 'Hungary', 'Romania', 'Bulgaria', 'Finland', 'Sweden',
-                 'Denmark', 'Ireland', 'Portugal', 'Lithuania', 'Latvia',
-                 'Estonia', 'Slovakia', 'Croatia', 'Slovenia', 'Luxembourg',
-                 'Switzerland', 'United Kingdom', 'Norway', 'Turkey']
-
-    # Eurostat nrg_ind_id G3000 — Gas import dependency (%)
-    gas_dep = {
-        2020: [89,98,93,99,0,79,100,82,99,98,85,78,96,97,6,67,100,100,100,100,100,86,55,99,100,100,48,0,99],
-        2021: [91,98,93,99,5,82,100,81,99,97,85,76,94,96,8,60,100,100,100,100,100,85,57,99,100,100,47,0,99],
-        2022: [95,98,93,99,15,78,100,80,99,97,85,75,92,95,10,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
-        2023: [95,98,93,99,68,78,100,80,99,97,85,75,92,95,12,55,100,100,100,100,100,85,60,99,100,100,47,0,99],
-        2024: [94,98,93,99,70,77,100,80,99,97,84,74,91,94,12,54,100,100,100,100,100,84,58,99,100,100,46,0,99],
-    }
-    # Eurostat nrg_ind_id O4100_TOT — Oil import dependency (%)
-    oil_dep = {
-        2020: [96,98,92,99,95,97,99,93,100,97,82,45,100,91,100,100,100,100,100,100,60,92,82,100,100,100,92,0,93],
-        2021: [96,98,92,99,96,97,99,93,100,97,83,44,100,90,100,100,100,100,100,100,58,92,80,100,100,100,93,0,93],
-        2022: [96,98,93,99,96,97,99,94,100,97,84,42,100,90,100,100,100,100,100,100,55,92,78,100,100,100,94,0,92],
-        2023: [97,98,93,99,96,97,99,94,100,97,84,40,100,90,100,100,100,100,100,100,52,92,76,100,100,100,95,0,92],
-        2024: [97,98,93,99,96,97,99,94,100,97,84,39,100,90,100,100,100,100,100,100,50,92,75,100,100,100,95,0,92],
-    }
-    # Eurostat sdg_07_50 — Total energy dependency (%)
-    total_dep = {
-        2020: [64,47,73,73,45,42,78,60,81,37,55,28,37,42,33,44,86,65,74,46,10,54,53,48,95,75,36,-580,72],
-        2021: [64,47,74,73,46,41,78,61,81,37,55,28,37,43,31,45,86,65,74,45,8,53,52,48,95,75,35,-600,72],
-        2022: [63,47,75,73,46,40,78,62,83,37,55,28,37,45,29,47,86,65,74,45,6,53,52,48,95,75,35,-620,72],
-        2023: [63,47,75,73,46,40,78,62,81,37,55,28,37,45,29,47,86,65,74,45,3,53,52,48,95,75,35,-650,72],
-        2024: [62,46,74,72,45,39,77,61,80,36,54,27,36,44,28,46,85,64,73,44,3,52,51,47,94,74,34,-660,71],
-    }
-    # Eurostat nrg_ind_ren — Renewable share (%)
-    ren_share = {
-        2020: [19,19,20,21,14,16,13,37,22,17,14,24,23,44,60,42,16,34,26,42,28,17,31,25,11,28,13,78,18],
-        2021: [19,19,19,21,13,16,13,36,22,17,14,24,23,44,63,42,12,34,27,42,28,17,31,25,11,29,14,80,18],
-        2022: [21,21,19,22,15,17,13,36,22,18,14,24,23,47,60,42,13,34,28,43,30,17,31,25,12,30,15,85,19],
-        2023: [22,22,19,24,17,17,14,36,23,18,14,28,24,48,66,44,14,35,30,44,38,18,32,26,12,32,16,98,20],
-        2024: [23,23,20,25,18,18,15,37,24,19,15,29,25,49,67,45,15,36,32,45,40,19,33,27,13,33,17,98,21],
-    }
-    # EEA / Eurostat — Carbon intensity (tCO2/M€ GDP)
-    carbon_int = {
-        2020: [195,100,150,130,170,400,160,120,220,300,260,340,480,140,65,110,115,130,200,180,370,250,175,170,100,60,135,80,320],
-        2021: [190,98,148,125,165,395,158,118,215,295,255,335,470,135,62,108,112,128,198,178,365,245,172,168,98,58,132,78,315],
-        2022: [185,96,145,122,162,385,156,116,212,292,252,325,460,132,60,106,110,126,196,176,355,242,170,166,96,56,130,76,312],
-        2023: [180,95,145,120,160,380,155,115,210,290,250,320,450,130,58,105,108,125,195,175,350,240,170,165,95,55,128,75,310],
-        2024: [176,93,142,118,157,375,152,113,208,287,247,315,445,128,56,103,106,123,192,172,345,237,168,163,93,54,126,73,305],
-    }
-
-    # Energy Price Sensitivity (1-10 scale) — measures economic exposure to energy price shocks
-    # Based on: energy intensity of GDP (Eurostat nrg_ind_ei), gas share in energy mix, industry gas consumption
-    price_sens = {
-        2020: [9.0,7.2,8.5,7.0,8.2,7.0,7.8,7.5,8.2,7.2,7.5,6.8,7.5,7.5,3.2,5.5,6.8,6.5,8.0,7.2,7.5,7.0,5.8,6.2,6.0,6.8,7.8,2.2,8.5],
-        2021: [9.1,7.3,8.6,7.1,8.3,7.0,7.9,7.6,8.3,7.1,7.5,6.7,7.4,7.6,3.3,5.6,6.9,6.6,8.1,7.3,7.6,7.1,5.9,6.3,6.1,6.9,7.9,2.1,8.5],
-        2022: [9.5,7.8,9.0,7.5,8.8,7.2,8.2,8.0,8.8,7.3,7.8,6.8,7.5,8.0,3.5,5.8,7.2,7.0,8.5,7.8,8.0,7.3,6.2,6.8,6.5,7.2,8.2,2.0,8.8],
-        2023: [9.2,7.5,8.8,7.2,8.5,6.8,8.0,7.8,8.5,7.0,7.5,6.5,7.2,7.8,3.5,5.8,7.0,6.8,8.2,7.5,7.8,7.2,6.0,6.5,6.2,7.0,8.0,2.0,8.5],
-        2024: [9.0,7.3,8.6,7.0,8.3,6.6,7.8,7.6,8.3,6.8,7.3,6.3,7.0,7.6,3.4,5.6,6.8,6.6,8.0,7.3,7.6,7.0,5.8,6.3,6.0,6.8,7.8,1.8,8.3],
-    }
 
     selected_year = st.slider("Select Year", min_value=2020, max_value=2024, value=2024, step=1)
 
@@ -434,17 +572,6 @@ else:
         'Carbon Int. (tCO2/M€)': carbon_int[selected_year],
         'Price Sensitivity': price_sens[selected_year],
     })
-
-    # Commodity-aware dependency column
-    if selected_commodity in ['TTF Natural Gas']:
-        dep_col = 'Gas Dep. (%)'
-        dep_label = 'Gas Import Dependency'
-    elif selected_commodity in ['WTI Crude Oil', 'Brent Crude Oil']:
-        dep_col = 'Oil Dep. (%)'
-        dep_label = 'Oil Import Dependency'
-    else:
-        dep_col = 'Total Energy Dep. (%)'
-        dep_label = 'Total Energy Dependency'
 
     cr_df['Dep Clipped'] = cr_df[dep_col].clip(lower=0)
     cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)

@@ -18,6 +18,10 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 - **Price Trends** — Dual-axis chart with annotated EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
 - **Market Regime Detection** — K-Means clustering + absolute volatility thresholds: Calm, Volatile, Crisis.
 
+**Cross-Commodity & Stress Testing**
+- **Correlation Matrix** — 4×4 heatmap showing how TTF Gas, WTI, Brent, and EU Carbon move relative to each other. Full-period vs last 30 days to detect regime shifts.
+- **Stress Test Scenario** — Slider to simulate price shocks (-50% to +100%). Shows stressed volatility, VaR, regime shift, and top 10 most impacted countries.
+
 **Country Risk**
 - **29 European Countries** — EU-27 + Switzerland, UK, Norway, Turkey.
 - **Commodity-Aware** — Selecting gas shows gas dependency; selecting oil shows oil dependency.
