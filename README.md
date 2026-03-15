@@ -24,7 +24,7 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 - **Portfolio VaR** — Set custom weights across 4 commodities. Calculates combined portfolio risk accounting for cross-commodity correlations, with diversification benefit analysis.
 
 **Country Risk**
-- **29 European Countries** — EU-27 + Switzerland, UK, Norway, Turkey.
+- **31 European Countries** — EU-27 + Switzerland, UK, Norway, Turkey.
 - **Commodity-Aware** — Selecting gas shows gas dependency; selecting oil shows oil dependency.
 - **Dynamic Risk Scoring** — Structural vulnerability (Eurostat) × real-time commodity volatility, weighted by each country's dependency. High-dependency countries feel market shocks more.
 - **Per-Country Risk Signal** — Adjusted volatility and VaR for each country, live.
@@ -81,6 +81,16 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+### FinBERT Setup (Optional)
+
+The dashboard uses FinBERT for financial sentiment analysis. Without a token, it falls back to VADER.
+
+To enable FinBERT:
+1. Create a free account at [huggingface.co](https://huggingface.co)
+2. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+3. For local: set `HF_TOKEN=hf_yourtoken` as environment variable
+4. For Streamlit Cloud: add `HF_TOKEN = "hf_yourtoken"` in Settings → Secrets
 
 ## Project Context
 
