@@ -1003,47 +1003,47 @@ else:
         headers = {"Authorization": f"Bearer {hf_token}"}
         scores, labels = [], []
 
-        for text in texts:
-            success = False
-            for attempt in range(3):
-                try:
-                    response = req.post(API_URL, headers=headers,
-                                        json={"inputs": text}, timeout=30)
-                    if response.status_code == 503:
-                        wait_time = response.json().get('estimated_time', 20)
-                        time.sleep(min(wait_time + 5, 30))
-                        continue
-                    if response.status_code == 200:
-                        # FinBERT returns list of [{label, score}] for single input
-                        result = response.json()
-                        if isinstance(result, list) and len(result) > 0:
-                            # find the label with highest score
-                            if isinstance(result[0], dict):
-                                best = max(result, key=lambda x: x['score'])
-                            else:
-                                best = max(result[0], key=lambda x: x['score'])
-                            lbl = best['label'].lower()
-                            sc = best['score']
-                            if lbl == 'negative':
-                                scores.append(-sc); labels.append('Negative')
-                            elif lbl == 'positive':
-                                scores.append(sc); labels.append('Positive')
-                            else:
-                                scores.append(0.0); labels.append('Neutral')
+        for attempt in range(3):
+            try:
+                # Send all headlines in one batch call
+                response = req.post(API_URL, headers=headers,
+                                    json={"inputs": texts}, timeout=60)
+                if response.status_code == 503:
+                    wait_time = response.json().get('estimated_time', 20)
+                    time.sleep(min(wait_time + 5, 40))
+                    continue
+                if response.status_code == 200:
+                    results = response.json()
+                    # results is a list of lists: [[{label,score},{label,score},{label,score}], [...], ...]
+                    if not isinstance(results, list):
+                        break
+                    for item in results:
+                        # each item is a list of 3 dicts (positive/negative/neutral)
+                        if isinstance(item, list):
+                            best = max(item, key=lambda x: x['score'])
+                        elif isinstance(item, dict):
+                            best = item
                         else:
                             scores.append(0.0); labels.append('Neutral')
-                        success = True
-                        break
-                except Exception:
-                    if attempt < 2:
-                        time.sleep(5)
-                    continue
-            if not success:
-                scores.append(0.0); labels.append('Neutral')
+                            continue
+                        lbl = best['label'].lower()
+                        sc = best['score']
+                        if lbl == 'negative':
+                            scores.append(-sc); labels.append('Negative')
+                        elif lbl == 'positive':
+                            scores.append(sc); labels.append('Positive')
+                        else:
+                            scores.append(0.0); labels.append('Neutral')
+                    if len(scores) == len(texts):
+                        return scores, labels, True
+                    break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(10)
+                continue
 
-        if any(s != 0.0 for s in scores):
-            return scores, labels, True
-        return scores, labels, True  # return whatever we got
+        # Fallback: VADER
+        return None, None, False
 
     # Limit to 10 headlines for speed
     headlines = headlines[:10]
