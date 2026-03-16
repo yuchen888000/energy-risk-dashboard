@@ -38,6 +38,7 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 - **30-Day Sentiment Trend** — Daily average sentiment over past month via Google News RSS, visualized as bar chart with trend line. Scored with FinVADER.
 - **Headline Analysis** — Most positive and most negative headlines with source links and sentiment scores.
 - **European Focus** — News sourced from BBC Business, OilPrice, and Google News (commodity-specific + EU energy queries).
+- **News Sources** — BBC Business, OilPrice, Google News (EU Energy, EU Carbon, commodity-specific). US-domestic headlines filtered out; geopolitically relevant global news retained.
 
 **Data Export**
 - Download commodity risk data (CSV)
