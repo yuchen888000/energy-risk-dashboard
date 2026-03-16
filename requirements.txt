@@ -8,3 +8,4 @@ nltk
 feedparser
 arch
 requests
+finvader

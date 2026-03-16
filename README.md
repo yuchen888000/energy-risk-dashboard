@@ -29,13 +29,13 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 - **Dynamic Risk Scoring** — Structural vulnerability (Eurostat) × real-time commodity volatility, weighted by each country's dependency. High-dependency countries feel market shocks more.
 - **Per-Country Risk Signal** — Adjusted volatility and VaR for each country, live.
 - **Dependency-Weighted Volatility Curve** — Real-time chart showing how market volatility translates to country-specific risk.
-- **Per-Country News Sentiment** — Live energy news filtered by selected country, scored with VADER.
+- **Per-Country News Sentiment** — Live energy news filtered by selected country.
 - **Year Slider (2020–2024)** — Track how energy risk shifted through the 2022 crisis and recovery.
 
 **Sentiment Analysis (NLP)**
-- **FinBERT** — Main sentiment module. Transformer model fine-tuned on financial text (ProsusAI/finbert via HuggingFace Inference API), applied to 10 live headlines from BBC Business and OilPrice. Processed one headline at a time for reliable scoring. Falls back to VADER if API unavailable.
-- **VADER** — Country-level sentiment and 30-day trend scoring. Rule-based model optimised for speed and stability over large volumes of historical headlines.
-- **30-Day Sentiment Trend** — Daily average sentiment over past month via Google News RSS, visualized as bar chart with trend line. Scored with VADER.
+- **FinBERT** — Main sentiment module. Transformer model fine-tuned on financial text (ProsusAI/finbert via HuggingFace Inference API). Applied to 10 live headlines from BBC Business and OilPrice. Falls back to FinVADER if API unavailable.
+- **FinVADER** — Fallback sentiment model. VADER enhanced with financial domain lexicons (SentiBigomics + Henry), significantly more accurate than standard VADER for financial news.
+- **30-Day Sentiment Trend** — Daily average sentiment over past month via Google News RSS, visualized as bar chart with trend line. Scored with FinVADER.
 - **Headline Analysis** — Most positive and most negative headlines with source links and sentiment scores.
 - **European Focus** — News sourced from BBC Business, OilPrice, and Google News (commodity-specific + EU energy queries).
 
@@ -54,7 +54,7 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 | Volatility Modeling | arch (GARCH) |
 | Machine Learning | scikit-learn (KMeans, StandardScaler) |
 | NLP — Main Sentiment | FinBERT via HuggingFace Inference API (ProsusAI/finbert) |
-| NLP — Country & Trend | VADER (nltk) |
+| NLP — Fallback | FinVADER (VADER + SentiBigomics + Henry financial lexicons) |
 | News Feeds | feedparser + requests (BBC, OilPrice, Google News RSS) |
 | Country Data | Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA |
 | Visualization | Matplotlib |
@@ -73,7 +73,7 @@ Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carb
 
 **Country risk:** Composite structural score from 6 factors (commodity dependency, carbon intensity, total energy dependency, renewable share, price sensitivity, dependency rank), multiplied by country-specific volatility multiplier. Countries with higher dependency feel the same market shock more intensely.
 
-**NLP architecture:** Two-layer sentiment design. FinBERT (ProsusAI/finbert) is applied to current headlines — unlike rule-based methods, it understands financial context and domain-specific language (e.g. "intervention", "allowance", "pressure" in energy markets). VADER handles country-level and 30-day historical scoring where speed and volume matter more than contextual depth.
+**NLP architecture:** Two-layer sentiment design. FinBERT (ProsusAI/finbert) handles current headlines — unlike rule-based methods, it understands financial context and domain-specific language. FinVADER (VADER enhanced with SentiBigomics and Henry financial lexicons) serves as fallback, providing significantly more accurate financial sentiment than standard VADER when FinBERT API is unavailable.
 
 **Portfolio VaR:** Weighted portfolio returns computed from individual commodity returns. VaR is calculated on the combined return series, automatically capturing cross-commodity correlations. Diversification benefit = sum of individual weighted VaRs minus portfolio VaR.
 
@@ -86,13 +86,13 @@ streamlit run app.py
 
 ### FinBERT Setup (Optional)
 
-The dashboard uses FinBERT for financial sentiment analysis. Without a token, it falls back to VADER.
+The dashboard uses FinBERT for financial sentiment analysis. Without a token, it falls back to FinVADER (still accurate for financial text).
 
 To enable FinBERT:
 1. Create a free account at [huggingface.co](https://huggingface.co)
 2. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-3. For local: set `HF_TOKEN=hf_yourtoken` as environment variable
-4. For Streamlit Cloud: add `HF_TOKEN = "hf_yourtoken"` in Settings → Secrets
+3. For Streamlit Cloud: add `HF_TOKEN = "hf_yourtoken"` in Settings → Secrets (never put tokens in code)
+4. For local: set environment variable `HF_TOKEN=hf_yourtoken`
 
 ## Project Context
 
