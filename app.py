@@ -998,14 +998,53 @@ else:
         if not hf_token:
             import os
             hf_token = os.environ.get("HF_TOKEN", None)
-        if not hf_token:
-            hf_token = "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"
-        headers = {"Authorization": f"Bearer {hf_token}"}
-        scores, labels = [], []
+        headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
 
+        def parse_results(results, n_texts):
+            scores, labels = [], []
+            if not isinstance(results, list):
+                return None, None
+            for item in results:
+                if isinstance(item, list):
+                    best = max(item, key=lambda x: x['score'])
+                elif isinstance(item, dict) and 'label' in item:
+                    best = item
+                else:
+                    scores.append(0.0); labels.append('Neutral')
+                    continue
+                lbl = best['label'].lower()
+                sc = best['score']
+                if lbl == 'negative':
+                    scores.append(-sc); labels.append('Negative')
+                elif lbl == 'positive':
+                    scores.append(sc); labels.append('Positive')
+                else:
+                    scores.append(0.0); labels.append('Neutral')
+            if len(scores) == n_texts:
+                return scores, labels
+            return None, None
+
+        # Step 1: warm up API with single text first
         for attempt in range(3):
             try:
-                # Send all headlines in one batch call
+                warmup = req.post(API_URL, headers=headers,
+                                  json={"inputs": texts[0]}, timeout=45)
+                if warmup.status_code == 503:
+                    wait_time = warmup.json().get('estimated_time', 20)
+                    time.sleep(min(wait_time + 5, 45))
+                    continue
+                if warmup.status_code == 200:
+                    break  # API is ready
+            except Exception:
+                if attempt < 2:
+                    time.sleep(10)
+                continue
+        else:
+            return None, None, False  # API not available after warmup
+
+        # Step 2: send full batch
+        for attempt in range(3):
+            try:
                 response = req.post(API_URL, headers=headers,
                                     json={"inputs": texts}, timeout=60)
                 if response.status_code == 503:
@@ -1013,36 +1052,15 @@ else:
                     time.sleep(min(wait_time + 5, 40))
                     continue
                 if response.status_code == 200:
-                    results = response.json()
-                    # results is a list of lists: [[{label,score},{label,score},{label,score}], [...], ...]
-                    if not isinstance(results, list):
-                        break
-                    for item in results:
-                        # each item is a list of 3 dicts (positive/negative/neutral)
-                        if isinstance(item, list):
-                            best = max(item, key=lambda x: x['score'])
-                        elif isinstance(item, dict):
-                            best = item
-                        else:
-                            scores.append(0.0); labels.append('Neutral')
-                            continue
-                        lbl = best['label'].lower()
-                        sc = best['score']
-                        if lbl == 'negative':
-                            scores.append(-sc); labels.append('Negative')
-                        elif lbl == 'positive':
-                            scores.append(sc); labels.append('Positive')
-                        else:
-                            scores.append(0.0); labels.append('Neutral')
-                    if len(scores) == len(texts):
-                        return scores, labels, True
+                    sc, lb = parse_results(response.json(), len(texts))
+                    if sc is not None:
+                        return sc, lb, True
                     break
             except Exception:
                 if attempt < 2:
                     time.sleep(10)
                 continue
 
-        # Fallback: VADER
         return None, None, False
 
     # Limit to 10 headlines for speed
@@ -1064,26 +1082,47 @@ else:
                 'Label': finbert_labels[i],
             })
     else:
-        # Fallback to VADER
-        nlp_model_name = "VADER (fallback — FinBERT API unavailable)"
-        sia = SentimentIntensityAnalyzer()
-        sentiment_data = []
-        for i, h in enumerate(headlines):
-            sc = sia.polarity_scores(h)
-            score = sc['compound']
-            if score > 0.05:
-                label = 'Positive'
-            elif score < -0.05:
-                label = 'Negative'
-            else:
-                label = 'Neutral'
-            sentiment_data.append({
-                'Headline': h,
-                'Source': headline_sources[i],
-                'Link': headline_links[i],
-                'Score': score,
-                'Label': label,
-            })
+        # Fallback to FinVADER — VADER enhanced with financial lexicons
+        try:
+            from finvader import finvader
+            nlp_model_name = "FinVADER (fallback — FinBERT API unavailable)"
+            sentiment_data = []
+            for i, h in enumerate(headlines):
+                result = finvader(h, use_sentibigomics=True, use_henry=True, indicator='compound')
+                score = float(result)
+                if score > 0.05:
+                    label = 'Positive'
+                elif score < -0.05:
+                    label = 'Negative'
+                else:
+                    label = 'Neutral'
+                sentiment_data.append({
+                    'Headline': h,
+                    'Source': headline_sources[i],
+                    'Link': headline_links[i],
+                    'Score': score,
+                    'Label': label,
+                })
+        except Exception:
+            nlp_model_name = "VADER (fallback)"
+            sia = SentimentIntensityAnalyzer()
+            sentiment_data = []
+            for i, h in enumerate(headlines):
+                sc = sia.polarity_scores(h)
+                score = sc['compound']
+                if score > 0.05:
+                    label = 'Positive'
+                elif score < -0.05:
+                    label = 'Negative'
+                else:
+                    label = 'Neutral'
+                sentiment_data.append({
+                    'Headline': h,
+                    'Source': headline_sources[i],
+                    'Link': headline_links[i],
+                    'Score': score,
+                    'Label': label,
+                })
 
     sent_df = pd.DataFrame(sentiment_data)
     avg_score = sent_df['Score'].mean()
