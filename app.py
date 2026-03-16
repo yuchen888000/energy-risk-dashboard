@@ -7,6 +7,7 @@ import nltk
 import feedparser
 import requests as req
 import time
+from arch import arch_model
 nltk.download('vader_lexicon', quiet=True)
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from sklearn.cluster import KMeans
@@ -63,7 +64,7 @@ with st.sidebar:
 
     **Risk Metrics**
     - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
-    - **Rolling Correlation**: Pearson correlation with comparison asset over 30 days.
+    - **Rolling Correlation**: Pearson correlation of daily returns with comparison asset over 30 days.
     - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs 30-day).
     - **Value at Risk (VaR)**: 95% and 99% historical VaR.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent 
@@ -74,21 +75,34 @@ with st.sidebar:
       accounting for cross-commodity correlations. Shows diversification benefit.
 
     **AI / ML**
-    - **Hybrid Regime Detection**: K-Means clustering + absolute 
-      volatility thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%).
+    - **Hybrid Regime Detection**: K-Means (3 clusters on vol + correlation) + absolute
+      thresholds. Agreement → unanimous label. Disagreement in boundary zone (4–9% vol)
+      → K-Means wins (uses 2D feature space). Disagreement outside boundary →
+      threshold wins (unambiguous at extremes).
     - **Country Risk Scoring**: Composite index of gas/oil dependency, 
       carbon intensity, energy import share, renewable share across 31 
       European countries (EU-27 + CH, UK, NO, TR). Structural scores are multiplied by real-time 
       market volatility to create dynamic risk assessment.
 
     **NLP**
-    - **FinBERT Sentiment**: Transformer model fine-tuned on financial 
-      text (ProsusAI/finbert via HuggingFace). Falls back to VADER 
-      if API unavailable.
+    - **FinBERT**: Main sentiment model. Transformer fine-tuned on financial
+      text (ProsusAI/finbert via HuggingFace). Applied to live headlines.
+    - **FinVADER**: Fallback model. VADER enhanced with SentiBigNomics + Henry
+      financial lexicons — more accurate than standard VADER for financial text.
+    - **30-Day Sentiment Trend**: Daily average sentiment via Google News RSS,
+      scored with FinVADER. Visualised as bar chart with trend line.
+
+    **LLM / Agentic**
+    - **Anomaly Detection**: 5 automated signal checks — volatility z-score,
+      GARCH divergence, correlation regime shift, sentiment-volatility divergence,
+      recent tail event (loss > 2× VaR99 in past 252 days). Flags in real time.
+    - **AI Risk Interpretation**: Quantitative signals (vol, VaR, GARCH,
+      regime, sentiment, anomalies) fed to Claude Haiku via Anthropic API.
+      Generates a 3-sentence professional risk assessment. Refreshes every 30 min.
 
     ---
-    *Built by Yuchen · IHEID Master's in International Economics*
-    *Python · Streamlit · yfinance · scikit-learn · FinBERT · GARCH*
+    *Built by Yuchen Xia · IHEID MSc International Economics*
+    *Python · Streamlit · yfinance · scikit-learn · arch (GARCH) · FinBERT · FinVADER · Anthropic Claude API*
     """)
 
 # ─── Title ───
@@ -127,7 +141,6 @@ df = load_data(commodity['ticker'], start_date, end_date)
 has_keua = df['Carbon (KEUA)'].notna().sum() > 30
 
 if commodity['ticker'] == 'KEUA':
-    # If user selected carbon, compare against TTF gas instead
     compare_data = yf.download("TTF=F", start=start_date, end=end_date, progress=False)
     df['Compare'] = compare_data['Close'].squeeze()
     compare_label = 'TTF Natural Gas (€/MWh)'
@@ -146,9 +159,15 @@ if len(df_analysis) < 30:
     st.warning("Please select a longer time range (at least 30 days of data required).")
 else:
     # ─── Core Calculations ───
+    df_analysis = df_analysis.copy()
     df_analysis['Returns'] = df_analysis['Price'].pct_change()
+    df_analysis['Compare_Returns'] = df_analysis['Compare'].pct_change()
     df_analysis['Volatility'] = df_analysis['Returns'].rolling(30).std() * 100
-    df_analysis['Rolling Correlation'] = df_analysis['Price'].rolling(30).corr(df_analysis['Compare'])
+
+    # FIX: Rolling correlation on returns (not price levels) to avoid spurious correlation
+    df_analysis['Rolling Correlation'] = (
+        df_analysis['Returns'].rolling(30).corr(df_analysis['Compare_Returns'])
+    )
 
     latest_vol = df_analysis['Volatility'].dropna().iloc[-1]
     avg_vol = df_analysis['Volatility'].dropna().mean()
@@ -156,6 +175,10 @@ else:
     returns_clean = df_analysis['Returns'].dropna()
     var_95 = np.percentile(returns_clean, 5) * 100
     var_99 = np.percentile(returns_clean, 1) * 100
+
+    # FIX: correlation metric also on returns
+    returns_corr = df_analysis[['Returns', 'Compare_Returns']].dropna()
+    overall_corr = returns_corr['Returns'].corr(returns_corr['Compare_Returns'])
 
     if latest_vol > avg_vol * 1.5:
         risk_level = "🔴 HIGH RISK"
@@ -167,7 +190,7 @@ else:
         risk_level = "🟢 LOW RISK"
         risk_color = "green"
 
-    # ─── Country Data (used by Stress Test and Country Risk sections) ───
+    # ─── Country Data ───
     COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
                  'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
                  'Hungary', 'Romania', 'Bulgaria', 'Finland', 'Sweden',
@@ -176,19 +199,28 @@ else:
                  'Cyprus', 'Malta',
                  'Switzerland', 'United Kingdom', 'Norway', 'Turkey']
 
+    # gas_dep corrections:
+    # Romania (idx=11): produces ~10 bcm/yr, nearly self-sufficient → actual import dep 17-24%
+    # Denmark (idx=15): North Sea gas still active in 2020; 67% was too high → corrected to 50%
+    #                   (2021-2024 values 60,55,55,54 are approximately correct as fields deplete)
     gas_dep = {
-        2020: [89,98,93,99,0,79,100,82,99,98,85,78,96,97,6,67,100,100,100,100,100,86,55,99,100,100,100,100,48,0,99],
-        2021: [91,98,93,99,5,82,100,81,99,97,85,76,94,96,8,60,100,100,100,100,100,85,57,99,100,100,100,100,47,0,99],
-        2022: [95,98,93,99,15,78,100,80,99,97,85,75,92,95,10,55,100,100,100,100,100,85,60,99,100,100,100,100,47,0,99],
-        2023: [95,98,93,99,68,78,100,80,99,97,85,75,92,95,12,55,100,100,100,100,100,85,60,99,100,100,100,100,47,0,99],
-        2024: [94,98,93,99,70,77,100,80,99,97,84,74,91,94,12,54,100,100,100,100,100,84,58,99,100,100,100,100,46,0,99],
+        2020: [89,98,93,99,0,79,100,82,99,98,85,17,96,97,6,50,100,100,100,100,100,86,55,99,100,100,100,100,48,0,99],
+        2021: [91,98,93,99,5,82,100,81,99,97,85,18,94,96,8,60,100,100,100,100,100,85,57,99,100,100,100,100,47,0,99],
+        2022: [95,98,93,99,15,78,100,80,99,97,85,20,92,95,10,55,100,100,100,100,100,85,60,99,100,100,100,100,47,0,99],
+        2023: [95,98,93,99,68,78,100,80,99,97,85,22,92,95,12,55,100,100,100,100,100,85,60,99,100,100,100,100,47,0,99],
+        2024: [94,98,93,99,70,77,100,80,99,97,84,24,91,94,12,54,100,100,100,100,100,84,58,99,100,100,100,100,46,0,99],
     }
+    # oil_dep corrections:
+    # Denmark (idx=15): North Sea oil production ~75k bbl/day in 2020, consumption ~160k.
+    #   Import dependency ~52% in 2020, rising to ~65% by 2024 as fields deplete.
+    #   Previous value of 100% was completely wrong.
+    # FIX: UK oil import dependency corrected (~50%) — UK has North Sea domestic production
     oil_dep = {
-        2020: [96,98,92,99,95,97,99,93,100,97,82,45,100,91,100,100,100,100,100,100,60,92,82,100,100,96,100,100,92,0,93],
-        2021: [96,98,92,99,96,97,99,93,100,97,83,44,100,90,100,100,100,100,100,100,58,92,80,100,100,96,100,100,93,0,93],
-        2022: [96,98,93,99,96,97,99,94,100,97,84,42,100,90,100,100,100,100,100,100,55,92,78,100,100,96,100,100,94,0,92],
-        2023: [97,98,93,99,96,97,99,94,100,97,84,40,100,90,100,100,100,100,100,100,52,92,76,100,100,97,100,100,95,0,92],
-        2024: [97,98,93,99,96,97,99,94,100,97,84,39,100,90,100,100,100,100,100,100,50,92,75,100,100,97,100,100,95,0,92],
+        2020: [96,98,92,99,95,97,99,93,100,97,82,45,100,91,100,52,100,100,100,100,60,92,82,100,100,96,100,100,50,0,93],
+        2021: [96,98,92,99,96,97,99,93,100,97,83,44,100,90,100,55,100,100,100,100,58,92,80,100,100,96,100,100,51,0,93],
+        2022: [96,98,93,99,96,97,99,94,100,97,84,42,100,90,100,58,100,100,100,100,55,92,78,100,100,96,100,100,52,0,92],
+        2023: [97,98,93,99,96,97,99,94,100,97,84,40,100,90,100,62,100,100,100,100,52,92,76,100,100,97,100,100,53,0,92],
+        2024: [97,98,93,99,96,97,99,94,100,97,84,39,100,90,100,65,100,100,100,100,50,92,75,100,100,97,100,100,54,0,92],
     }
     total_dep = {
         2020: [64,47,73,73,45,42,78,60,81,37,55,28,37,42,33,44,86,65,74,46,10,54,53,48,95,93,97,75,36,-580,72],
@@ -204,12 +236,16 @@ else:
         2023: [22,22,19,24,17,17,14,36,23,18,14,28,24,48,66,44,14,35,30,44,38,18,32,26,12,20,13,32,16,98,20],
         2024: [23,23,20,25,18,18,15,37,24,19,15,29,25,49,67,45,15,36,32,45,40,19,33,27,13,21,14,33,17,98,21],
     }
+    # carbon_int corrections:
+    # Latvia (idx=19): ~53% hydro share → actual intensity ~115-125 tCO2/M€, NOT 180
+    # Luxembourg (idx=24): fuel tourism inflates energy/GDP → actual ~140-155, NOT 100 (France-level)
+    # Romania (idx=11): 30% hydro + 19% nuclear → ~245-265 tCO2/M€, NOT 340 (heavy-coal level)
     carbon_int = {
-        2020: [195,100,150,130,170,400,160,120,220,300,260,340,480,140,65,110,115,130,200,180,370,250,175,170,100,210,165,60,135,80,320],
-        2021: [190,98,148,125,165,395,158,118,215,295,255,335,470,135,62,108,112,128,198,178,365,245,172,168,98,205,162,58,132,78,315],
-        2022: [185,96,145,122,162,385,156,116,212,292,252,325,460,132,60,106,110,126,196,176,355,242,170,166,96,200,158,56,130,76,312],
-        2023: [180,95,145,120,160,380,155,115,210,290,250,320,450,130,58,105,108,125,195,175,350,240,170,165,95,195,155,55,128,75,310],
-        2024: [176,93,142,118,157,375,152,113,208,287,247,315,445,128,56,103,106,123,192,172,345,237,168,163,93,190,152,54,126,73,305],
+        2020: [195,100,150,130,170,400,160,120,220,300,260,265,480,140,65,110,115,130,200,125,370,250,175,170,155,210,165,60,135,80,320],
+        2021: [190,98,148,125,165,395,158,118,215,295,255,260,470,135,62,108,112,128,198,123,365,245,172,168,152,205,162,58,132,78,315],
+        2022: [185,96,145,122,162,385,156,116,212,292,252,255,460,132,60,106,110,126,196,120,355,242,170,166,148,200,158,56,130,76,312],
+        2023: [180,95,145,120,160,380,155,115,210,290,250,250,450,130,58,105,108,125,195,118,350,240,170,165,144,195,155,55,128,75,310],
+        2024: [176,93,142,118,157,375,152,113,208,287,247,245,445,128,56,103,106,123,192,115,345,237,168,163,140,190,152,54,126,73,305],
     }
     price_sens = {
         2020: [9.0,7.2,8.5,7.0,8.2,7.0,7.8,7.5,8.2,7.2,7.5,6.8,7.5,7.5,3.2,5.5,6.8,6.5,8.0,7.2,7.5,7.0,5.8,6.2,6.0,7.8,7.2,6.8,7.8,2.2,8.5],
@@ -230,6 +266,93 @@ else:
         dep_col = 'Total Energy Dep. (%)'
         dep_label = 'Total Energy Dependency'
 
+    # ─── FinBERT via HuggingFace Inference API ───
+    # FIX: defined here so it's available to both country sentiment (Section 5b)
+    # and main NLP section (Section 6)
+    def finbert_analyze(texts):
+        API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
+        hf_token = None
+        try:
+            hf_token = st.secrets.get("HF_TOKEN", None)
+        except Exception:
+            pass
+        if not hf_token:
+            import os
+            hf_token = os.environ.get("HF_TOKEN", None)
+        headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+
+        def parse_results(results, n_texts):
+            scores, labels = [], []
+            if not isinstance(results, list):
+                return None, None
+            for item in results:
+                if isinstance(item, list):
+                    best = max(item, key=lambda x: x['score'])
+                elif isinstance(item, dict) and 'label' in item:
+                    best = item
+                else:
+                    scores.append(0.0); labels.append('Neutral')
+                    continue
+                lbl = best['label'].lower()
+                sc = best['score']
+                if lbl == 'negative':
+                    scores.append(-sc); labels.append('Negative')
+                elif lbl == 'positive':
+                    scores.append(sc); labels.append('Positive')
+                else:
+                    scores.append(0.0); labels.append('Neutral')
+            if len(scores) == n_texts:
+                return scores, labels
+            return None, None
+
+        # Warm up API
+        for attempt in range(3):
+            try:
+                warmup = req.post(API_URL, headers=headers,
+                                  json={"inputs": texts[0]}, timeout=45)
+                if warmup.status_code == 503:
+                    wait_time = warmup.json().get('estimated_time', 20)
+                    time.sleep(min(wait_time + 5, 45))
+                    continue
+                if warmup.status_code == 200:
+                    break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(10)
+                continue
+        else:
+            return None, None, False
+
+        # Send full batch
+        for attempt in range(3):
+            try:
+                response = req.post(API_URL, headers=headers,
+                                    json={"inputs": texts}, timeout=60)
+                if response.status_code == 503:
+                    wait_time = response.json().get('estimated_time', 20)
+                    time.sleep(min(wait_time + 5, 40))
+                    continue
+                if response.status_code == 200:
+                    sc, lb = parse_results(response.json(), len(texts))
+                    if sc is not None:
+                        return sc, lb, True
+                    break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(10)
+                continue
+
+        return None, None, False
+
+    def finvader_score(text):
+        """FinVADER fallback — VADER + SentiBigNomics + Henry financial lexicons."""
+        try:
+            from finvader import finvader
+            return float(finvader(text, use_sentibignomics=True, use_henry=True, indicator='compound'))
+        except Exception:
+            sia = SentimentIntensityAnalyzer()
+            return sia.polarity_scores(text)['compound']
+
     # ─── Section 1: Risk Signal ───
     st.subheader(f"Current Risk Signal — {selected_commodity}")
     st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
@@ -238,10 +361,11 @@ else:
     mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
     mc2.metric("Average Volatility", f"{avg_vol:.2f}%")
-    mc3.metric("Correlation", f"{df_analysis['Price'].corr(df_analysis['Compare']):.2f}")
+    mc3.metric("Correlation", f"{overall_corr:.2f}")
     mc4.metric("VaR (95%, 1-day)", f"{var_95:.2f}%")
 
     # ─── Section 2: Price Chart ───
+    # FIX: corrected policy event dates
     macro_events = {
         "2021-07-14": "EU Fit for 55",
         "2022-02-24": "Russia invades Ukraine",
@@ -250,9 +374,9 @@ else:
         "2023-01-01": "EU gas price cap",
         "2023-04-18": "EU ETS 2 passed",
         "2024-01-01": "EU ETS reform",
-        "2024-12-01": "CBAM transition ends",
-        "2025-02-01": "EU ETS 2 Phase 1",
-        "2025-10-01": "CBAM full enforcement",
+        "2025-12-31": "CBAM transition ends",
+        "2026-01-01": "CBAM full enforcement",
+        "2027-01-01": "EU ETS 2 starts",
     }
 
     st.subheader("Price Trends with Key EU Policy Events")
@@ -317,7 +441,7 @@ else:
 
         with cm1:
             st.write("**Full Period Correlation:**")
-            fig_corr1, ax_corr1 = plt.subplots(figsize=(5, 4))
+            fig_corr1, ax_corr1 = plt.subplots(figsize=(5, 5))
             im1 = ax_corr1.imshow(corr_full, cmap='RdYlGn', vmin=-1, vmax=1)
             ax_corr1.set_xticks(range(len(corr_full.columns)))
             ax_corr1.set_yticks(range(len(corr_full.columns)))
@@ -330,12 +454,13 @@ else:
                                   color='white' if abs(corr_full.iloc[i, j]) > 0.5 else 'black')
             plt.colorbar(im1, ax=ax_corr1, shrink=0.8)
             ax_corr1.set_title('Full Period')
+            fig_corr1.subplots_adjust(bottom=0.22)
             plt.tight_layout()
             st.pyplot(fig_corr1)
 
         with cm2:
             st.write("**Last 30 Days Correlation:**")
-            fig_corr2, ax_corr2 = plt.subplots(figsize=(5, 4))
+            fig_corr2, ax_corr2 = plt.subplots(figsize=(5, 5))
             im2 = ax_corr2.imshow(corr_30d, cmap='RdYlGn', vmin=-1, vmax=1)
             ax_corr2.set_xticks(range(len(corr_30d.columns)))
             ax_corr2.set_yticks(range(len(corr_30d.columns)))
@@ -348,6 +473,7 @@ else:
                                   color='white' if abs(corr_30d.iloc[i, j]) > 0.5 else 'black')
             plt.colorbar(im2, ax=ax_corr2, shrink=0.8)
             ax_corr2.set_title('Last 30 Days')
+            fig_corr2.subplots_adjust(bottom=0.22)
             plt.tight_layout()
             st.pyplot(fig_corr2)
 
@@ -391,7 +517,10 @@ else:
     st.subheader("GARCH Volatility Forecast")
     st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1)")
 
-    from arch import arch_model
+    # Initialize GARCH output variables (needed by anomaly detection later)
+    current_cond_vol = None
+    garch_forecast_10d = None
+    garch_forecast_5d = None
 
     garch_returns = returns_clean.dropna() * 100
     try:
@@ -402,7 +531,10 @@ else:
         forecast_var = forecast.variance.iloc[-1]
         forecast_vol = np.sqrt(forecast_var)
 
-        current_cond_vol = np.sqrt(result.conditional_volatility.iloc[-1] ** 2)
+        # FIX: conditional_volatility is already a volatility series, no need for sqrt(x**2)
+        current_cond_vol = result.conditional_volatility.iloc[-1]
+        garch_forecast_10d = float(forecast_vol.iloc[9])
+        garch_forecast_5d = float(forecast_vol.iloc[4])
 
         gc1, gc2, gc3 = st.columns(3)
         gc1.metric("Current GARCH Vol (daily)", f"{current_cond_vol:.2f}%")
@@ -417,10 +549,37 @@ else:
         ax_cv.set_title('GARCH(1,1) Conditional Volatility')
         ax_cv.fill_between(cond_vol.index, cond_vol, 0, alpha=0.1, color='purple')
 
+        # ── Bootstrap 90% CI for GARCH(1,1) 10-day forecast ─────────────────────
+        # Resample standardised residuals (ẑ_t = ε_t / σ_t) from the fitted model.
+        # For each draw, propagate the GARCH recursion forward 10 steps to obtain a
+        # distribution of forecast volatilities; take the 5th / 95th percentiles.
+        _N_BOOT   = 500
+        _std_z    = (result.resid / result.conditional_volatility).dropna().values
+        _omega_b  = result.params['omega']
+        _alpha_b  = result.params['alpha[1]']
+        _beta_b   = result.params['beta[1]']
+        _s2_init  = float(result.conditional_volatility.iloc[-1] ** 2)
+        _e2_init  = float(garch_returns.iloc[-1] ** 2)
+
+        _boot_vols = np.zeros((_N_BOOT, 10))
+        _rng = np.random.default_rng(42)
+        for _b in range(_N_BOOT):
+            _z  = _rng.choice(_std_z, size=10, replace=True)
+            _s2 = _s2_init
+            _e2 = _e2_init
+            for _h in range(10):
+                _s2 = _omega_b + _alpha_b * _e2 + _beta_b * _s2
+                _boot_vols[_b, _h] = np.sqrt(max(_s2, 1e-8))  # guard against numerical zero
+                _e2 = _s2 * _z[_h] ** 2
+
+        _ci_lo = np.percentile(_boot_vols, 5,  axis=0)
+        _ci_hi = np.percentile(_boot_vols, 95, axis=0)
+        # ─────────────────────────────────────────────────────────────────────────
+
         forecast_days = list(range(1, 11))
         ax_fc.plot(forecast_days, forecast_vol.values, color='purple', linewidth=2, marker='o', markersize=5)
-        ax_fc.fill_between(forecast_days, forecast_vol.values * 0.7, forecast_vol.values * 1.3,
-                          alpha=0.15, color='purple', label='±30% confidence band')
+        ax_fc.fill_between(forecast_days, _ci_lo, _ci_hi,
+                           alpha=0.18, color='purple', label='Bootstrap 90% CI (500 draws)')
         ax_fc.set_xlabel('Days Ahead')
         ax_fc.set_ylabel('Forecast Volatility (daily %)')
         ax_fc.set_title('10-Day Volatility Forecast')
@@ -438,6 +597,8 @@ else:
             st.write(f"**α + β = {persistence:.4f}** — "
                      f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
             st.write(f"**Log-Likelihood:** {result.loglikelihood:.2f}")
+            st.caption("Confidence band: bootstrap residual resampling — 500 draws of standardised "
+                       "innovations propagated through the GARCH recursion; 5th–95th percentile shown.")
 
     except Exception as e:
         st.warning(f"GARCH model could not be fitted: {e}")
@@ -454,7 +615,15 @@ else:
     features = features.copy()
     features['Cluster'] = kmeans.fit_predict(scaled)
 
-    def classify_regime(vol):
+    # ── Hybrid Regime Detection ───────────────────────────────────────────────
+    # Step 1: Map K-Means clusters → regime labels by cluster-mean volatility.
+    # Sorting by mean vol assigns: lowest cluster = Calm, middle = Volatile, highest = Crisis.
+    _cluster_vol_means = features.groupby('Cluster')['Volatility'].mean().sort_values()
+    _cluster_to_regime = dict(zip(_cluster_vol_means.index.tolist(), ['Calm', 'Volatile', 'Crisis']))
+    features['KMeans_Regime'] = features['Cluster'].map(_cluster_to_regime)
+
+    # Step 2: Absolute threshold labels — reliable at extremes, ambiguous near boundaries.
+    def _threshold_regime(vol):
         if vol > 12:
             return 'Crisis'
         elif vol > 6:
@@ -462,14 +631,33 @@ else:
         else:
             return 'Calm'
 
-    features['Regime'] = features['Volatility'].apply(classify_regime)
+    features['Threshold_Regime'] = features['Volatility'].apply(_threshold_regime)
+
+    # Step 3: Weighted hybrid vote.
+    # - Both agree  → unanimous (high confidence)
+    # - Boundary zone 4–9% vol → K-Means wins: it uses *both* volatility and correlation,
+    #   so it captures regime character that pure vol thresholds miss (e.g. a low-vol period
+    #   with extreme negative correlation behaving like early-stage Volatile).
+    # - Outside boundary zone → threshold wins: at extremes the threshold is unambiguous
+    #   and K-Means adds no useful information.
+    _BOUNDARY_LO, _BOUNDARY_HI = 4.0, 9.0
+
+    def _hybrid_regime(row):
+        t, k = row['Threshold_Regime'], row['KMeans_Regime']
+        if t == k:
+            return t
+        return k if _BOUNDARY_LO <= row['Volatility'] <= _BOUNDARY_HI else t
+
+    features['Regime'] = features.apply(_hybrid_regime, axis=1)
+    # ─────────────────────────────────────────────────────────────────────────
 
     current_regime = features['Regime'].iloc[-1]
     regime_colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
     regime_color = regime_colors.get(current_regime, 'gray')
     st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
                 unsafe_allow_html=True)
-    st.caption("Thresholds: Calm < 6% · Volatile 6–12% · Crisis > 12% (30-day rolling volatility)")
+    st.caption("Thresholds: Calm < 6% · Volatile 6–12% · Crisis > 12% (30-day rolling volatility) · "
+               "K-Means overrides threshold in 4–9% boundary zone using volatility + correlation")
 
     regime_stats = features.groupby('Regime').agg(
         Days=('Volatility', 'count'),
@@ -503,8 +691,6 @@ else:
     stress_pct = st.slider("Simulate price shock (%)", min_value=-50, max_value=100, value=30, step=5,
                             help="Positive = price spike, Negative = price crash")
 
-    # Estimate stressed volatility: current vol * shock multiplier
-    # Empirical relationship: a 50% price shock roughly doubles short-term volatility
     shock_vol_multiplier = 1 + abs(stress_pct) / 50
     stressed_vol = latest_vol * shock_vol_multiplier
     stressed_var_95 = var_95 * shock_vol_multiplier
@@ -519,18 +705,24 @@ else:
     st4.metric("Stressed VaR 99%", f"{stressed_var_99:.2f}%",
                delta=f"{stressed_var_99 - var_99:.2f}%")
 
-    # Stressed regime
+    # FIX: avoid uninformative "Regime shifts to Calm (from Calm)"
     if stressed_vol > 12:
         stressed_regime = "🔴 Crisis"
+        stressed_regime_name = "Crisis"
     elif stressed_vol > 6:
         stressed_regime = "🟡 Volatile"
+        stressed_regime_name = "Volatile"
     else:
         stressed_regime = "🟢 Calm"
+        stressed_regime_name = "Calm"
 
-    st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime shifts to **{stressed_regime}** "
-                f"(from {current_regime})")
+    if stressed_regime_name == current_regime:
+        st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime remains **{stressed_regime}** "
+                    f"— volatility stays within {current_regime} threshold ({stressed_vol:.1f}%)")
+    else:
+        st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime shifts to **{stressed_regime}** "
+                    f"(from {current_regime})")
 
-    # Top 5 most impacted countries under stress
     st.write("**Most impacted countries under this scenario:**")
 
     if selected_commodity in ['TTF Natural Gas']:
@@ -595,38 +787,37 @@ else:
         else:
             if total_weight != 100:
                 st.caption(f"Weights sum to {total_weight}% — auto-normalized to 100% for calculation.")
-            weights = {}
+
+            raw_weights = {}
             if 'TTF Gas' in port_returns.columns:
-                weights['TTF Gas'] = w_gas / 100
+                raw_weights['TTF Gas'] = w_gas
             if 'WTI Oil' in port_returns.columns:
-                weights['WTI Oil'] = w_wti / 100
+                raw_weights['WTI Oil'] = w_wti
             if 'Brent Oil' in port_returns.columns:
-                weights['Brent Oil'] = w_brent / 100
+                raw_weights['Brent Oil'] = w_brent
             if 'EU Carbon' in port_returns.columns:
-                weights['EU Carbon'] = w_carbon / 100
+                raw_weights['EU Carbon'] = w_carbon
 
-            # Normalize weights for available commodities
-            available = [k for k in weights if k in port_returns.columns]
-            w_array = np.array([weights[k] for k in available])
+            available = [k for k in raw_weights if k in port_returns.columns]
+            w_array = np.array([raw_weights[k] for k in available], dtype=float)
             if w_array.sum() > 0:
-                w_array = w_array / w_array.sum()  # re-normalize
+                w_array = w_array / w_array.sum()  # normalized weights (sum to 1)
 
-            # Portfolio returns (weighted sum)
+            # Portfolio returns
             port_ret = (port_returns[available] * w_array).sum(axis=1)
 
             # Portfolio metrics
             port_vol = port_ret.rolling(30).std().dropna().iloc[-1] * 100
             port_var_95 = np.percentile(port_ret.dropna(), 5) * 100
             port_var_99 = np.percentile(port_ret.dropna(), 1) * 100
-            port_max_loss = port_ret.dropna().min() * 100
 
-            # Individual VaRs for comparison
+            # Individual VaRs
             individual_vars = {}
             for col in available:
                 individual_vars[col] = np.percentile(port_returns[col].dropna(), 5) * 100
 
-            # Diversification benefit
-            undiversified_var = sum(abs(individual_vars[k]) * weights[k] for k in available)
+            # FIX: diversification benefit uses normalized w_array, not raw weights
+            undiversified_var = sum(abs(individual_vars[k]) * w_array[i] for i, k in enumerate(available))
             diversification_benefit = undiversified_var - abs(port_var_95)
 
             pv1, pv2, pv3, pv4 = st.columns(4)
@@ -636,7 +827,6 @@ else:
             pv4.metric("Diversification Benefit", f"{diversification_benefit:.2f}%",
                        help="Risk reduction from holding multiple commodities vs single")
 
-            # Portfolio return distribution
             fig_pvar, (ax_pd, ax_pc) = plt.subplots(1, 2, figsize=(14, 4))
 
             ax_pd.hist(port_ret.dropna() * 100, bins=60, color='navy', alpha=0.7, edgecolor='white')
@@ -649,7 +839,6 @@ else:
             ax_pd.set_title('Portfolio Return Distribution')
             ax_pd.legend(fontsize=8)
 
-            # Compare individual vs portfolio VaR
             compare_names = available + ['Portfolio']
             compare_vars = [individual_vars[k] for k in available] + [port_var_95]
             compare_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)] + ['navy']
@@ -664,12 +853,11 @@ else:
             plt.tight_layout()
             st.pyplot(fig_pvar)
 
-            # Weight composition pie chart
             st.write("**Portfolio Composition:**")
             fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
-            pie_labels = [f"{k}\n({weights[k]*100:.0f}%)" for k in available]
+            pie_labels = [f"{k}\n({w_array[i]*100:.0f}%)" for i, k in enumerate(available)]
             pie_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)]
-            ax_pie.pie([weights[k] for k in available], labels=pie_labels, colors=pie_colors,
+            ax_pie.pie(w_array, labels=pie_labels, colors=pie_colors,
                       autopct='', startangle=90)
             ax_pie.set_title('Portfolio Weight Allocation')
             plt.tight_layout()
@@ -680,7 +868,6 @@ else:
                        f"holding each commodity independently. Weights are user-adjustable.")
     else:
         st.info("Not enough multi-commodity data to compute Portfolio VaR.")
-
 
     # ─── Section 5b: European Country Energy Risk ───
     st.subheader("European Country Energy Risk Exposure")
@@ -702,30 +889,47 @@ else:
     cr_df['Dep Clipped'] = cr_df[dep_col].clip(lower=0)
     cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)
 
-    # Static structural risk score
-    cr_df['Structural Score'] = (
-        cr_df['Dep Clipped'] * 0.25 +
-        cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.15 +
-        cr_df['Total Clipped'] * 0.15 +
-        (100 - cr_df['Renewable (%)']) * 0.15 +
-        cr_df['Dep Clipped'].rank(pct=True) * 100 * 0.15 +
-        cr_df['Price Sensitivity'] * 10 * 0.15
-    ).round(1)
+    # Norway is a net energy exporter; negative total_dep values are economically meaningful
+    # (surplus) but would display confusingly and skew any ranking column.
+    # Clamp display column to 0 — the scoring already uses Total Clipped internally.
+    cr_df['Total Energy Dep. (%)'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)
 
-    # Dynamic risk = structural vulnerability × country-specific volatility impact
-    # Countries with higher dependency feel the same market volatility much more
+    # Structural Score formula — commodity-aware to avoid double-weighting:
+    # For Gas/Oil commodities: dep_col is gas or oil dep (separate from total_dep) → 6 distinct factors
+    # For EU Carbon: dep_col IS total energy dep → would appear twice if formula is identical.
+    #   Solution: replace the separate total_dep term with carbon-intensity rank (already in formula)
+    #   and redistribute weight so factors remain independent.
+    if commodity['ticker'] == 'KEUA':
+        # Carbon mode: 6 factors with no double-count
+        # Total Energy Dep 25% | Carbon Int rank 20% | Inverse Renewable 20%
+        # Total Energy Dep rank 15% | Price Sensitivity 15% | Renewable rank 5% (residual)
+        cr_df['Structural Score'] = (
+            cr_df['Dep Clipped'] * 0.25 +
+            cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.20 +
+            (100 - cr_df['Renewable (%)']) * 0.20 +
+            cr_df['Dep Clipped'].rank(pct=True) * 100 * 0.15 +
+            cr_df['Price Sensitivity'] * 10 * 0.15 +
+            (100 - cr_df['Renewable (%)'].rank(pct=True) * 100) * 0.05
+        ).round(1)
+    else:
+        # Gas / Oil mode: dep_col ≠ total_dep → all 6 factors are independent
+        cr_df['Structural Score'] = (
+            cr_df['Dep Clipped'] * 0.25 +
+            cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.15 +
+            cr_df['Total Clipped'] * 0.15 +
+            (100 - cr_df['Renewable (%)']) * 0.15 +
+            cr_df['Dep Clipped'].rank(pct=True) * 100 * 0.15 +
+            cr_df['Price Sensitivity'] * 10 * 0.15
+        ).round(1)
+
     vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
     vol_ratio_clamped = min(max(vol_ratio, 0.5), 3.0)
 
-    # Country-specific multiplier: base vol_ratio weighted by dependency
-    # High dependency country (99%) gets full multiplier, low dependency (10%) gets much less
     cr_df['Country Vol Multiplier'] = (
         0.5 + 0.5 * vol_ratio_clamped * (cr_df['Dep Clipped'] / 100)
     ).round(2)
-    # Floor at 0.5 so no country goes to zero risk
 
     cr_df['Risk Score'] = (cr_df['Structural Score'] * cr_df['Country Vol Multiplier']).round(1)
-
     cr_df = cr_df.sort_values('Risk Score', ascending=False)
 
     def risk_category(score):
@@ -750,7 +954,6 @@ else:
         display_cols = ['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
                         'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
                         'Price Sensitivity', 'Renewable (%)']
-        # Remove duplicates while preserving order
         seen = set()
         display_cols = [c for c in display_cols if not (c in seen or seen.add(c))]
         display_df = cr_df[display_cols].reset_index(drop=True)
@@ -761,7 +964,6 @@ else:
         selected_country = st.selectbox("Select Country for Detail", cr_df['Country'].tolist())
         country_data = cr_df[cr_df['Country'] == selected_country].iloc[0]
 
-        # Country-specific real-time risk signal (same format as top section)
         country_dep_val = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
         country_adj_vol = latest_vol * country_dep_val
         country_adj_var = var_95 * country_dep_val
@@ -866,38 +1068,56 @@ else:
     ax_cvol.fill_between(country_vol.index, country_vol, 0, alpha=0.1, color='red')
     plt.tight_layout()
     st.pyplot(fig_cvol)
-    st.caption(f"Adjusted volatility = {selected_commodity} 30-day rolling volatility × {selected_country}'s {dep_label.lower()} ({country_data[dep_col]:.0f}%). "
-               f"Current: {country_vol.iloc[-1]:.2f}%")
+    st.caption(f"Adjusted volatility = {selected_commodity} 30-day rolling volatility × {selected_country}'s "
+               f"{dep_label.lower()} ({country_data[dep_col]:.0f}%). Current: {country_vol.iloc[-1]:.2f}%")
 
     # Per-country news sentiment
+    # FIX: now uses FinBERT → FinVADER → VADER fallback chain (consistent with main sentiment section)
     st.write(f"**{selected_country} — Current Energy News Sentiment:**")
-    country_rss_url = f"https://news.google.com/rss/search?q={selected_country}+energy+{commodity['rss_query'].split('+')[0]}+when:7d&hl=en"
-    # Step 1: fetch RSS (isolated try/except)
+    country_rss_url = (f"https://news.google.com/rss/search?q={selected_country}+energy+"
+                       f"{commodity['rss_query'].split('+')[0]}+when:7d&hl=en")
     country_headlines = []
     try:
         country_feed = feedparser.parse(country_rss_url)
-        for entry in country_feed.entries[:20]:
+        _energy_kw = commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
+                                              'fuel', 'electricity', 'pipeline', 'LNG',
+                                              'emission', 'climate', 'price', 'supply',
+                                              'tanker', 'refinery', 'fossil', 'renewable',
+                                              'heating', 'Hormuz', 'sanction', 'ETS']
+        for entry in country_feed.entries[:30]:
             title = entry.title
-            if selected_country.lower() in title.lower() or any(kw.lower() in title.lower() for kw in commodity['keywords'][:3]):
+            country_match = selected_country.lower() in title.lower()
+            energy_match = any(kw.lower() in title.lower() for kw in _energy_kw)
+            if country_match and energy_match:
+                country_headlines.append(title)
+            elif energy_match and not country_match:
                 country_headlines.append(title)
             if len(country_headlines) >= 5:
                 break
     except Exception:
         pass
 
-    # Step 2: score headlines (separate from RSS fetch)
     if country_headlines:
+        # FinBERT → FinVADER → VADER
         try:
             c_scores_raw, c_labels_raw, c_ok = finbert_analyze(country_headlines[:5])
             if c_ok:
                 country_scores = c_scores_raw
                 c_model = "FinBERT"
             else:
-                raise Exception("FinBERT failed")
+                raise Exception("FinBERT unavailable")
         except Exception:
-            sia_country = SentimentIntensityAnalyzer()
-            country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
-            c_model = "VADER"
+            try:
+                from finvader import finvader as _fv
+                country_scores = [
+                    float(_fv(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
+                    for h in country_headlines
+                ]
+                c_model = "FinVADER"
+            except Exception:
+                sia_country = SentimentIntensityAnalyzer()
+                country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
+                c_model = "VADER"
 
         country_avg = np.mean(country_scores)
         if country_avg > 0.05:
@@ -907,8 +1127,11 @@ else:
         else:
             c_sent_label = "Neutral"; c_sent_color = "orange"
 
-        st.markdown(f"<span style='color:{c_sent_color}; font-weight:bold'>{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} headlines · {c_model}",
-                    unsafe_allow_html=True)
+        st.markdown(
+            f"<span style='color:{c_sent_color}; font-weight:bold'>"
+            f"{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} headlines · {c_model}",
+            unsafe_allow_html=True
+        )
         for i, h in enumerate(country_headlines):
             sc = country_scores[i]
             icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
@@ -916,19 +1139,25 @@ else:
     else:
         st.info(f"No recent energy news found specifically for {selected_country}.")
 
-    st.caption(f"Structural Score = {dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%). Dynamic Risk = Structural × Country-specific volatility multiplier (weighted by dependency). Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary.")
+    st.caption(
+        f"Structural Score = {dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + "
+        f"Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%). "
+        f"Dynamic Risk = Structural × Country-specific volatility multiplier (weighted by dependency). "
+        f"Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary."
+    )
 
     # ─── Section 6: NLP Sentiment (FinBERT) ───
     st.subheader(f"Energy News Sentiment — {selected_commodity}")
     st.write("Real-time sentiment analysis using FinBERT (financial domain transformer model)")
 
-    # Commodity-specific + general energy keywords
     general_keywords = ['energy', 'power', 'electricity', 'renewable', 'climate',
-                        'emission', 'fuel', 'Europe', 'European']
+                        'emission', 'fuel', 'Europe', 'European', 'heating',
+                        'petrol', 'diesel', 'fossil', 'nuclear', 'pipeline',
+                        'price hike', 'energy bill', 'energy cost', 'energy supply',
+                        'energy crisis', 'energy market', 'energy shock',
+                        'LNG', 'OPEC', 'refinery', 'carbon', 'ETS', 'Hormuz']
     nlp_keywords = commodity['keywords'] + general_keywords
 
-    # Fetch headlines fresh every run — entry-level error handling so one bad entry
-    # doesn't kill the whole source
     rss_feeds = {
         "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
         "OilPrice": "https://oilprice.com/rss/main",
@@ -962,9 +1191,33 @@ else:
                 link = entry.get('link', '')
                 if title.lower() in seen_titles:
                     continue
-                # BBC/OilPrice需要keyword filter；Google News已是话题定向不需要
+                _broad_energy = ['energy', 'gas', 'oil', 'carbon', 'power', 'fuel',
+                                  'electricity', 'renewable', 'emission', 'climate',
+                                  'pipeline', 'LNG', 'OPEC', 'ETS', 'EUA',
+                                  'energy price', 'energy shock', 'energy market',
+                                  'EU energy', 'European energy', 'energy crisis',
+                                  'fossil fuel', 'coal', 'nuclear', 'solar', 'wind farm',
+                                  'refinery', 'barrel', 'Brent', 'WTI', 'TTF',
+                                  'Hormuz', 'Nord Stream', 'energy transition']
                 if source_name not in _google_sources:
                     if not any(kw.lower() in title.lower() for kw in nlp_keywords):
+                        continue
+                    # Filter out US-domestic-only headlines that have no European relevance.
+                    # Headlines mentioning global chokepoints (Hormuz, Suez) or EU/Europe are kept.
+                    _us_domestic = ['US shale', 'U.S. shale', 'American oil', 'US oil output',
+                                    'US gas output', 'US production', 'U.S. production',
+                                    'US inventory', 'U.S. inventory', 'EIA report',
+                                    'US Strategic Reserve', 'U.S. Strategic Petroleum']
+                    _european_relevance = ['Europe', 'European', 'EU ', 'Hormuz', 'Suez',
+                                           'LNG', 'pipeline', 'Nord Stream', 'TTF', 'ETS',
+                                           'UK', 'Germany', 'France', 'Italy', 'Spain',
+                                           'Russia', 'OPEC', 'global', 'world']
+                    is_us_only = (any(kw.lower() in title.lower() for kw in _us_domestic) and
+                                  not any(kw.lower() in title.lower() for kw in _european_relevance))
+                    if is_us_only:
+                        continue
+                else:
+                    if not any(kw.lower() in title.lower() for kw in _broad_energy):
                         continue
                 headlines.append(title)
                 headline_links.append(link)
@@ -987,86 +1240,12 @@ else:
         headline_links = [''] * len(headlines)
         headline_sources = ['Sample'] * len(headlines)
 
-    # ─── FinBERT via HuggingFace Inference API ───
-    def finbert_analyze(texts):
-        API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
-        hf_token = None
-        try:
-            hf_token = st.secrets.get("HF_TOKEN", None)
-        except Exception:
-            pass
-        if not hf_token:
-            import os
-            hf_token = os.environ.get("HF_TOKEN", None)
-        headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
-
-        def parse_results(results, n_texts):
-            scores, labels = [], []
-            if not isinstance(results, list):
-                return None, None
-            for item in results:
-                if isinstance(item, list):
-                    best = max(item, key=lambda x: x['score'])
-                elif isinstance(item, dict) and 'label' in item:
-                    best = item
-                else:
-                    scores.append(0.0); labels.append('Neutral')
-                    continue
-                lbl = best['label'].lower()
-                sc = best['score']
-                if lbl == 'negative':
-                    scores.append(-sc); labels.append('Negative')
-                elif lbl == 'positive':
-                    scores.append(sc); labels.append('Positive')
-                else:
-                    scores.append(0.0); labels.append('Neutral')
-            if len(scores) == n_texts:
-                return scores, labels
-            return None, None
-
-        # Step 1: warm up API with single text first
-        for attempt in range(3):
-            try:
-                warmup = req.post(API_URL, headers=headers,
-                                  json={"inputs": texts[0]}, timeout=45)
-                if warmup.status_code == 503:
-                    wait_time = warmup.json().get('estimated_time', 20)
-                    time.sleep(min(wait_time + 5, 45))
-                    continue
-                if warmup.status_code == 200:
-                    break  # API is ready
-            except Exception:
-                if attempt < 2:
-                    time.sleep(10)
-                continue
-        else:
-            return None, None, False  # API not available after warmup
-
-        # Step 2: send full batch
-        for attempt in range(3):
-            try:
-                response = req.post(API_URL, headers=headers,
-                                    json={"inputs": texts}, timeout=60)
-                if response.status_code == 503:
-                    wait_time = response.json().get('estimated_time', 20)
-                    time.sleep(min(wait_time + 5, 40))
-                    continue
-                if response.status_code == 200:
-                    sc, lb = parse_results(response.json(), len(texts))
-                    if sc is not None:
-                        return sc, lb, True
-                    break
-            except Exception:
-                if attempt < 2:
-                    time.sleep(10)
-                continue
-
-        return None, None, False
-
-    # Limit to 10 headlines for speed
+    # Limit to 10 headlines
     headlines = headlines[:10]
     headline_links = headline_links[:10]
     headline_sources = headline_sources[:10]
+
+    # FinBERT → FinVADER → VADER
     finbert_scores, finbert_labels, finbert_success = finbert_analyze(headlines)
 
     if finbert_success:
@@ -1082,14 +1261,13 @@ else:
                 'Label': finbert_labels[i],
             })
     else:
-        # Fallback to FinVADER — VADER enhanced with financial lexicons
+        # FIX: FinVADER fallback (consistent with README and country sentiment)
         try:
-            from finvader import finvader
+            from finvader import finvader as _fv_main
             nlp_model_name = "FinVADER (fallback — FinBERT API unavailable)"
             sentiment_data = []
             for i, h in enumerate(headlines):
-                result = finvader(h, use_sentibigomics=True, use_henry=True, indicator='compound')
-                score = float(result)
+                score = float(_fv_main(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
                 if score > 0.05:
                     label = 'Positive'
                 elif score < -0.05:
@@ -1171,7 +1349,7 @@ else:
     plt.tight_layout()
     st.pyplot(fig3)
 
-    # Top positive & negative headlines — only show real pos/neg, avoid overlap
+    # Top positive & negative headlines
     top_pos = sent_df[sent_df['Score'] > 0.05].nlargest(3, 'Score')
     top_neg = sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score')
 
@@ -1200,55 +1378,42 @@ else:
     st.subheader("Sentiment Trend (30 Days)")
     st.write(f"Daily average sentiment for {selected_commodity}-related European energy news over the past 30 days")
 
+    # FIX: use FinVADER (not basic VADER) for 30-day trend, consistent with fallback strategy
     @st.cache_data(ttl=7200, show_spinner="Fetching 30-day news history...")
     def get_sentiment_trend(rss_query, keywords):
-        """Fetch past 30 days of news via Google News RSS and compute daily sentiment."""
-        from datetime import datetime, timedelta
+        """Fetch past 30 days of news via Google News RSS and compute daily FinVADER sentiment."""
+        from datetime import datetime
 
-        sia_trend = SentimentIntensityAnalyzer()
         daily_scores = {}
 
-        # Google News RSS with 'when:30d' fetches past 30 days
-        trend_url = f"https://news.google.com/rss/search?q={rss_query}+when:30d&hl=en"
-        try:
-            feed = feedparser.parse(trend_url)
-            for entry in feed.entries[:100]:
-                title = entry.title
-                if not any(kw.lower() in title.lower() for kw in keywords):
-                    continue
+        def score_text(text):
+            try:
+                from finvader import finvader as _fv_t
+                return float(_fv_t(text, use_sentibignomics=True, use_henry=True, indicator='compound'))
+            except Exception:
+                sia_t = SentimentIntensityAnalyzer()
+                return sia_t.polarity_scores(text)['compound']
 
-                # Parse published date
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
-                else:
-                    continue
-
-                score = sia_trend.polarity_scores(title)['compound']
-
-                if pub_date not in daily_scores:
-                    daily_scores[pub_date] = []
-                daily_scores[pub_date].append(score)
-        except Exception:
-            pass
-
-        # Also add a second query for broader coverage
-        trend_url2 = f"https://news.google.com/rss/search?q=European+energy+{rss_query.split('+')[0]}+when:30d&hl=en"
-        try:
-            feed2 = feedparser.parse(trend_url2)
-            for entry in feed2.entries[:100]:
-                title = entry.title
-                if not any(kw.lower() in title.lower() for kw in keywords):
-                    continue
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
-                else:
-                    continue
-                score = sia_trend.polarity_scores(title)['compound']
-                if pub_date not in daily_scores:
-                    daily_scores[pub_date] = []
-                daily_scores[pub_date].append(score)
-        except Exception:
-            pass
+        for trend_url in [
+            f"https://news.google.com/rss/search?q={rss_query}+when:30d&hl=en",
+            f"https://news.google.com/rss/search?q=European+energy+{rss_query.split('+')[0]}+when:30d&hl=en",
+        ]:
+            try:
+                feed = feedparser.parse(trend_url)
+                for entry in feed.entries[:100]:
+                    title = entry.title
+                    if not any(kw.lower() in title.lower() for kw in keywords):
+                        continue
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
+                    else:
+                        continue
+                    s = score_text(title)
+                    if pub_date not in daily_scores:
+                        daily_scores[pub_date] = []
+                    daily_scores[pub_date].append(s)
+            except Exception:
+                pass
 
         if not daily_scores:
             return None
@@ -1263,9 +1428,9 @@ else:
 
     trend_keywords = commodity['keywords'] + ['energy', 'Europe', 'European']
     trend_df = get_sentiment_trend(commodity['rss_query'], trend_keywords)
+    avg_30d = None  # initialized here; set inside conditional below
 
     if trend_df is not None and len(trend_df) > 3:
-        # Today's sentiment
         today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
         today_sent = trend_df[trend_df['Date'] == today_str]
         avg_30d = trend_df['Avg Sentiment'].mean()
@@ -1279,7 +1444,6 @@ else:
             tc2.metric("Today's Headlines", "0")
         tc3.metric("30-Day Avg Sentiment", f"{avg_30d:.3f}")
 
-        # Trend chart
         fig_trend, ax_trend = plt.subplots(figsize=(14, 4))
         colors_trend = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
                         for s in trend_df['Avg Sentiment']]
@@ -1294,15 +1458,267 @@ else:
         plt.tight_layout()
         st.pyplot(fig_trend)
 
-        st.caption(f"Based on {int(trend_df['Headlines Count'].sum())} headlines over {len(trend_df)} days · Scored with VADER (trend) + FinBERT (current)")
+        st.caption(f"Based on {int(trend_df['Headlines Count'].sum())} headlines over {len(trend_df)} days · Scored with FinVADER (trend) + FinBERT (current)")
     else:
         st.info("Not enough historical headline data to generate trend. This improves over time as more news is collected.")
+
+    # ─── Section 6c: Anomaly Detection ───
+    st.subheader("🔍 Anomaly Detection")
+    st.write("Automated signal monitoring — flags statistical outliers and structural divergences in real time.")
+
+    vol_series = df_analysis['Volatility'].dropna()
+    vol_std = vol_series.std()
+
+    # Correlation values for the selected commodity vs comparison
+    # Use the rolling corr series: full period mean vs last 30 days mean
+    corr_series = df_analysis['Rolling Correlation'].dropna()
+    corr_full_val = corr_series.mean() if len(corr_series) > 0 else None
+    corr_30d_val = corr_series.tail(30).mean() if len(corr_series) >= 30 else None
+
+    anomalies = []
+
+    # ── 1. Volatility spike / complacency ──
+    if vol_std > 0:
+        z = (latest_vol - avg_vol) / vol_std
+        if z > 2.5:
+            anomalies.append({
+                'level': '🔴 CRITICAL',
+                'type': 'Extreme Volatility Spike',
+                'detail': (f'Current vol {latest_vol:.1f}% is **{z:.1f}σ** above historical mean '
+                           f'({avg_vol:.1f}%). Tail-risk elevated — review VaR limits.'),
+            })
+        elif z > 1.8:
+            anomalies.append({
+                'level': '🟡 WARNING',
+                'type': 'Elevated Volatility',
+                'detail': (f'Current vol {latest_vol:.1f}% is {z:.1f}σ above mean. '
+                           f'Approaching stress territory — monitor closely.'),
+            })
+        elif z < -1.5:
+            anomalies.append({
+                'level': '🔵 WATCH',
+                'type': 'Unusual Calm (Complacency Risk)',
+                'detail': (f'Current vol {latest_vol:.1f}% is {abs(z):.1f}σ below mean. '
+                           f'Low-vol regimes can precede sharp reversals.'),
+            })
+
+    # ── 2. GARCH forward signal ──
+    if garch_forecast_10d is not None and latest_vol > 0:
+        garch_ratio = garch_forecast_10d / latest_vol
+        if garch_ratio > 1.30:
+            anomalies.append({
+                'level': '🟡 WARNING',
+                'type': 'GARCH Vol Expansion Signal',
+                'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.1f}%) exceeds current rolling vol '
+                           f'({latest_vol:.1f}%) by {(garch_ratio-1)*100:.0f}%. '
+                           f'Model projects volatility expansion ahead.'),
+            })
+        elif garch_ratio < 0.70:
+            anomalies.append({
+                'level': '🟢 INFO',
+                'type': 'GARCH Mean Reversion',
+                'detail': (f'GARCH forecast ({garch_forecast_10d:.1f}%) well below current vol '
+                           f'({latest_vol:.1f}%). Model projects volatility normalization.'),
+            })
+
+    # ── 3. Correlation regime shift ──
+    if corr_full_val is not None and corr_30d_val is not None:
+        corr_shift = abs(corr_30d_val - corr_full_val)
+        if corr_shift > 0.4:
+            direction = "risen" if corr_30d_val > corr_full_val else "fallen"
+            anomalies.append({
+                'level': '🟡 WARNING',
+                'type': 'Correlation Regime Shift',
+                'detail': (f'30-day correlation ({corr_30d_val:.2f}) has {direction} {corr_shift:.2f} '
+                           f'from historical baseline ({corr_full_val:.2f}). '
+                           f'Cross-commodity dynamics are changing.'),
+            })
+        elif corr_shift > 0.25:
+            anomalies.append({
+                'level': '🔵 WATCH',
+                'type': 'Correlation Drift',
+                'detail': (f'30-day correlation ({corr_30d_val:.2f}) drifting from baseline '
+                           f'({corr_full_val:.2f}). Diversification assumptions may be shifting.'),
+            })
+
+    # ── 4. Sentiment–volatility divergence ──
+    if avg_score is not None and avg_30d is not None:
+        if current_regime in ['Volatile', 'Crisis'] and avg_score > 0.10:
+            anomalies.append({
+                'level': '🟡 WARNING',
+                'type': 'Sentiment–Volatility Divergence',
+                'detail': (f'Market regime is **{current_regime}** but current sentiment is positive '
+                           f'({avg_score:+.3f}). Possible market complacency — short-term divergence.'),
+            })
+        if current_regime == 'Calm' and avg_30d is not None and avg_30d < -0.15:
+            anomalies.append({
+                'level': '🔵 WATCH',
+                'type': 'Negative Sentiment Trend vs Calm Vol',
+                'detail': (f'30-day sentiment average ({avg_30d:+.3f}) persistently negative '
+                           f'despite calm volatility. Sentiment may be a leading indicator.'),
+            })
+
+    # ── 5. Historical tail — only flag if RECENT extreme loss, not just all-time max ──
+    # Using all-time max_loss > VaR99*1.5 fires for every asset always (mathematical certainty).
+    # Instead: check if any daily loss in the last 252 trading days (≈1 year) exceeded VaR99*2.
+    # This is a genuinely rare event that warrants attention.
+    recent_returns = returns_clean.iloc[-252:]
+    recent_min = recent_returns.min() * 100
+    if abs(recent_min) > abs(var_99) * 2.0:
+        anomalies.append({
+            'level': '🔵 WATCH',
+            'type': 'Recent Tail Event Beyond 2× VaR99',
+            'detail': (f'A daily loss of {recent_min:.2f}% occurred in the past 12 months — '
+                       f'{abs(recent_min)/abs(var_99):.1f}x the 99% VaR ({var_99:.2f}%). '
+                       f'Recent fat-tail risk present; historical VaR may understate exposure.'),
+        })
+    elif abs(returns_clean.min() * 100) > abs(var_99) * 3.0:
+        # All-time extreme that is genuinely beyond 3x VaR99 (very rare)
+        max_loss = returns_clean.min() * 100
+        anomalies.append({
+            'level': '🔵 WATCH',
+            'type': 'Historical Tail Beyond 3× VaR99',
+            'detail': (f'Max observed daily loss ({max_loss:.2f}%) is {abs(max_loss)/abs(var_99):.1f}x '
+                       f'the 99% VaR ({var_99:.2f}%). Extreme historical fat-tail present.'),
+        })
+
+    if anomalies:
+        for a in anomalies:
+            level = a['level']
+            if 'CRITICAL' in level:
+                bg = '#fff0f0'; border = '#ff4444'
+            elif 'WARNING' in level:
+                bg = '#fffbe6'; border = '#ffaa00'
+            elif 'WATCH' in level:
+                bg = '#f0f4ff'; border = '#4488ff'
+            else:
+                bg = '#f0fff4'; border = '#44bb44'
+            st.markdown(
+                f"<div style='background:{bg}; border-left:4px solid {border}; "
+                f"padding:10px 14px; margin:6px 0; border-radius:4px;'>"
+                f"<strong>{a['level']} — {a['type']}</strong><br>"
+                f"<span style='font-size:0.9em'>{a['detail']}</span></div>",
+                unsafe_allow_html=True
+            )
+    else:
+        st.markdown(
+            "<div style='background:#f0fff4; border-left:4px solid #44bb44; "
+            "padding:10px 14px; border-radius:4px;'>"
+            "✅ <strong>No anomalies detected</strong> — all risk signals within normal historical ranges.</div>",
+            unsafe_allow_html=True
+        )
+
+    st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH divergence > 30% · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× VaR99")
+
+    # ─── Section 6d: AI Risk Narrative (LLM) ───
+    st.subheader("🤖 AI Risk Interpretation")
+    st.write(f"Synthesizes today's quantitative signals into a plain-language risk assessment for {selected_commodity}.")
+
+    @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
+    def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
+                                _var_95, _current_regime, _garch_10d,
+                                _avg_score, _avg_30d, anomaly_types_str,
+                                top_neg_str, date_str):
+        api_key = None
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
+        except Exception:
+            pass
+        if not api_key:
+            import os
+            api_key = os.environ.get("ANTHROPIC_API_KEY", None)
+        if not api_key:
+            return None, "no_key"
+
+        garch_line = (f"GARCH 10-day volatility forecast: {_garch_10d:.2f}%"
+                      if _garch_10d else "GARCH forecast: unavailable")
+        anomaly_line = anomaly_types_str if anomaly_types_str else "None"
+        sentiment_30d_line = (f"{_avg_30d:+.3f}" if _avg_30d is not None else "N/A")
+
+        prompt = f"""You are a senior European energy market risk analyst. Write a risk interpretation based on the following real-time quantitative data.
+
+STRICT FORMAT REQUIREMENT: Write EXACTLY 3 sentences. No headers, no bullet points, no line breaks between sentences. If you write more than 3 sentences you have failed the task.
+
+Market data as of {date_str}:
+- Commodity: {commodity_name}
+- Risk Signal: {risk_level_str}
+- 30-day Rolling Volatility: {_latest_vol:.2f}% (historical average: {_avg_vol:.2f}%)
+- VaR 95% (1-day): {_var_95:.2f}%
+- {garch_line}
+- Market Regime: {_current_regime}
+- Current Sentiment: {_avg_score:+.3f} | 30-day Avg Sentiment: {sentiment_30d_line}
+- Anomalies flagged: {anomaly_line}
+- Key negative headlines: {top_neg_str}
+
+Sentence 1: current risk state and what is driving it. Sentence 2: the most critical signal or divergence to watch. Sentence 3: near-term forward assessment with one specific actionable point. Output only the 3 sentences, nothing else."""
+
+        try:
+            response = req.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 180,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                narrative = response.json()['content'][0]['text'].strip()
+                return narrative, None
+            else:
+                return None, f"api_error_{response.status_code}"
+        except Exception as e:
+            return None, str(e)
+
+    # Prepare inputs for LLM call
+    anomaly_types_for_llm = "; ".join([a['type'] for a in anomalies]) if anomalies else ""
+    top_neg_for_llm = "; ".join([
+        row['Headline'][:80] for _, row in
+        sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score').iterrows()
+    ]) if not sent_df.empty else ""
+    today_date_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+
+    narrative, error = generate_risk_narrative(
+        commodity_name=selected_commodity,
+        risk_level_str=risk_level,
+        _latest_vol=latest_vol,
+        _avg_vol=avg_vol,
+        _var_95=var_95,
+        _current_regime=current_regime,
+        _garch_10d=garch_forecast_10d,
+        _avg_score=avg_score,
+        _avg_30d=avg_30d,
+        anomaly_types_str=anomaly_types_for_llm,
+        top_neg_str=top_neg_for_llm,
+        date_str=today_date_str,
+    )
+
+    if narrative:
+        st.markdown(
+            f"<div style='background:#f8f9ff; border-left:4px solid #6655ee; "
+            f"padding:14px 18px; border-radius:6px; font-size:0.97em; line-height:1.7'>"
+            f"{narrative}</div>",
+            unsafe_allow_html=True
+        )
+        st.caption(f"Generated by Claude (claude-haiku) · {today_date_str} · Based on live market data + anomaly signals · Refreshes every 30 min")
+    elif error == "no_key":
+        st.info(
+            "**AI Risk Narrative**: Add `ANTHROPIC_API_KEY` to Streamlit Secrets to enable. "
+            "Get a key at console.anthropic.com — Haiku model costs ~$0.001 per generation."
+        )
+    else:
+        st.warning(f"AI narrative unavailable: {error}")
 
     # ─── Section 7: Data Export ───
     st.subheader("Export Data")
 
     export_df = df_analysis[['Price', 'Compare', 'Volatility', 'Rolling Correlation']].copy()
-    export_df.columns = [selected_commodity, compare_label, 'Volatility (%)', 'Rolling Correlation']
+    export_df.columns = [selected_commodity, compare_label, 'Volatility (%)', 'Rolling Correlation (returns)']
     export_df['Daily_Return_%'] = df_analysis['Returns'] * 100
 
     if 'Regime' in features.columns:
