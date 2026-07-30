@@ -1614,7 +1614,7 @@ else:
     st.subheader("🤖 AI Risk Interpretation")
     st.write(f"Synthesizes today's quantitative signals into a plain-language risk assessment for {selected_commodity}.")
 
-    @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
+   @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
     def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
                                 _var_95, _current_regime, _garch_10d,
                                 _avg_score, _avg_30d, anomaly_types_str,
@@ -1630,27 +1630,64 @@ else:
         if not api_key:
             return None, "no_key"
 
-        garch_line = (f"GARCH 10-day volatility forecast: {_garch_10d:.2f}%"
+        garch_line = (f"GARCH forecast of daily volatility on day 10 ahead: {_garch_10d:.2f}%"
                       if _garch_10d else "GARCH forecast: unavailable")
         anomaly_line = anomaly_types_str if anomaly_types_str else "None"
+        headline_line = top_neg_str if top_neg_str else "None retrieved"
         sentiment_30d_line = (f"{_avg_30d:+.3f}" if _avg_30d is not None else "N/A")
 
-        prompt = f"""You are a senior European energy market risk analyst. Write a risk interpretation based on the following real-time quantitative data.
+        prompt = f"""You are a senior risk analyst on a European energy trading desk, writing the short risk comment on {commodity_name} for the date shown below.
 
-STRICT FORMAT REQUIREMENT: Write EXACTLY 3 sentences. No headers, no bullet points, no line breaks between sentences. If you write more than 3 sentences you have failed the task.
+HOW TO READ THE INPUTS
 
-Market data as of {date_str}:
-- Commodity: {commodity_name}
-- Risk Signal: {risk_level_str}
-- 30-day Rolling Volatility: {_latest_vol:.2f}% (historical average: {_avg_vol:.2f}%)
-- VaR 95% (1-day): {_var_95:.2f}%
+Volatility
+- All volatility figures are DAILY standard deviation of returns, in percent. Not annualised.
+- The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
+
+Two independent lenses - a disagreement between them is not an error
+- "Risk signal" is RELATIVE: it compares current volatility to this commodity's own long-run average. It says nothing about the absolute level.
+- "Regime" is ABSOLUTE: Calm below 6%, Volatile 6-12%, Crisis above 12%. Between 4% and 9% a clustering model using both volatility and correlation may override that threshold, so the regime label can differ from what the volatility number alone suggests.
+- A commodity can be HIGH RISK and Calm at once: unusually volatile by its own standards, still quiet in absolute terms. Where that holds, say so plainly rather than treating it as a contradiction.
+
+VaR
+- VaR 95% is the 5th percentile of the daily return distribution: a loss threshold, given as a negative number.
+
+Sentiment - weak evidence, handle with care
+- Computed from at most ten scraped headlines.
+- The current reading and the 30-day average come from DIFFERENT models depending on which service was reachable, and are NOT on a common scale. Never compare them numerically and never describe a move from one to the other.
+- Anything between -0.05 and +0.05 is NEUTRAL. Do not call it mildly positive or mildly negative.
+
+Anomalies and headlines
+- The anomaly field lists only the NAMES of the checks that triggered. You do not have their underlying numbers, so do not invent them.
+- The headline field is raw scraped text, truncated and unverified.
+
+MARKET DATA AS OF {date_str}
+- Risk signal: {risk_level_str}
+- 30-day rolling volatility: {_latest_vol:.2f}% (long-run average {_avg_vol:.2f}%)
+- VaR 95%, 1-day: {_var_95:.2f}%
 - {garch_line}
-- Market Regime: {_current_regime}
-- Current Sentiment: {_avg_score:+.3f} | 30-day Avg Sentiment: {sentiment_30d_line}
-- Anomalies flagged: {anomaly_line}
-- Key negative headlines: {top_neg_str}
+- Regime: {_current_regime}
+- Sentiment now: {_avg_score:+.3f} | 30-day average: {sentiment_30d_line}
+- Anomaly checks triggered: {anomaly_line}
+- Unverified headlines: {headline_line}
 
-Sentence 1: current risk state and what is driving it. Sentence 2: the most critical signal or divergence to watch. Sentence 3: near-term forward assessment with one specific actionable point. Output only the 3 sentences, nothing else."""
+TASK
+Write EXACTLY 3 sentences. Keep the whole comment under 100 words. No headers, no bullets, no line breaks. Write as of the data date above, not as of any later date.
+1. What this combination of readings means. Do not restate the figures - the reader is looking at them. Use at most one number, and only if it carries the argument.
+2. The sharpest tension or divergence in the data, and why it matters for positioning.
+3. One concrete thing to watch over the following ten trading days.
+
+HARD RULES
+- If the headline field says feeds were unreachable, treat BOTH sentiment readings as meaningless: do not mention sentiment or news anywhere in your answer, and build all three sentences from the volatility, VaR, GARCH and regime data alone.
+- If a field reads N/A, None or None retrieved, pass over it in silence. Do not comment on its absence.
+- Never attribute a claim, forecast or warning to a named bank, agency, institution or analyst.
+- Never present a headline as established fact. Sentiment tells you about mood, not about the world.
+- Do not assert a causal chain the data above cannot support. If a link is speculative, mark it as speculative.
+- Do not introduce seasonal, geopolitical or fundamental drivers that are not present in the inputs above.
+- Avoid: "low-risk equilibrium", "market participants should", "underlying stress", "tranquility", "it is important to note".
+- Plain desk English. No padding.
+
+Output only the 3 sentences."""
 
         try:
             response = req.post(
@@ -1662,7 +1699,7 @@ Sentence 1: current risk state and what is driving it. Sentence 2: the most crit
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 180,
+                    "max_tokens": 300,
                     "messages": [{"role": "user", "content": prompt}]
                 },
                 timeout=30
@@ -1677,11 +1714,19 @@ Sentence 1: current risk state and what is driving it. Sentence 2: the most crit
 
     # Prepare inputs for LLM call
     anomaly_types_for_llm = "; ".join([a['type'] for a in anomalies]) if anomalies else ""
-    top_neg_for_llm = "; ".join([
-        row['Headline'][:80] for _, row in
-        sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score').iterrows()
-    ]) if not sent_df.empty else ""
-    today_date_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+
+    if not is_live:
+        top_neg_for_llm = (
+            "FEEDS UNREACHABLE - the headlines behind the sentiment scores are "
+            "hardcoded placeholder text, not real news."
+        )
+    else:
+        top_neg_for_llm = "; ".join([
+            row['Headline'][:80] for _, row in
+            sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score').iterrows()
+        ]) if not sent_df.empty else ""
+
+    today_date_str = df_analysis.index[-1].strftime('%Y-%m-%d')
 
     narrative, error = generate_risk_narrative(
         commodity_name=selected_commodity,
