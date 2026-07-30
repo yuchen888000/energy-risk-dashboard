@@ -2,10 +2,7 @@ name: Keep dashboard awake
 
 on:
   schedule:
-    # Streamlit Community Cloud hibernates after ~12h without traffic.
-    # Every 6h gives 2x headroom. Times are UTC (Geneva = UTC+2 in summer).
     - cron: "0 5,11,17,23 * * *"
-  # Lets you wake it on demand from the Actions tab before sending an application.
   workflow_dispatch:
 
 concurrency:
