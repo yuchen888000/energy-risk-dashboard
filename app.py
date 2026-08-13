@@ -220,6 +220,9 @@ if len(df_analysis) < 30:
 else:
     # ─── Core Calculations ───
     df_analysis = df_analysis.copy()
+    # Percentage returns are undefined across a sign change in the price level.
+    # WTI (CL=F) settled negative on 2020-04-20, so non-positive prices are excluded.
+    df_analysis = df_analysis[(df_analysis['Price'] > 0) & (df_analysis['Compare'] > 0)]
     df_analysis['Returns'] = df_analysis['Price'].pct_change()
     df_analysis['Compare_Returns'] = df_analysis['Compare'].pct_change()
     df_analysis['Volatility'] = df_analysis['Returns'].rolling(30).std() * 100
@@ -484,7 +487,11 @@ else:
             try:
                 data = yf.download(ticker, start=start, end=end, progress=False)
                 if len(data) > 30:
-                    prices[name] = data['Close'].squeeze().pct_change()
+                    close = data['Close'].squeeze()
+                    # WTI (CL=F) settled negative on 2020-04-20; percentage returns are
+                    # undefined across a sign change, so those observations are excluded.
+                    close = close.where(close > 0)
+                    prices[name] = close.pct_change()
             except Exception:
                 continue
         if len(prices) < 2:
@@ -823,7 +830,12 @@ else:
             try:
                 data = yf.download(ticker, start=start, end=end, progress=False)
                 if len(data) > 30:
-                    returns[name] = data['Close'].squeeze().pct_change()
+                    close = data['Close'].squeeze()
+                    # WTI (CL=F) settled negative on 2020-04-20; percentage returns are
+                    # undefined across a sign change, so those observations are excluded.
+                    close = close.where(close > 0)
+                    prices_ok = close.pct_change()
+                    returns[name] = prices_ok
             except Exception:
                 continue
         if len(returns) < 2:
@@ -1208,7 +1220,8 @@ else:
 
     # ─── Section 6: NLP Sentiment (FinBERT) ───
     st.subheader(f"Energy News Sentiment — {selected_commodity}")
-    st.write("Real-time sentiment analysis using FinBERT (financial domain transformer model)")
+    st.write("Real-time sentiment analysis — FinBERT transformer with FinVADER lexicon fallback "
+             "(the model actually used is stated below the chart)")
 
     general_keywords = ['energy', 'power', 'electricity', 'renewable', 'climate',
                         'emission', 'fuel', 'Europe', 'European', 'heating',
