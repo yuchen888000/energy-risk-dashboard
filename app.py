@@ -16,6 +16,66 @@ from sklearn.preprocessing import StandardScaler
 # ─── Page Config ───
 st.set_page_config(page_title="European Energy & Commodity Risk Dashboard", layout="wide")
 
+# ─── Carbon Benchmark Resolution ───
+# KEUA (KraneShares European Carbon Allowance ETF) was liquidated on 20 March 2026,
+# so the original EUA proxy no longer returns data. We probe a cascade of candidates
+# at runtime and label the dashboard from whichever one actually resolves, so the
+# stated benchmark can never drift from the series being plotted.
+CARBON_CANDIDATES = [
+    {
+        "ticker": "CARB.L",
+        "label": "EU Carbon Allowance (CARB.L)",
+        "short": "EU Carbon",
+        "name": "EU Carbon Allowance",
+        "pure_eu": True,
+        "note": "WisdomTree Carbon ETC (LSE) — tracks ICE EUA futures directly.",
+    },
+    {
+        "ticker": "KRBN",
+        "label": "Global Carbon (KRBN — EUA-weighted)",
+        "short": "Carbon",
+        "name": "Carbon Allowances (Global)",
+        "pure_eu": False,
+        "note": ("KraneShares Global Carbon Strategy ETF. EUA carries the dominant index weight, "
+                 "but California (CCA), RGGI, UK (UKA) and Washington (WCA) allowances are also "
+                 "included — a correlated proxy for EU carbon, not a pure EUA price."),
+    },
+    {
+        "ticker": "ICLN",
+        "label": "Clean Energy Proxy (ICLN)",
+        "short": "Clean Energy",
+        "name": "Clean Energy Proxy",
+        "pure_eu": False,
+        "note": ("Clean-energy equity ETF. This is NOT a carbon allowance price; it is a "
+                 "last-resort proxy used only when no carbon instrument resolves."),
+    },
+]
+
+
+@st.cache_data(ttl=3600, show_spinner="Resolving carbon benchmark...")
+def resolve_carbon_benchmark():
+    """Return the first carbon candidate that yfinance can actually serve."""
+    probe_start = (pd.Timestamp.today() - pd.Timedelta(days=730)).strftime("%Y-%m-%d")
+    for cand in CARBON_CANDIDATES:
+        try:
+            probe = yf.download(cand["ticker"], start=probe_start, progress=False)
+            if probe is None or probe.empty:
+                continue
+            if probe["Close"].squeeze().notna().sum() > 30:
+                return cand
+        except Exception:
+            continue
+    return CARBON_CANDIDATES[-1]
+
+
+CARBON = resolve_carbon_benchmark()
+CARBON_TICKER = CARBON["ticker"]
+CARBON_LABEL = CARBON["label"]
+CARBON_SHORT = CARBON["short"]
+CARBON_NAME = CARBON["name"]
+CARBON_NOTE = CARBON["note"]
+CARBON_IS_PURE_EU = CARBON["pure_eu"]
+
 # ─── Commodity Definitions ───
 COMMODITIES = {
     "TTF Natural Gas": {
@@ -39,9 +99,9 @@ COMMODITIES = {
         "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'barrel', 'North Sea'],
         "rss_query": "brent+oil+Europe+price",
     },
-    "EU Carbon Allowance": {
-        "ticker": "KEUA",
-        "unit": "€/tCO2",
+    CARBON_NAME: {
+        "ticker": CARBON_TICKER,
+        "unit": "€/tCO2" if CARBON_IS_PURE_EU else "index",
         "color": "seagreen",
         "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
         "rss_query": "EU+carbon+ETS+emission+price",
@@ -56,11 +116,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.title("Methodology")
-    compare_text = "TTF Natural Gas (`TTF=F`)" if commodity['ticker'] == 'KEUA' else "EU Carbon Allowance (`KEUA`) — directly tracks EU ETS carbon futures. Falls back to ICLN if unavailable."
+    if commodity['ticker'] == CARBON_TICKER:
+        compare_text = "TTF Natural Gas (`TTF=F`)"
+    else:
+        compare_text = f"{CARBON_LABEL} — {CARBON_NOTE}"
     st.markdown(f"""
     **Selected: {selected_commodity}** (`{commodity['ticker']}`)
 
     **Comparison**: {compare_text}
+
+    **Carbon benchmark**: resolved at runtime from a cascade
+    (`CARB.L` → `KRBN` → `ICLN`); the label above always reflects the series
+    actually plotted. KEUA, the original EUA proxy, was liquidated in March 2026.
 
     **Risk Metrics**
     - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
@@ -97,7 +164,7 @@ with st.sidebar:
       GARCH divergence, correlation regime shift, sentiment-volatility divergence,
       recent tail event (loss > 2× VaR99 in past 252 days). Flags in real time.
     - **AI Risk Interpretation**: Quantitative signals (vol, VaR, GARCH,
-      regime, sentiment, anomalies) fed to Claude Haiku via Anthropic API.
+      regime, sentiment, anomalies) fed to Claude Sonnet via Anthropic API.
       Generates a 3-sentence professional risk assessment. Refreshes every 30 min.
 
     ---
@@ -107,7 +174,7 @@ with st.sidebar:
 
 # ─── Title ───
 st.title("European Energy & Commodity Risk Dashboard")
-subtitle_compare = "TTF Natural Gas" if commodity['ticker'] == 'KEUA' else "EU Carbon Allowance"
+subtitle_compare = "TTF Natural Gas" if commodity['ticker'] == CARBON_TICKER else CARBON_LABEL
 st.markdown(f"Analyzing **{selected_commodity}** vs {subtitle_compare}")
 
 # ─── Date Selection ───
@@ -119,41 +186,34 @@ with col2:
 
 # ─── Data Download (cached) ───
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
-def load_data(ticker, start, end):
+def load_data(ticker, start, end, carbon_ticker):
     primary = yf.download(ticker, start=start, end=end, progress=False)
-    carbon_etf = yf.download("KEUA", start=start, end=end, progress=False)
-    clean = yf.download("ICLN", start=start, end=end, progress=False)
-
-    primary_price = primary['Close'].squeeze()
-    carbon_price = carbon_etf['Close'].squeeze()
-    clean_price = clean['Close'].squeeze()
+    carbon = yf.download(carbon_ticker, start=start, end=end, progress=False)
 
     df = pd.DataFrame({
-        'Price': primary_price,
-        'Carbon (KEUA)': carbon_price,
-        'Clean Energy (ICLN)': clean_price,
+        'Price': primary['Close'].squeeze(),
+        'Carbon': carbon['Close'].squeeze(),
     }).dropna(subset=['Price'])
     return df
 
-df = load_data(commodity['ticker'], start_date, end_date)
+df = load_data(commodity['ticker'], start_date, end_date, CARBON_TICKER)
 
-# Determine carbon comparison
-has_keua = df['Carbon (KEUA)'].notna().sum() > 30
+has_carbon = df['Carbon'].notna().sum() > 30
 
-if commodity['ticker'] == 'KEUA':
+if commodity['ticker'] == CARBON_TICKER:
     compare_data = yf.download("TTF=F", start=start_date, end=end_date, progress=False)
     df['Compare'] = compare_data['Close'].squeeze()
     compare_label = 'TTF Natural Gas (€/MWh)'
     df_analysis = df[['Price', 'Compare']].dropna()
-elif has_keua:
-    df['Compare'] = df['Carbon (KEUA)']
-    compare_label = 'EU Carbon Allowance (KEUA)'
-    df_analysis = df[['Price', 'Compare']].dropna()
 else:
-    df['Compare'] = df['Clean Energy (ICLN)']
-    compare_label = 'Clean Energy Proxy (ICLN)'
+    df['Compare'] = df['Carbon']
+    compare_label = CARBON_LABEL
     df_analysis = df[['Price', 'Compare']].dropna()
-    st.info("KEUA data unavailable for selected range — using ICLN as fallback.")
+    if not CARBON_IS_PURE_EU:
+        st.caption(f"Carbon benchmark: **{CARBON_LABEL}**. {CARBON_NOTE}")
+    if not has_carbon:
+        st.caption(f"{CARBON_LABEL} has limited coverage over the selected range — "
+                   "widen the date window for a fuller comparison.")
 
 if len(df_analysis) < 30:
     st.warning("Please select a longer time range (at least 30 days of data required).")
@@ -418,7 +478,7 @@ else:
 
     @st.cache_data(ttl=3600, show_spinner="Computing cross-commodity correlations...")
     def get_correlation_matrix(start, end):
-        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", "EU Carbon": "KEUA"}
+        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", CARBON_SHORT: CARBON_TICKER}
         prices = {}
         for name, ticker in tickers.items():
             try:
@@ -757,7 +817,7 @@ else:
 
     @st.cache_data(ttl=3600, show_spinner="Computing portfolio returns...")
     def get_portfolio_returns(start, end):
-        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", "EU Carbon": "KEUA"}
+        tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", CARBON_SHORT: CARBON_TICKER}
         returns = {}
         for name, ticker in tickers.items():
             try:
@@ -778,7 +838,7 @@ else:
         w_gas = pw1.number_input("TTF Gas %", min_value=0, max_value=100, value=40, step=5)
         w_wti = pw2.number_input("WTI Oil %", min_value=0, max_value=100, value=30, step=5)
         w_brent = pw3.number_input("Brent Oil %", min_value=0, max_value=100, value=20, step=5)
-        w_carbon = pw4.number_input("EU Carbon %", min_value=0, max_value=100, value=10, step=5)
+        w_carbon = pw4.number_input(f"{CARBON_SHORT} %", min_value=0, max_value=100, value=10, step=5)
 
         total_weight = w_gas + w_wti + w_brent + w_carbon
 
@@ -795,8 +855,8 @@ else:
                 raw_weights['WTI Oil'] = w_wti
             if 'Brent Oil' in port_returns.columns:
                 raw_weights['Brent Oil'] = w_brent
-            if 'EU Carbon' in port_returns.columns:
-                raw_weights['EU Carbon'] = w_carbon
+            if CARBON_SHORT in port_returns.columns:
+                raw_weights[CARBON_SHORT] = w_carbon
 
             available = [k for k in raw_weights if k in port_returns.columns]
             w_array = np.array([raw_weights[k] for k in available], dtype=float)
@@ -899,7 +959,7 @@ else:
     # For EU Carbon: dep_col IS total energy dep → would appear twice if formula is identical.
     #   Solution: replace the separate total_dep term with carbon-intensity rank (already in formula)
     #   and redistribute weight so factors remain independent.
-    if commodity['ticker'] == 'KEUA':
+    if commodity['ticker'] == CARBON_TICKER:
         # Carbon mode: 6 factors with no double-count
         # Total Energy Dep 25% | Carbon Int rank 20% | Inverse Renewable 20%
         # Total Energy Dep rank 15% | Price Sensitivity 15% | Renewable rank 5% (residual)
