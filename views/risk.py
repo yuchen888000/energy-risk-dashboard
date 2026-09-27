@@ -470,3 +470,115 @@ if port_returns is not None and len(port_returns.columns) >= 2:
 else:
     st.info("Not enough multi-commodity data to compute Portfolio VaR.")
 
+
+# ─── Section 5ac: Positions & Limits ───
+st.subheader("Positions & Limits")
+st.write("Risk of a book of positions in euros: VaR, Expected Shortfall, limit usage and a VaR backtest.")
+
+book_panel = common.returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
+_LOOKBACK = 250   # days of history behind each VaR estimate
+_TEST_DAYS = 250  # days in the backtest
+
+if book_panel is None:
+    st.info("Not enough multi-commodity data to compute position risk.")
+else:
+    st.write("**Positions** (€m market value; positive = long, negative = short):")
+    _defaults = {"TTF Gas": 10.0, "WTI Oil": 0.0, "Brent Oil": -5.0, CARBON_SHORT: 3.0}
+    _pos_cols = st.columns(len(book_panel.columns) + 1)
+    positions_m = {}
+    for _col, _name in zip(_pos_cols, book_panel.columns):
+        positions_m[_name] = _col.number_input(f"{_name} (€m)", value=_defaults.get(_name, 0.0),
+                                               step=0.5, format="%.1f", key=f"pos_{_name}")
+    var_limit_m = _pos_cols[-1].number_input("VaR 95% limit (€m)", min_value=0.1, value=1.5,
+                                             step=0.1, format="%.1f", key="var_limit")
+
+    positions = {k: v * 1e6 for k, v in positions_m.items() if v != 0}
+    book_returns = book_panel[list(positions)].dropna() if positions else None
+
+    if not positions:
+        st.info("Enter at least one non-zero position.")
+    elif len(book_returns) < _LOOKBACK + 50:
+        st.info(f"Position risk needs at least {_LOOKBACK + 50} days of overlapping history for "
+                "the instruments held — widen the date range.")
+    else:
+        pnl = common.book_pnl(book_returns, positions)
+        recent = pnl.tail(_LOOKBACK)
+        book_var95 = common.hist_var(recent, 0.95)
+        book_var99 = common.hist_var(recent, 0.99)
+        book_es975 = common.hist_es(recent, 0.975)
+        usage = book_var95 / (var_limit_m * 1e6)
+
+        if usage > 1:
+            usage_status, usage_color = "🔴 LIMIT BREACH", "red"
+        elif usage >= 0.8:
+            usage_status, usage_color = "🟡 NEAR LIMIT", "orange"
+        else:
+            usage_status, usage_color = "🟢 WITHIN LIMIT", "green"
+
+        pl1, pl2, pl3, pl4 = st.columns(4)
+        pl1.metric("VaR 95% (1-day)", f"€{book_var95 / 1e6:,.2f}m")
+        pl2.metric("VaR 99% (1-day)", f"€{book_var99 / 1e6:,.2f}m")
+        pl3.metric("Expected Shortfall 97.5%", f"€{book_es975 / 1e6:,.2f}m",
+                   help="Average loss on the worst 2.5% of days — the Basel FRTB measure.")
+        pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
+                   help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
+        st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span> — "
+                    f"€{book_var95 / 1e6:,.2f}m of €{var_limit_m:,.1f}m used",
+                    unsafe_allow_html=True)
+        st.progress(min(usage, 1.0))
+
+        # Standalone VaR per position vs the book: the gap is the diversification benefit
+        standalone = {k: common.hist_var(book_returns[k].tail(_LOOKBACK) * v, 0.95)
+                      for k, v in positions.items()}
+        contrib_df = pd.DataFrame({
+            'Position (€m)': [positions[k] / 1e6 for k in positions],
+            'Standalone VaR 95% (€m)': [standalone[k] / 1e6 for k in positions],
+        }, index=list(positions)).round(2)
+        contrib_df.loc['Book (net)'] = [sum(positions.values()) / 1e6, round(book_var95 / 1e6, 2)]
+        st.dataframe(contrib_df, width="stretch")
+        st.caption(f"Diversification benefit: €{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m "
+                   "(sum of standalone VaRs minus book VaR).")
+
+        # ── VaR backtest ──
+        st.write(f"**VaR Backtest — last {_TEST_DAYS} trading days**")
+        bt = common.var_backtest(pnl, window=_LOOKBACK, test_days=_TEST_DAYS)
+        n_bt = len(bt)
+        rows = []
+        for conf, col in [(0.95, 'Exc95'), (0.99, 'Exc99')]:
+            x = int(bt[col].sum())
+            lr, p_val = common.kupiec_pof(n_bt, x, 1 - conf)
+            rows.append({
+                'VaR level': f"{conf:.0%}",
+                'Exceptions': x,
+                'Expected': round(n_bt * (1 - conf), 1),
+                'Kupiec LR': round(lr, 2),
+                'p-value': round(p_val, 3),
+                'Kupiec result': 'Reject (miscalibrated)' if p_val < 0.05 else 'Accept',
+            })
+        exc99 = rows[1]['Exceptions']
+        zone = common.basel_zone(exc99, n_bt)
+        zone_color = {'Green': 'green', 'Yellow': 'orange', 'Red': 'red'}[zone]
+        st.markdown(f"<h4 style='color:{zone_color}'>Basel traffic light: {zone} "
+                    f"({exc99} exceptions at 99% over {n_bt} days)</h4>", unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(rows).set_index('VaR level'), width="stretch")
+
+        fig_bt, ax_bt = plt.subplots(figsize=(14, 4))
+        bar_colors_bt = np.where(bt['Exc99'], 'red', np.where(bt['Exc95'], 'orange', 'lightgray'))
+        ax_bt.bar(bt.index, bt['PnL'] / 1e6, color=bar_colors_bt, width=1.0)
+        ax_bt.plot(bt.index, -bt['VaR95'] / 1e6, color='orange', linewidth=1, linestyle='--', label='−VaR 95%')
+        ax_bt.plot(bt.index, -bt['VaR99'] / 1e6, color='red', linewidth=1.2, label='−VaR 99%')
+        ax_bt.axhline(0, color='black', linewidth=0.5)
+        ax_bt.set_ylabel('Daily P&L (€m)')
+        ax_bt.set_title('Hypothetical daily P&L vs prior-day VaR (orange = beyond VaR 95%, red = beyond VaR 99%)')
+        ax_bt.legend(fontsize=8)
+        plt.tight_layout()
+        st.pyplot(fig_bt)
+
+        st.caption(
+            f"Historical simulation on the last {_LOOKBACK} trading days, 1-day horizon. "
+            "Backtest is hypothetical: today's positions applied to past returns, each day's VaR "
+            f"estimated only from the {_LOOKBACK} days before it. Positions are held static and "
+            "returns are in each instrument's quote currency (i.e. FX-hedged). Kupiec also "
+            "rejects too few exceptions (an over-conservative model). Basel zones: green 0–4, "
+            "yellow 5–9, red 10+ exceptions at 99% over 250 days."
+        )

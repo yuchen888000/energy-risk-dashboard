@@ -9,3 +9,4 @@ feedparser
 arch
 requests
 finvader
+scipy

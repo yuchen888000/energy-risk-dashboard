@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 from arch import arch_model
+from scipy.stats import chi2
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
@@ -331,3 +332,56 @@ def returns_panel(start, end, carbon_short, carbon_ticker):
     if len(returns) < 2:
         return None
     return pd.DataFrame(returns)
+
+
+# ─── Position risk: € VaR / ES, VaR backtest ───
+# Conventions: P&L in €, VaR and ES reported as positive loss amounts.
+def book_pnl(returns, positions):
+    """Daily € P&L of static positions: sum of (€ notional × daily return)."""
+    cols = list(positions)
+    return (returns[cols] * pd.Series(positions)).sum(axis=1)
+
+
+def hist_var(pnl, conf):
+    """Historical-simulation VaR at confidence `conf`, as a positive € loss."""
+    return -np.percentile(pnl, (1 - conf) * 100)
+
+
+def hist_es(pnl, conf):
+    """Expected Shortfall: average loss on the days at or beyond the VaR quantile."""
+    q = np.percentile(pnl, (1 - conf) * 100)
+    return -pnl[pnl <= q].mean()
+
+
+def var_backtest(pnl, window=250, test_days=250, confs=(0.95, 0.99)):
+    """Rolling historical VaR computed from the previous `window` days only (no look-ahead),
+    compared with the realised P&L over the last `test_days` days."""
+    out = pd.DataFrame({'PnL': pnl})
+    for c in confs:
+        out[f'VaR{int(c * 100)}'] = -pnl.rolling(window).quantile(1 - c).shift(1)
+        out[f'Exc{int(c * 100)}'] = out['PnL'] < -out[f'VaR{int(c * 100)}']
+    return out.dropna().tail(test_days)
+
+
+def kupiec_pof(n, x, p):
+    """Kupiec proportion-of-failures test.
+
+    n observations, x exceptions, p expected exception rate (0.01 for 99% VaR).
+    Returns (likelihood ratio, p-value); LR ~ chi-squared with 1 degree of freedom.
+    """
+    phat = x / n
+    ll_null = (n - x) * np.log(1 - p) + x * np.log(p)
+    ll_alt = ((n - x) * np.log(1 - phat) if x < n else 0.0) + (x * np.log(phat) if x > 0 else 0.0)
+    lr = -2 * (ll_null - ll_alt)
+    return lr, 1 - chi2.cdf(lr, df=1)
+
+
+def basel_zone(exceptions, n=250):
+    """Basel traffic light for 99% VaR over 250 days: green 0–4, yellow 5–9, red 10+.
+    For shorter samples the thresholds are scaled by n / 250."""
+    scale = n / 250
+    if exceptions <= 4 * scale:
+        return 'Green'
+    if exceptions <= 9 * scale:
+        return 'Yellow'
+    return 'Red'
