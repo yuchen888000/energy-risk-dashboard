@@ -1,82 +1,97 @@
 # European Energy & Commodity Risk Dashboard
 
-A real-time, multi-commodity risk analytics platform for European energy markets. Built with Python and Streamlit.
+A multi-page risk analytics app for European energy markets, built with Python and Streamlit. One app, three pages, each designed with a different reader in mind.
 
 **[Live Demo →](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app)**
 
-## What It Does
+| Page | Link | Designed with … in mind | Question it answers |
+|------|------|-------------------------|---------------------|
+| **Risk** | [/risk](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/risk) | a trading-house middle office (risk control) | How much can we lose, are we within limits, and does the VaR model hold up? |
+| **Power** | [/power](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/power) | power trading desks and utilities | Does a German gas plant make money running today, and how much can that margin move? |
+| **Market** | [/market](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/market) | data and analytics firms | Which countries are exposed, what is the news mood, and is anything unusual? |
 
-Select any commodity — TTF Natural Gas, WTI Crude Oil, Brent Crude, or EU Carbon Allowances — and every risk module adapts automatically: pricing, volatility, VaR, GARCH forecasting, market regime detection, sentiment analysis, and country-level risk exposure.
+The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or EU Carbon; date range), and the selection carries across pages.
 
-### Features
+## Risk page
 
-**Price & Risk Analytics**
-- **Multi-Commodity Support** — Sidebar selector with 4 commodities. All modules adapt automatically.
-- **Risk Signal** — Real-time volatility vs historical average, color-coded alert (High/Medium/Low).
-- **Value at Risk (VaR)** — 95% and 99% historical VaR with return distribution and 60-day rolling VaR.
-- **GARCH(1,1) Volatility Forecast** — Forward-looking 10-day prediction with confidence bands and model parameter transparency.
-- **Price Trends** — Dual-axis chart with annotated EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
-- **Market Regime Detection** — K-Means clustering + absolute volatility thresholds: Calm, Volatile, Crisis.
+**Market risk of the selected commodity**
+- **Risk Signal** — current 30-day volatility vs its own history (High / Medium / Low).
+- **Price Trends** — dual-axis chart with EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
+- **Volatility & Correlation** — 30-day rolling volatility and rolling correlation of returns.
+- **Cross-Commodity Correlation Matrix** — TTF, WTI, Brent and carbon, full period vs last 30 days.
+- **Value at Risk** — 95% and 99% historical VaR, return distribution, 60-day rolling VaR.
+- **GARCH(1,1) Forecast** — 10-day volatility forecast with a bootstrap 90% band.
+- **Market Regime** — hybrid K-Means + absolute thresholds: Calm, Volatile, Crisis.
+- **Stress Test** — price-shock slider; stressed volatility, VaR, regime and most-affected countries.
+- **Portfolio VaR** — custom weights across the four commodities, with the diversification benefit.
 
-**Cross-Commodity & Stress Testing**
-- **Correlation Matrix** — 4×4 heatmap showing how TTF Gas, WTI, Brent, and EU Carbon move relative to each other. Full-period vs last 30 days to detect regime shifts.
-- **Stress Test Scenario** — Slider to simulate price shocks (-50% to +100%). Shows stressed volatility, VaR, regime shift, and top 10 most impacted countries.
-- **Portfolio VaR** — Set custom weights across 4 commodities. Calculates combined portfolio risk accounting for cross-commodity correlations, with diversification benefit analysis.
+**Positions & Limits**
+- Enter positions in €m (long or short) in TTF, WTI, Brent and carbon.
+- **€ VaR 95% / 99% and Expected Shortfall 97.5%** from the last 250 trading days.
+- **Limit usage** against a user-set VaR limit (green < 80%, amber 80–100%, red = breach), with standalone VaR per position.
+- **VaR backtest** over the last 250 days: exceptions at 95% and 99%, **Kupiec** proportion-of-failures test, and the **Basel traffic light** (0–4 green, 5–9 yellow, 10+ red).
 
-**Country Risk**
-- **31 European Countries** — EU-27 + Switzerland, UK, Norway, Turkey.
-- **Commodity-Aware** — Selecting gas shows gas dependency; selecting oil shows oil dependency.
-- **Dynamic Risk Scoring** — Structural vulnerability (Eurostat) × real-time commodity volatility, weighted by each country's dependency. High-dependency countries feel market shocks more.
-- **Per-Country Risk Signal** — Adjusted volatility and VaR for each country, live.
-- **Dependency-Weighted Volatility Curve** — Real-time chart showing how market volatility translates to country-specific risk.
-- **Per-Country News Sentiment** — Live energy news filtered by selected country.
-- **Year Slider (2020–2024)** — Track how energy risk shifted through the 2022 crisis and recovery.
+## Power page
 
-**Sentiment Analysis (NLP)**
-- **FinBERT** — Main sentiment module. Transformer model fine-tuned on financial text (ProsusAI/finbert via HuggingFace Inference API). Applied to 10 live headlines from BBC Business and OilPrice. Falls back to FinVADER if API unavailable.
-- **FinVADER** — Fallback sentiment model. VADER enhanced with financial domain lexicons (SentiBigomics + Henry), significantly more accurate than standard VADER for financial news.
-- **30-Day Sentiment Trend** — Daily average sentiment over past month via Google News RSS, visualized as bar chart with trend line. Scored with FinVADER.
-- **Headline Analysis** — Most positive and most negative headlines with source links and sentiment scores.
-- **European Focus** — News sourced from BBC Business, OilPrice, and Google News (commodity-specific + EU energy queries).
-- **News Sources** — BBC Business, OilPrice, Google News (EU Energy, EU Carbon, commodity-specific). US-domestic headlines filtered out; geopolitically relevant global news retained.
+- **German day-ahead power** (bidding zone DE-LU) from the Energy-Charts API, averaged per Berlin calendar day (baseload).
+- **Clean spark spread** = power − TTF / 0.5 − (0.202 / 0.5) × EUA, where 0.5 is the gas plant efficiency and 0.202 tCO2/MWh the natural gas emission factor.
+- Headline: current spread, green when running a gas plant is profitable and red when it isn't.
+- Charts: the spread over time, and its decomposition into power price, fuel cost and carbon cost.
+- **Spread risk** in €/MWh (not %, since power prices and the spread can be negative): 30-day volatility and 95% historical VaR of daily changes, plus the daily € VaR for a **400 MW unit running 16 hours a day**.
+- **EUA price** from EEX primary-auction results (€/t). If EEX cannot be reached, the carbon ETC is rescaled to a user-entered EUA price and labelled as an approximation.
 
-**Data Export**
-- Download commodity risk data (CSV)
-- Download sentiment data (CSV)
-- Download country risk data with dynamic scores (CSV)
+## Market page
+
+- **Country Risk** — 31 countries (EU-27 + Switzerland, UK, Norway, Turkey), 2020–2024. A structural score (dependency, carbon intensity, renewables, price sensitivity) is scaled by live market volatility, weighted by each country's dependency. Includes per-country trend, dependency-weighted volatility and country news sentiment.
+- **News Sentiment** — FinBERT (ProsusAI/finbert via HuggingFace) on live headlines from BBC Business, OilPrice and Google News; FinVADER as fallback.
+- **30-Day Sentiment Trend** — daily average sentiment, scored with FinVADER.
+- **Anomaly Detection** — volatility z-score, GARCH divergence, correlation shift, sentiment–regime divergence, recent tail events.
+- **AI Risk Interpretation** — the signals above summarised in three sentences by Claude via the Anthropic API (optional).
+- **Data Export** — CSV downloads of commodity risk data, sentiment and country risk.
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
-| Data | yfinance (TTF=F, CL=F, BZ=F, KEUA, ICLN) |
-| Framework | Streamlit |
-| Risk Analytics | NumPy, Pandas |
-| Volatility Modeling | arch (GARCH) |
-| Machine Learning | scikit-learn (KMeans, StandardScaler) |
-| NLP — Main Sentiment | FinBERT via HuggingFace Inference API (ProsusAI/finbert) |
-| NLP — Fallback | FinVADER (VADER + SentiBigomics + Henry financial lexicons) |
-| News Feeds | feedparser + requests (BBC, OilPrice, Google News RSS) |
-| Country Data | Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA |
-| Visualization | Matplotlib |
+| Market data | yfinance (TTF=F, CL=F, BZ=F, CARB.L → KRBN → ICLN) |
+| Power data | Energy-Charts API (Fraunhofer ISE), DE-LU day-ahead |
+| EUA prices | EEX primary-auction reports |
+| Framework | Streamlit (multi-page with `st.navigation`) |
+| Risk analytics | NumPy, Pandas, SciPy |
+| Volatility modelling | arch (GARCH) |
+| Machine learning | scikit-learn (KMeans, StandardScaler) |
+| NLP | FinBERT (HuggingFace Inference API), FinVADER fallback |
+| News feeds | feedparser + requests (BBC, OilPrice, Google News RSS) |
+| Country data | Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA |
+| Visualisation | Matplotlib |
 
-## Methodology
+## Methodology Notes
 
-**Multi-commodity architecture:** One platform, one URL. Select any commodity and all modules adapt. Demonstrates the system is generalizable, not hardcoded for a single asset.
+**Carbon benchmark.** KEUA, the original EUA ETF, was liquidated in March 2026. The app now tries `CARB.L` (WisdomTree Carbon ETC, USD line on the LSE), then `KRBN`, then `ICLN`, and labels the charts from whichever resolves. `CARB.L` tracks ICE EUA futures, but its quote is an ETC share price in USD, not €/tCO2, so its returns also carry EUR/USD moves, roll yield and fees. The Power page uses EEX auction prices in €/t instead.
 
-**Why KEUA?** KEUA directly tracks EU ETS carbon allowance futures. ICLN serves as fallback when KEUA data is unavailable.
+**VaR.** Historical simulation: the 5th percentile of daily returns is the 95% VaR. On the Risk page's position block, VaR and ES come from the last 250 days of the book's € P&L.
 
-**VaR:** Historical simulation — 5th percentile of daily returns = 95% VaR.
+**VaR backtest.** Hypothetical: today's positions are applied to past returns, and each day's VaR is estimated only from the 250 days before it (no look-ahead). Kupiec's test also rejects a model with too few exceptions (over-conservative).
 
-**GARCH(1,1):** Forward-looking volatility. α captures shock reaction, β captures persistence. α + β near 1 = highly persistent volatility.
+**GARCH(1,1).** α captures reaction to shocks, β persistence; α + β near 1 means volatility shocks fade slowly.
 
-**Regime detection:** Hybrid — KMeans for pattern detection + absolute thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%).
+**Regime detection.** K-Means on volatility and correlation plus absolute thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%); K-Means decides in the 4–9% boundary zone.
 
-**Country risk:** Composite structural score from 6 factors (commodity dependency, carbon intensity, total energy dependency, renewable share, price sensitivity, dependency rank), multiplied by country-specific volatility multiplier. Countries with higher dependency feel the same market shock more intensely.
+**Clean spark spread caveats.** Power is the day-ahead spot price, while TTF is the front-month future, so the tenors don't match; desks use contracts with the same delivery period. Efficiency is assumed at 50%. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
 
-**NLP architecture:** Two-layer sentiment design. FinBERT (ProsusAI/finbert) handles current headlines — unlike rule-based methods, it understands financial context and domain-specific language. FinVADER (VADER enhanced with SentiBigomics and Henry financial lexicons) serves as fallback, providing significantly more accurate financial sentiment than standard VADER when FinBERT API is unavailable.
+**Country risk.** A composite structural score from six factors, multiplied by a volatility multiplier weighted by each country's dependency, so high-dependency countries feel the same market shock more.
 
-**Portfolio VaR:** Weighted portfolio returns computed from individual commodity returns. VaR is calculated on the combined return series, automatically capturing cross-commodity correlations. Diversification benefit = sum of individual weighted VaRs minus portfolio VaR.
+## Project Structure
+
+```
+app.py            entry point: shared sidebar, navigation (Streamlit Cloud runs this)
+common.py         carbon benchmark, commodities, data loading, cached risk calculations
+country_data.py   structural country data (Eurostat, EEA, IEA)
+power_data.py     Energy-Charts power prices and EEX EUA auction prices
+views/risk.py     Risk page
+views/power.py    Power page
+views/market.py   Market page
+```
 
 ## Run Locally
 
@@ -85,19 +100,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### FinBERT Setup (Optional)
+### Optional API keys
 
-The dashboard uses FinBERT for financial sentiment analysis. Without a token, it falls back to FinVADER (still accurate for financial text).
+Without keys the app still runs: sentiment falls back to FinVADER and the AI summary is hidden.
 
-To enable FinBERT:
-1. Create a free account at [huggingface.co](https://huggingface.co)
-2. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
-3. For Streamlit Cloud: add `HF_TOKEN = "hf_yourtoken"` in Settings → Secrets (never put tokens in code)
-4. For local: set environment variable `HF_TOKEN=hf_yourtoken`
+- **FinBERT**: create a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and set `HF_TOKEN`.
+- **AI Risk Interpretation**: set `ANTHROPIC_API_KEY`.
+
+On Streamlit Cloud, add them under Settings → Secrets (never put tokens in code); locally, set them as environment variables.
 
 ## Project Context
 
-Built as a FinTech portfolio project during my Master's in International Economics at the Geneva Graduate Institute (IHEID), with iterative feedback from Professor Joëlle Noailly. Demonstrates applied skills in financial data analysis, risk modeling, machine learning, and NLP for European energy and commodity markets.
+Built as a FinTech portfolio project during my Master's in International Economics at the Geneva Graduate Institute (IHEID), with iterative feedback from Professor Joëlle Noailly.
 
 ## License
 
