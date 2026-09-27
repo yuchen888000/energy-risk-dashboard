@@ -424,9 +424,15 @@ if country_headlines:
 else:
     st.info(f"No recent energy news found specifically for {selected_country}.")
 
+# Must match the weights used for 'Structural Score' above, which differ in Carbon mode.
+if commodity['ticker'] == CARBON_TICKER:
+    score_formula = (f"{dep_label} (25%) + Carbon Intensity rank (20%) + Inverse Renewable (20%) + "
+                     f"{dep_label} rank (15%) + Price Sensitivity (15%) + Inverse Renewable rank (5%)")
+else:
+    score_formula = (f"{dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + "
+                     f"Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%)")
 st.caption(
-    f"Structural Score = {dep_label} (25%) + Carbon Intensity rank (15%) + Total Energy Dep. (15%) + "
-    f"Inverse Renewable (15%) + {dep_label} rank (15%) + Price Sensitivity (15%). "
+    f"Structural Score = {score_formula}. "
     f"Dynamic Risk = Structural × Country-specific volatility multiplier (weighted by dependency). "
     f"Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary."
 )
