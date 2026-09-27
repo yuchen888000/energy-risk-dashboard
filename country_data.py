@@ -3,6 +3,7 @@
 Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary.
 Every list follows the order of COUNTRIES.
 """
+import re
 
 COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
              'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
@@ -76,3 +77,47 @@ def dependency_for(commodity_name):
     if commodity_name in ('WTI Crude Oil', 'Brent Crude Oil'):
         return 'Oil Dep. (%)', 'Oil Import Dependency', oil_dep
     return 'Total Energy Dep. (%)', 'Total Energy Dependency', total_dep
+
+
+# Words that show a headline is about a country: its name, short forms and adjective.
+# Matched case-sensitively on whole words, so "Polish" matches but "polish" does not.
+COUNTRY_TERMS = {
+    'Germany': ['Germany', 'German', 'Germans'],
+    'France': ['France', 'French'],
+    'Italy': ['Italy', 'Italian'],
+    'Spain': ['Spain', 'Spanish'],
+    'Netherlands': ['Netherlands', 'Dutch', 'Holland'],
+    'Poland': ['Poland', 'Polish'],
+    'Belgium': ['Belgium', 'Belgian'],
+    'Austria': ['Austria', 'Austrian'],
+    'Greece': ['Greece', 'Greek'],
+    'Czech Republic': ['Czech Republic', 'Czechia', 'Czech'],
+    'Hungary': ['Hungary', 'Hungarian'],
+    'Romania': ['Romania', 'Romanian'],
+    'Bulgaria': ['Bulgaria', 'Bulgarian'],
+    'Finland': ['Finland', 'Finnish'],
+    'Sweden': ['Sweden', 'Swedish'],
+    'Denmark': ['Denmark', 'Danish'],
+    'Ireland': ['Ireland', 'Irish'],
+    'Portugal': ['Portugal', 'Portuguese'],
+    'Lithuania': ['Lithuania', 'Lithuanian'],
+    'Latvia': ['Latvia', 'Latvian'],
+    'Estonia': ['Estonia', 'Estonian'],
+    'Slovakia': ['Slovakia', 'Slovak', 'Slovakian'],
+    'Croatia': ['Croatia', 'Croatian'],
+    'Slovenia': ['Slovenia', 'Slovenian', 'Slovene'],
+    'Luxembourg': ['Luxembourg', 'Luxembourgish'],
+    'Cyprus': ['Cyprus', 'Cypriot'],
+    'Malta': ['Malta', 'Maltese'],
+    'Switzerland': ['Switzerland', 'Swiss'],
+    'United Kingdom': ['United Kingdom', 'UK', 'U.K.', 'Britain', 'British'],
+    'Norway': ['Norway', 'Norwegian'],
+    'Turkey': ['Turkey', 'Türkiye', 'Turkiye', 'Turkish'],
+}
+
+
+def mentions_country(text, country):
+    """True if `text` names `country` or uses its adjective (whole words only)."""
+    terms = COUNTRY_TERMS.get(country, [country])
+    pattern = r'(?<!\w)(?:' + '|'.join(re.escape(t) for t in terms) + r')(?!\w)'
+    return re.search(pattern, text) is not None

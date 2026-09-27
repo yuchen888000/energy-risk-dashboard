@@ -43,7 +43,8 @@ if power.empty:
                "The rest of the dashboard is unaffected — try again later.")
     st.stop()
 if power_errors:
-    st.warning("Some years of power data could not be loaded: " + "; ".join(power_errors))
+    st.warning("Some years of power data could not be loaded, so the charts show only the years "
+               "that did: " + "; ".join(power_errors))
 
 ttf = common.load_close("TTF=F", start_date, end_date)
 if ttf.empty:

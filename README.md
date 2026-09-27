@@ -21,7 +21,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 - **Cross-Commodity Correlation Matrix** — TTF, WTI, Brent and carbon, full period vs last 30 days.
 - **Value at Risk** — 95% and 99% historical VaR, return distribution, 60-day rolling VaR.
 - **GARCH(1,1) Forecast** — 10-day volatility forecast with a bootstrap 90% band.
-- **Market Regime** — hybrid K-Means + absolute thresholds: Calm, Volatile, Crisis.
+- **Market Regime** — hybrid K-Means + per-commodity volatility thresholds: Calm, Volatile, Crisis.
 - **Stress Test** — price-shock slider; stressed volatility, VaR, regime and most-affected countries.
 - **Portfolio VaR** — custom weights across the four commodities, with the diversification benefit.
 
@@ -33,7 +33,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 ## Power page
 
-- **German day-ahead power** (bidding zone DE-LU) from the Energy-Charts API, averaged per Berlin calendar day (baseload).
+- **German day-ahead power** (bidding zone DE-LU) from the Energy-Charts API, averaged per Berlin calendar day (baseload). Requests are spaced out and retried with backoff on HTTP 429; completed years are cached for 30 days and the current year for an hour, and years that still fail are skipped with a warning.
 - **Clean spark spread** = power − TTF / 0.5 − (0.202 / 0.5) × EUA, where 0.5 is the gas plant efficiency and 0.202 tCO2/MWh the natural gas emission factor.
 - Headline: current spread, green when running a gas plant is profitable and red when it isn't.
 - Charts: the spread over time, and its decomposition into power price, fuel cost and carbon cost.
@@ -42,7 +42,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 ## Market page
 
-- **Country Risk** — 31 countries (EU-27 + Switzerland, UK, Norway, Turkey), 2020–2024. A structural score (dependency, carbon intensity, renewables, price sensitivity) is scaled by live market volatility, weighted by each country's dependency. Includes per-country trend, dependency-weighted volatility and country news sentiment.
+- **Country Risk** — 31 countries (EU-27 + Switzerland, UK, Norway, Turkey), 2020–2024. A structural score (dependency, carbon intensity, renewables, price sensitivity) is scaled by live market volatility, weighted by each country's dependency. Includes per-country trend, dependency-weighted volatility and country news sentiment (only headlines that name the country or use its adjective).
 - **News Sentiment** — FinBERT (ProsusAI/finbert via HuggingFace) on live headlines from BBC Business, OilPrice and Google News; FinVADER as fallback.
 - **30-Day Sentiment Trend** — daily average sentiment, scored with FinVADER.
 - **Anomaly Detection** — volatility z-score, GARCH divergence, correlation shift, sentiment–regime divergence, recent tail events.
@@ -75,7 +75,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 **GARCH(1,1).** α captures reaction to shocks, β persistence; α + β near 1 means volatility shocks fade slowly.
 
-**Regime detection.** K-Means on volatility and correlation plus absolute thresholds (Calm < 6%, Volatile 6–12%, Crisis > 12%); K-Means decides in the 4–9% boundary zone.
+**Regime detection.** K-Means on volatility and correlation plus per-commodity thresholds: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility since 2010 (the selected range if that history is too short). K-Means decides in a boundary zone from ⅔ of the lower threshold to ¾ of the upper one. The Risk page caption shows the thresholds used.
 
 **Clean spark spread caveats.** Power is the day-ahead spot price, while TTF is the front-month future, so the tenors don't match; desks use contracts with the same delivery period. Efficiency is assumed at 50%. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
 

@@ -4,6 +4,7 @@ Designed with data and analytics firms in mind.
 """
 import os
 import time
+from urllib.parse import quote_plus
 
 import feedparser
 import matplotlib.pyplot as plt
@@ -15,7 +16,7 @@ import streamlit as st
 
 import common
 from country_data import (COUNTRIES, gas_dep, oil_dep, total_dep, ren_share,
-                          carbon_int, price_sens, dependency_for)
+                          carbon_int, price_sens, dependency_for, mentions_country)
 
 nltk.download('vader_lexicon', quiet=True)
 from nltk.sentiment.vader import SentimentIntensityAnalyzer  # noqa: E402
@@ -64,7 +65,8 @@ dep_col, dep_label, _ = dependency_for(selected_commodity)
 
 garch = common.fit_garch(returns_clean)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
-features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']])
+regime_thr = common.regime_thresholds(commodity['ticker'], df_analysis['Volatility'])
+features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
 current_regime = features['Regime'].iloc[-1]
 
 # ─── FinBERT via HuggingFace Inference API ───
@@ -359,8 +361,8 @@ st.caption(f"Adjusted volatility = {selected_commodity} 30-day rolling volatilit
 # Per-country news sentiment
 # FIX: now uses FinBERT → FinVADER → VADER fallback chain (consistent with main sentiment section)
 st.write(f"**{selected_country} — Current Energy News Sentiment:**")
-country_rss_url = (f"https://news.google.com/rss/search?q={selected_country}+energy+"
-                   f"{commodity['rss_query'].split('+')[0]}+when:7d&hl=en")
+_country_q = quote_plus(f"{selected_country} energy {commodity['rss_query'].split('+')[0]}")
+country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:7d&hl=en"
 country_headlines = []
 try:
     country_feed = feedparser.parse(country_rss_url)
@@ -369,13 +371,14 @@ try:
                                           'emission', 'climate', 'price', 'supply',
                                           'tanker', 'refinery', 'fossil', 'renewable',
                                           'heating', 'Hormuz', 'sanction', 'ETS']
-    for entry in country_feed.entries[:30]:
+    for entry in country_feed.entries[:50]:
         title = entry.title
-        country_match = selected_country.lower() in title.lower()
-        energy_match = any(kw.lower() in title.lower() for kw in _energy_kw)
-        if country_match and energy_match:
-            country_headlines.append(title)
-        elif energy_match and not country_match:
+        # Google News appends " - Publisher"; match on the headline only, so an outlet
+        # name such as "Irish Times" does not count as a mention of the country.
+        source = entry.get('source', {}).get('title', '')
+        headline = title[:-len(source) - 3] if source and title.endswith(f" - {source}") else title
+        energy_match = any(kw.lower() in headline.lower() for kw in _energy_kw)
+        if energy_match and mentions_country(headline, selected_country):
             country_headlines.append(title)
         if len(country_headlines) >= 5:
             break
@@ -422,7 +425,7 @@ if country_headlines:
         icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
         st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
 else:
-    st.info(f"No recent energy news found specifically for {selected_country}.")
+    st.info(f"No energy headline from the last 7 days mentions {selected_country} by name or adjective.")
 
 # Must match the weights used for 'Structural Score' above, which differ in Carbon mode.
 if commodity['ticker'] == CARBON_TICKER:
@@ -911,7 +914,8 @@ st.write(f"Synthesizes today's quantitative signals into a plain-language risk a
 def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
                             _var_95, _current_regime, _garch_10d,
                             _avg_score, _avg_30d, anomaly_types_str,
-                            top_neg_str, date_str):
+                            top_neg_str, date_str, regime_calm, regime_crisis,
+                            boundary_lo, boundary_hi):
     api_key = None
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
@@ -935,12 +939,12 @@ HOW TO READ THE INPUTS
 Volatility
 - All volatility figures are DAILY standard deviation of returns, in percent. Not annualised.
 - The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
-- A GARCH expansion flag compares the forecast against CURRENT volatility only. Before calling it stress, check the forecast against the long-run average and against the 6% Volatile boundary. A forecast that stays below both is normalisation back to typical levels, not a build-up of risk, and should be described that way.
+- A GARCH expansion flag compares the forecast against CURRENT volatility only. Before calling it stress, check the forecast against the long-run average and against the {regime_calm:.2f}% Volatile boundary. A forecast that stays below both is normalisation back to typical levels, not a build-up of risk, and should be described that way.
 
 Two independent lenses - a disagreement between them is not an error
 - "Risk signal" is RELATIVE: it compares current volatility to this commodity's own long-run average. It says nothing about the absolute level.
-- "Regime" is ABSOLUTE: Calm below 6%, Volatile 6-12%, Crisis above 12%. Between 4% and 9% a clustering model using both volatility and correlation may override that threshold, so the regime label can differ from what the volatility number alone suggests.
-- A commodity can be HIGH RISK and Calm at once: unusually volatile by its own standards, still quiet in absolute terms. Where that holds, say so plainly rather than treating it as a contradiction.
+- "Regime" uses FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile). Between {boundary_lo:.2f}% and {boundary_hi:.2f}% a clustering model using both volatility and correlation may override that threshold, so the regime label can differ from what the volatility number alone suggests.
+- A commodity can be HIGH RISK and Calm at once: unusually volatile relative to the selected window's average, still ordinary against its full history. Where that holds, say so plainly rather than treating it as a contradiction.
 
 VaR
 - VaR 95% is the 5th percentile of the daily return distribution: a loss threshold, given as a negative number.
@@ -1035,6 +1039,10 @@ narrative, error = generate_risk_narrative(
     anomaly_types_str=anomaly_types_for_llm,
     top_neg_str=top_neg_for_llm,
     date_str=today_date_str,
+    regime_calm=regime_thr['calm'],
+    regime_crisis=regime_thr['crisis'],
+    boundary_lo=regime_thr['boundary_lo'],
+    boundary_hi=regime_thr['boundary_hi'],
 )
 
 if narrative:

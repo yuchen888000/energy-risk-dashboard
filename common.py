@@ -265,11 +265,60 @@ def fit_garch(returns_clean):
 
 
 # ─── Hybrid Regime Detection ───
+REGIME_HISTORY_START = dt.date(2010, 1, 1)
+CALM_PCT, CRISIS_PCT = 50, 90     # percentiles of the commodity's own 30-day volatility
+_MIN_HISTORY = 250
+
+
+@st.cache_data(ttl=86400, show_spinner="Computing regime thresholds...")
+def regime_thresholds(ticker, fallback_vol):
+    """Volatile / Crisis thresholds from the commodity's own 30-day volatility history.
+
+    Volatile starts at the CALM_PCT-th percentile and Crisis at the CRISIS_PCT-th, both
+    taken over the ticker's full history since REGIME_HISTORY_START (so they do not move
+    with the selected date range). If that history is too short, `fallback_vol` (the
+    30-day volatility of the selected range) is used instead.
+    """
+    close = load_close(ticker, REGIME_HISTORY_START, dt.date.today())
+    close = close[close > 0]
+    vol = (close.pct_change().rolling(30).std() * 100).dropna()
+    source = "full history"
+    if len(vol) < _MIN_HISTORY:
+        vol, source = fallback_vol.dropna(), "selected date range only; full history unavailable"
+    calm, crisis = np.percentile(vol, [CALM_PCT, CRISIS_PCT])
+    return dict(calm=float(calm), crisis=float(crisis), source=source,
+                start=vol.index[0], end=vol.index[-1], n=len(vol),
+                # K-Means decides in this band around the Calm/Volatile boundary. Same
+                # proportions as the former fixed 4–9% band around 6% / 12%.
+                boundary_lo=float(calm) * 2 / 3, boundary_hi=float(crisis) * 3 / 4)
+
+
+def regime_label(vol, thr):
+    """Threshold-only regime for one volatility value (%)."""
+    if vol > thr['crisis']:
+        return 'Crisis'
+    if vol > thr['calm']:
+        return 'Volatile'
+    return 'Calm'
+
+
+def regime_caption(thr):
+    """One-line description of the thresholds, for page captions."""
+    period = f"{thr['start']:%b %Y}–{thr['end']:%b %Y}"
+    return (f"Thresholds for this commodity: Calm < {thr['calm']:.2f}% · "
+            f"Volatile {thr['calm']:.2f}–{thr['crisis']:.2f}% · Crisis > {thr['crisis']:.2f}% "
+            f"(the {CALM_PCT}th and {CRISIS_PCT}th percentiles of its own 30-day rolling volatility, "
+            f"{period}, {thr['n']:,} days — {thr['source']}) · "
+            f"K-Means overrides the threshold in the {thr['boundary_lo']:.2f}–{thr['boundary_hi']:.2f}% "
+            "boundary zone using volatility + correlation")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def compute_regimes(features):
+def compute_regimes(features, thr):
     """Label each day Calm / Volatile / Crisis from 30-day volatility and correlation.
 
-    `features` has columns Volatility and Rolling Correlation.
+    `features` has columns Volatility and Rolling Correlation; `thr` comes from
+    regime_thresholds().
     """
     features = features.dropna().copy()
     scaled = StandardScaler().fit_transform(features)
@@ -282,31 +331,21 @@ def compute_regimes(features):
     _cluster_to_regime = dict(zip(_cluster_vol_means.index.tolist(), ['Calm', 'Volatile', 'Crisis']))
     features['KMeans_Regime'] = features['Cluster'].map(_cluster_to_regime)
 
-    # Step 2: Absolute threshold labels — reliable at extremes, ambiguous near boundaries.
-    def _threshold_regime(vol):
-        if vol > 12:
-            return 'Crisis'
-        elif vol > 6:
-            return 'Volatile'
-        else:
-            return 'Calm'
-
-    features['Threshold_Regime'] = features['Volatility'].apply(_threshold_regime)
+    # Step 2: Per-commodity threshold labels — reliable at extremes, ambiguous near boundaries.
+    features['Threshold_Regime'] = features['Volatility'].apply(regime_label, thr=thr)
 
     # Step 3: Weighted hybrid vote.
     # - Both agree  → unanimous (high confidence)
-    # - Boundary zone 4–9% vol → K-Means wins: it uses *both* volatility and correlation,
+    # - Boundary zone → K-Means wins: it uses *both* volatility and correlation,
     #   so it captures regime character that pure vol thresholds miss (e.g. a low-vol period
     #   with extreme negative correlation behaving like early-stage Volatile).
     # - Outside boundary zone → threshold wins: at extremes the threshold is unambiguous
     #   and K-Means adds no useful information.
-    _BOUNDARY_LO, _BOUNDARY_HI = 4.0, 9.0
-
     def _hybrid_regime(row):
         t, k = row['Threshold_Regime'], row['KMeans_Regime']
         if t == k:
             return t
-        return k if _BOUNDARY_LO <= row['Volatility'] <= _BOUNDARY_HI else t
+        return k if thr['boundary_lo'] <= row['Volatility'] <= thr['boundary_hi'] else t
 
     features['Regime'] = features.apply(_hybrid_regime, axis=1)
     return features

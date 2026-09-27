@@ -3,10 +3,15 @@
 - German/Luxembourg day-ahead prices from the Energy-Charts API (Fraunhofer ISE).
 - EUA prices in €/t from EEX's yearly primary-auction reports.
 
-Each fetch is cached for an hour. Loaders return what they could get plus a list of
-problems, so the page can warn instead of failing.
+Energy-Charts rate-limits (HTTP 429), so power requests are spaced out and retried
+with backoff. Completed past years never change and are cached for 30 days; only
+the current year is refetched every hour. EEX fetches are cached for an hour.
+Loaders return what they could get plus a list of problems, so the page can warn
+instead of failing.
 """
+import datetime as dt
 import io
+import time
 
 import pandas as pd
 import requests
@@ -18,9 +23,35 @@ EEX_URL = ("https://public.eex-group.com/eex/eua-auction-report/"
            "emission-spot-primary-market-auction-report-{year}-data.xlsx")
 FIRST_YEAR = 2020
 
+_MIN_GAP = 1.5           # seconds between Energy-Charts requests
+_RETRIES = 4             # retries after a 429, waiting 2, 4, 8, 16 s (or Retry-After)
+_MAX_WAIT = 30
+_last_request = 0.0
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_power_year(year, bzn="DE-LU"):
+
+def _get_power(params):
+    """GET the Energy-Charts price endpoint, spacing requests and backing off on 429."""
+    global _last_request
+    for attempt in range(_RETRIES + 1):
+        gap = _MIN_GAP - (time.monotonic() - _last_request)
+        if gap > 0:
+            time.sleep(gap)
+        r = requests.get(POWER_URL, params=params, headers=_HEADERS, timeout=60)
+        _last_request = time.monotonic()
+        if r.status_code != 429 or attempt == _RETRIES:
+            break
+        try:
+            wait = float(r.headers.get("Retry-After", ""))
+        except ValueError:
+            wait = 2 ** (attempt + 1)
+        time.sleep(min(max(wait, 1), _MAX_WAIT))
+    if r.status_code == 429:
+        raise RuntimeError(f"Energy-Charts rate limit (HTTP 429), still refused after {_RETRIES} retries")
+    r.raise_for_status()
+    return r.json()
+
+
+def _fetch_power_year(year, bzn):
     """Daily baseload price (€/MWh) for one calendar year, as (Series, licence text).
 
     The request brackets the year by one day on each side, then keeps the Berlin
@@ -29,9 +60,7 @@ def fetch_power_year(year, bzn="DE-LU"):
     the day-ahead market moved to 15-minute products on 1 Oct 2025).
     """
     params = {"bzn": bzn, "start": f"{year - 1}-12-31", "end": f"{year + 1}-01-01"}
-    r = requests.get(POWER_URL, params=params, headers=_HEADERS, timeout=60)
-    r.raise_for_status()
-    js = r.json()
+    js = _get_power(params)
     prices = js.get("price", js.get("data"))
     if not js.get("unix_seconds") or prices is None:
         raise ValueError(f"unexpected response fields: {sorted(js)}")
@@ -43,8 +72,29 @@ def fetch_power_year(year, bzn="DE-LU"):
     return daily, js.get("license_info", "")
 
 
+# Errors are not cached, so a year that failed is retried on the next run.
+@st.cache_data(ttl=dt.timedelta(days=30), show_spinner=False)
+def _fetch_past_year(year, bzn):
+    return _fetch_power_year(year, bzn)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_current_year(year, bzn):
+    return _fetch_power_year(year, bzn)
+
+
+def fetch_power_year(year, bzn="DE-LU"):
+    """One year of daily prices: long cache for completed years, hourly for the current one."""
+    this_year = pd.Timestamp.now(tz="Europe/Berlin").year
+    return (_fetch_past_year if year < this_year else _fetch_current_year)(year, bzn)
+
+
 def load_power(start, end):
-    """Daily DE-LU day-ahead baseload between start and end, fetched year by year."""
+    """Daily DE-LU day-ahead baseload between start and end, fetched year by year.
+
+    A year that still fails after retries is reported in the error list; the years
+    that loaded are returned.
+    """
     parts, errors, licence = [], [], ""
     for year in range(max(start.year, FIRST_YEAR), end.year + 1):
         try:

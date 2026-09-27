@@ -28,9 +28,10 @@ with st.sidebar.expander("Methodology — Risk page"):
     - **Value at Risk (VaR)**: 95% and 99% historical VaR.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent
       shocks (α) and persistence (β).
-    - **Hybrid Regime Detection**: K-Means (3 clusters on vol + correlation) + absolute
-      thresholds. Agreement → unanimous label. Disagreement in boundary zone (4–9% vol)
-      → K-Means wins. Disagreement outside boundary → threshold wins.
+    - **Hybrid Regime Detection**: K-Means (3 clusters on vol + correlation) + per-commodity
+      volatility thresholds (50th and 90th percentiles of the commodity's own 30-day
+      volatility history). Agreement → unanimous label. Disagreement in the boundary zone
+      around the lower threshold → K-Means wins. Disagreement outside it → threshold wins.
     - **Stress Test**: Simulate price shocks and see impact on volatility,
       VaR, regime, and country exposure.
     - **Portfolio VaR**: Combined risk of holding multiple commodities,
@@ -323,17 +324,17 @@ else:
 
 # ─── Section 5: Market Regime Clustering ───
 st.subheader("Market Regime Clustering (AI)")
-st.write("Hybrid approach: K-Means clustering + absolute volatility thresholds for regime labeling")
+st.write("Hybrid approach: K-Means clustering + per-commodity volatility thresholds for regime labeling")
 
-features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']])
+regime_thr = common.regime_thresholds(commodity['ticker'], df_analysis['Volatility'])
+features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
 
 current_regime = features['Regime'].iloc[-1]
 regime_colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
 regime_color = regime_colors.get(current_regime, 'gray')
 st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
             unsafe_allow_html=True)
-st.caption("Thresholds: Calm < 6% · Volatile 6–12% · Crisis > 12% (30-day rolling volatility) · "
-           "K-Means overrides threshold in 4–9% boundary zone using volatility + correlation")
+st.caption(common.regime_caption(regime_thr))
 
 regime_stats = features.groupby('Regime').agg(
     Days=('Volatility', 'count'),
@@ -349,8 +350,10 @@ with rcol1:
     for regime, group in features.groupby('Regime'):
         ax3.scatter(group.index, group['Volatility'],
                    c=colors[regime], label=regime, alpha=0.5, s=10)
-    ax3.axhline(y=6, color='orange', linewidth=1, linestyle='--', alpha=0.5, label='Volatile threshold (6%)')
-    ax3.axhline(y=12, color='red', linewidth=1, linestyle='--', alpha=0.5, label='Crisis threshold (12%)')
+    ax3.axhline(y=regime_thr['calm'], color='orange', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Volatile threshold ({regime_thr['calm']:.2f}%, p{common.CALM_PCT})")
+    ax3.axhline(y=regime_thr['crisis'], color='red', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Crisis threshold ({regime_thr['crisis']:.2f}%, p{common.CRISIS_PCT})")
     ax3.set_ylabel('30-Day Volatility (%)')
     ax3.set_title(f'{selected_commodity} — Market Regime Detection')
     ax3.legend(fontsize=7)
@@ -383,15 +386,8 @@ st4.metric("Stressed VaR 99%", f"{stressed_var_99:.2f}%",
            delta=f"{stressed_var_99 - var_99:.2f}%")
 
 # FIX: avoid uninformative "Regime shifts to Calm (from Calm)"
-if stressed_vol > 12:
-    stressed_regime = "🔴 Crisis"
-    stressed_regime_name = "Crisis"
-elif stressed_vol > 6:
-    stressed_regime = "🟡 Volatile"
-    stressed_regime_name = "Volatile"
-else:
-    stressed_regime = "🟢 Calm"
-    stressed_regime_name = "Calm"
+stressed_regime_name = common.regime_label(stressed_vol, regime_thr)
+stressed_regime = {"Crisis": "🔴 Crisis", "Volatile": "🟡 Volatile", "Calm": "🟢 Calm"}[stressed_regime_name]
 
 if stressed_regime_name == current_regime:
     st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime remains **{stressed_regime}** "
