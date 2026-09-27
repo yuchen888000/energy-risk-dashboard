@@ -24,17 +24,21 @@ st.set_page_config(page_title="European Energy & Commodity Risk Dashboard", layo
 CARBON_CANDIDATES = [
     {
         "ticker": "CARB.L",
-        "label": "EU Carbon Allowance (CARB.L)",
+        "label": "EU Carbon ETC (CARB.L, USD)",
         "short": "EU Carbon",
         "name": "EU Carbon Allowance",
+        "unit": "ETC price, USD (tracks EUA futures)",
         "pure_eu": True,
-        "note": "WisdomTree Carbon ETC (LSE) — tracks ICE EUA futures directly.",
+        "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
+                 "EUA futures, but the quote is an ETC share price in USD, not €/tCO2, so its "
+                 "returns also carry EUR/USD moves, roll yield and fees."),
     },
     {
         "ticker": "KRBN",
         "label": "Global Carbon (KRBN — EUA-weighted)",
         "short": "Carbon",
         "name": "Carbon Allowances (Global)",
+        "unit": "ETF price, USD",
         "pure_eu": False,
         "note": ("KraneShares Global Carbon Strategy ETF. EUA carries the dominant index weight, "
                  "but California (CCA), RGGI, UK (UKA) and Washington (WCA) allowances are also "
@@ -45,6 +49,7 @@ CARBON_CANDIDATES = [
         "label": "Clean Energy Proxy (ICLN)",
         "short": "Clean Energy",
         "name": "Clean Energy Proxy",
+        "unit": "ETF price, USD",
         "pure_eu": False,
         "note": ("Clean-energy equity ETF. This is NOT a carbon allowance price; it is a "
                  "last-resort proxy used only when no carbon instrument resolves."),
@@ -75,6 +80,7 @@ CARBON_SHORT = CARBON["short"]
 CARBON_NAME = CARBON["name"]
 CARBON_NOTE = CARBON["note"]
 CARBON_IS_PURE_EU = CARBON["pure_eu"]
+CARBON_UNIT = CARBON["unit"]
 
 # ─── Commodity Definitions ───
 COMMODITIES = {
@@ -101,7 +107,7 @@ COMMODITIES = {
     },
     CARBON_NAME: {
         "ticker": CARBON_TICKER,
-        "unit": "€/tCO2" if CARBON_IS_PURE_EU else "index",
+        "unit": CARBON_UNIT,
         "color": "seagreen",
         "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
         "rss_query": "EU+carbon+ETS+emission+price",
@@ -209,8 +215,7 @@ else:
     df['Compare'] = df['Carbon']
     compare_label = CARBON_LABEL
     df_analysis = df[['Price', 'Compare']].dropna()
-    if not CARBON_IS_PURE_EU:
-        st.caption(f"Carbon benchmark: **{CARBON_LABEL}**. {CARBON_NOTE}")
+    st.caption(f"Carbon benchmark: **{CARBON_LABEL}**. {CARBON_NOTE}")
     if not has_carbon:
         st.caption(f"{CARBON_LABEL} has limited coverage over the selected range — "
                    "widen the date window for a fuller comparison.")
