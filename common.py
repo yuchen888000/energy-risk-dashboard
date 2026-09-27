@@ -385,3 +385,35 @@ def basel_zone(exceptions, n=250):
     if exceptions <= 9 * scale:
         return 'Yellow'
     return 'Red'
+
+
+# ─── Price range over a short horizon (risk of waiting) ───
+@st.cache_data(ttl=3600, show_spinner="Simulating price paths...")
+def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
+    """Range of the price `horizon` business days ahead from a GARCH(1,1) fit.
+
+    Fitted on daily log returns with zero mean (no view on direction) and Student-t
+    shocks (fat tails). Simulated paths give, for each day ahead, the lower, median
+    and upper percentile of the price. Returns None if the fit fails.
+    """
+    close = close[close > 0].dropna()
+    log_ret = 100 * np.log(close).diff().dropna()
+    try:
+        res = arch_model(log_ret, mean='Zero', vol='GARCH', p=1, q=1, dist='t',
+                         rescale=False).fit(disp='off')
+        fc = res.forecast(horizon=horizon, method='simulation', simulations=simulations,
+                          reindex=False, random_state=np.random.RandomState(42))
+    except Exception:
+        return None
+    cum = np.cumsum(fc.simulations.values[-1], axis=1) / 100   # (simulations, horizon)
+    paths = close.iloc[-1] * np.exp(cum)
+    tail = (1 - conf) / 2 * 100
+    return dict(
+        price_now=float(close.iloc[-1]),
+        date=close.index[-1],
+        lo=np.percentile(paths, tail, axis=0),
+        median=np.percentile(paths, 50, axis=0),
+        hi=np.percentile(paths, 100 - tail, axis=0),
+        horizon_vol=float(np.std(cum[:, -1]) * 100),   # % std of the horizon log return
+        params={k: float(v) for k, v in res.params.items()},
+    )

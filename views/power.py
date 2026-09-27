@@ -170,5 +170,58 @@ st.caption(
     "it jumps when the contract rolls each month; those jumps show up as day-on-day spread moves and "
     "inflate the volatility and VaR above. Only business days (TTF trading days) are used."
 )
+# ─── Wait a week? Risk of delaying the gas purchase ───
+_WAIT_DAYS = 5
+gas_mwh_week = PLANT_MWH * _WAIT_DAYS / EFFICIENCY   # thermal MWh of gas for one week of running
+st.subheader("Wait a Week?")
+st.write(f"If the plant buys its gas {_WAIT_DAYS} business days from now instead of today, "
+         "how much could one week of fuel cost change?")
+
+wait = common.garch_price_range(ttf, horizon=_WAIT_DAYS)
+if wait is None:
+    st.caption("TTF price range unavailable — the GARCH model could not be fitted on this date range.")
+else:
+    lo, hi = wait["lo"][-1], wait["hi"][-1]
+    bill_now = gas_mwh_week * wait["price_now"]
+    bill_lo, bill_hi = gas_mwh_week * lo, gas_mwh_week * hi
+
+    w1, w2, w3 = st.columns(3)
+    w1.metric(f"TTF today ({wait['date']:%d %b %Y})", f"{wait['price_now']:.2f} €/MWh")
+    w2.metric(f"TTF in {_WAIT_DAYS} business days — 90% range (€/MWh)", f"{lo:.2f} – {hi:.2f}")
+    w3.metric(f"{_WAIT_DAYS}-day volatility", f"{wait['horizon_vol']:.1f}%",
+              help="Standard deviation of the simulated 5-day log return.")
+
+    b1, b2, b3 = st.columns(3)
+    b1.metric("One week of fuel, bought today", f"€{bill_now:,.0f}",
+              help=f"{gas_mwh_week:,.0f} MWh of gas: {PLANT_MW} MW × {PLANT_HOURS} h × "
+                   f"{_WAIT_DAYS} days ÷ {EFFICIENCY} efficiency.")
+    b2.metric("Bought in a week — 90% range", f"€{bill_lo / 1e3:,.0f}k – €{bill_hi / 1e3:,.0f}k",
+              help=f"€{bill_lo:,.0f} – €{bill_hi:,.0f}")
+    b3.metric("Cost of waiting, worst 5%", f"+€{bill_hi - bill_now:,.0f}",
+              help="How much more the week of gas costs if TTF ends at the top of the range.")
+
+    fig_w, ax_w = plt.subplots(figsize=(14, 3.5))
+    hist = ttf.tail(40)
+    days_ahead = pd.bdate_range(wait["date"], periods=_WAIT_DAYS + 1)
+    ax_w.plot(hist.index, hist.values, color="steelblue", linewidth=1.2, label="TTF (front month)")
+    ax_w.fill_between(days_ahead, np.r_[wait["price_now"], wait["lo"]], np.r_[wait["price_now"], wait["hi"]],
+                      color="steelblue", alpha=0.2, label="90% range if you wait")
+    ax_w.plot(days_ahead, np.r_[wait["price_now"], wait["median"]], color="steelblue",
+              linewidth=1, linestyle="--", label="Median (≈ today's price)")
+    ax_w.set_ylabel("€/MWh")
+    ax_w.set_title(f"TTF: last 40 business days and the range {_WAIT_DAYS} business days ahead")
+    ax_w.legend(fontsize=8, loc="upper left")
+    plt.tight_layout()
+    st.pyplot(fig_w)
+
+    st.caption(
+        "**This is the risk of waiting, not a forecast of direction.** The model has no view on "
+        "whether TTF goes up or down: its mean return is set to zero, so the range is centred on "
+        "today's price (slightly wider on the upside, because prices move in percentage terms). "
+        "Method: GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F`, 10,000 "
+        f"simulated {_WAIT_DAYS}-day paths, 5th–95th percentile. Monthly roll jumps in `TTF=F` feed "
+        "into the fitted volatility, and a real purchase would be priced on a specific contract."
+    )
+
 st.caption(eua_source)
 st.caption(f"Power: Energy-Charts API (Fraunhofer ISE), bidding zone DE-LU. {power_licence}")
