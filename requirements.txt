@@ -10,3 +10,4 @@ arch
 requests
 finvader
 scipy
+openpyxl
