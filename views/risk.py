@@ -108,6 +108,65 @@ ax.set_title(f'{selected_commodity} vs {compare_label}')
 plt.tight_layout()
 st.pyplot(fig)
 
+# ─── Section 2b: Forward Curve ───
+st.subheader(f"Forward Curve — {selected_commodity}")
+_MIN_CONTRACTS = 3
+if commodity['ticker'] not in common.CURVE_ROOTS:
+    st.caption("No forward curve for carbon: Yahoo Finance has no free monthly EUA contracts (EUA futures "
+               "trade as annual December contracts on ICE Endex), and the carbon series on this page is an "
+               "exchange-traded product, not a futures strip.")
+else:
+    curve_root, curve_unit = common.CURVE_ROOTS[commodity['ticker']]
+    curve = common.forward_curve(curve_root)
+    if len(curve) < _MIN_CONTRACTS:
+        st.caption(f"No forward curve shown: Yahoo Finance returned fresh prices for only {len(curve)} monthly "
+                   f"{curve_root} contracts right now (at least {_MIN_CONTRACTS} needed). "
+                   "Missing contracts are not filled in.")
+    else:
+        front, back = curve.iloc[0], curve.iloc[-1]
+        fb_spread = front['Price'] - back['Price']
+        if abs(fb_spread) < 0.005 * front['Price']:
+            curve_shape, shape_color = "Flat", "gray"
+        elif fb_spread < 0:
+            curve_shape, shape_color = "Contango", "steelblue"
+        else:
+            curve_shape, shape_color = "Backwardation", "darkorange"
+        n_curve = len(curve)
+        back_label = "12th month" if n_curve == 12 else f"month {n_curve} (furthest available)"
+
+        fc1, fc2, fc3 = st.columns(3)
+        fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
+                     unsafe_allow_html=True)
+        fc2.metric(f"Front month ({front['Delivery']:%b %y})", f"{front['Price']:.2f} {curve_unit}")
+        fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}")
+
+        fig_fc, ax_fc = plt.subplots(figsize=(14, 3.8))
+        labels_fc = [f"{d:%b %y}" for d in curve['Delivery']]
+        ax_fc.plot(labels_fc, curve['Price'], color=commodity['color'], marker='o', linewidth=1.5)
+        for x_fc, y_fc in zip(labels_fc, curve['Price']):
+            ax_fc.annotate(f"{y_fc:.2f}", (x_fc, y_fc), textcoords='offset points', xytext=(0, 7),
+                           ha='center', fontsize=7)
+        ax_fc.set_ylabel(curve_unit)
+        ax_fc.set_xlabel('Delivery month')
+        ax_fc.set_title(f"{selected_commodity} futures curve, settlement {curve['Last trade'].iloc[0]:%d %b %Y} "
+                        f"— {curve_shape.lower()}")
+        plt.tight_layout()
+        st.pyplot(fig_fc)
+
+        with st.expander("Contracts used"):
+            st.dataframe(curve.assign(Delivery=curve['Delivery'].map(lambda d: f"{d:%b %Y}"),
+                                      **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')}),
+                         width="stretch", hide_index=True)
+        st.caption(
+            "Contango: later deliveries cost more than the front month (spread negative). "
+            "Backwardation: the front month costs more (spread positive), usually a sign of tight "
+            "prompt supply. The label compares only the front and the last month shown; gas curves are "
+            "seasonal, so the shape in between can differ. "
+            f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, "
+            "delayed; only contracts with a price on the latest trading date are shown, nothing is "
+            f"interpolated. {n_curve} of 12 contracts available."
+        )
+
 # ─── Section 3: Volatility & Correlation ───
 vcol1, vcol2 = st.columns(2)
 with vcol1:

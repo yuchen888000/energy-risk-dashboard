@@ -417,3 +417,51 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
         horizon_vol=float(np.std(cum[:, -1]) * 100),   # % std of the horizon log return
         params={k: float(v) for k, v in res.params.items()},
     )
+
+
+# ─── Forward curves from individual monthly futures on Yahoo Finance ───
+MONTH_CODES = "FGHJKMNQUVXZ"
+# Continuous ticker → (monthly contract root on NYMEX, unit). EU carbon has no monthly
+# contracts on Yahoo Finance: EUA futures are annual December contracts on ICE Endex.
+CURVE_ROOTS = {"CL=F": ("CL", "$/barrel"), "BZ=F": ("BZ", "$/barrel"), "TTF=F": ("TTF", "€/MWh")}
+
+
+@st.cache_data(ttl=3600, show_spinner="Fetching monthly futures contracts...")
+def forward_curve(root, n=12, today=None):
+    """Latest prices of the next `n` monthly contracts, e.g. CLX26.NYM, CLZ26.NYM, ...
+
+    Symbols are generated from the current month onwards (with spares for contracts
+    that have already expired) and downloaded in one batch. Only contracts that traded
+    on the latest date in the batch are kept, so expired or stale contracts drop out.
+    Nothing is interpolated: missing contracts are simply absent. Returns a DataFrame
+    with Contract, Delivery, Price and Last trade, sorted by delivery month.
+    """
+    today = today or dt.date.today()
+    symbols = {}
+    for k in range(n + 3):
+        month_index = today.month - 1 + k
+        year, month = today.year + month_index // 12, month_index % 12 + 1
+        symbols[f"{root}{MONTH_CODES[month - 1]}{year % 100:02d}.NYM"] = dt.date(year, month, 1)
+
+    empty = pd.DataFrame(columns=['Contract', 'Delivery', 'Price', 'Last trade'])
+    try:
+        data = yf.download(list(symbols), start=today - dt.timedelta(days=21), progress=False)
+    except Exception:
+        return empty
+    if data is None or data.empty or 'Close' not in data:
+        return empty
+    closes = data['Close']
+    if isinstance(closes, pd.Series):
+        closes = closes.to_frame(list(symbols)[0])
+
+    rows = []
+    for sym in closes.columns:
+        s = closes[sym].dropna()
+        if not s.empty and sym in symbols:
+            rows.append({'Contract': sym, 'Delivery': symbols[sym],
+                         'Price': float(s.iloc[-1]), 'Last trade': s.index[-1]})
+    if not rows:
+        return empty
+    df = pd.DataFrame(rows)
+    df = df[df['Last trade'] == df['Last trade'].max()]
+    return df.sort_values('Delivery').head(n).reset_index(drop=True)
