@@ -3,6 +3,7 @@
 Designed with data and analytics firms in mind.
 """
 import os
+import re
 import time
 from urllib.parse import quote_plus
 
@@ -69,9 +70,15 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
 
 # ─── FinBERT via HuggingFace Inference API ───
-# FIX: defined here so it's available to both country sentiment (Section 5b)
-# and main NLP section (Section 6)
+# Used by both the country sentiment (Section 5b) and the main NLP section (Section 6).
+@st.cache_data(ttl=600, show_spinner="Scoring headlines with FinBERT...")
 def finbert_analyze(texts):
+    """Score headlines with ProsusAI/finbert on the Hugging Face router.
+
+    Returns (scores, labels, ok, reason). When ok is False, reason says why FinBERT was
+    not used (missing token, HTTP status and error text, or no response), so the page
+    can show it instead of failing silently. Results are cached for 10 minutes.
+    """
     API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
     hf_token = None
     try:
@@ -81,6 +88,7 @@ def finbert_analyze(texts):
     if not hf_token:
         hf_token = os.environ.get("HF_TOKEN", None)
     headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+    no_token = "" if hf_token else "no HF_TOKEN in st.secrets or the environment; "
 
     def parse_results(results, n_texts):
         scores, labels = [], []
@@ -106,44 +114,44 @@ def finbert_analyze(texts):
             return scores, labels
         return None, None
 
-    # Warm up API
+    def error_text(response):
+        try:
+            body = response.json()
+            msg = body.get('error', body) if isinstance(body, dict) else body
+        except Exception:
+            msg = response.text
+        return str(msg).strip()[:160]
+
+    # 503 = model loading, 429 / 5xx = transient: retry. 401 / 403 / 404 / 410 will not
+    # change on retry, so stop at once and report them.
+    reason = "no attempt made"
     for attempt in range(3):
         try:
-            warmup = req.post(API_URL, headers=headers,
-                              json={"inputs": texts[0]}, timeout=45)
-            if warmup.status_code == 503:
-                wait_time = warmup.json().get('estimated_time', 20)
-                time.sleep(min(wait_time + 5, 45))
-                continue
-            if warmup.status_code == 200:
-                break
-        except Exception:
+            response = req.post(API_URL, headers=headers, json={"inputs": list(texts)}, timeout=60)
+        except Exception as e:
+            reason = f"no response from {API_URL} ({type(e).__name__})"
             if attempt < 2:
                 time.sleep(10)
             continue
-    else:
-        return None, None, False
-
-    # Send full batch
-    for attempt in range(3):
-        try:
-            response = req.post(API_URL, headers=headers,
-                                json={"inputs": texts}, timeout=60)
-            if response.status_code == 503:
-                wait_time = response.json().get('estimated_time', 20)
-                time.sleep(min(wait_time + 5, 40))
-                continue
-            if response.status_code == 200:
-                sc, lb = parse_results(response.json(), len(texts))
-                if sc is not None:
-                    return sc, lb, True
-                break
-        except Exception:
-            if attempt < 2:
-                time.sleep(10)
+        if response.status_code == 200:
+            sc, lb = parse_results(response.json(), len(texts))
+            if sc is not None:
+                return sc, lb, True, ""
+            return None, None, False, f"{no_token}unexpected response format: {error_text(response)}"
+        reason = f"HTTP {response.status_code}: {error_text(response)}"
+        if response.status_code == 503:
+            try:
+                wait_time = float(response.json().get('estimated_time', 20))
+            except Exception:
+                wait_time = 20
+            time.sleep(min(wait_time + 5, 45))
             continue
+        if response.status_code == 429 or response.status_code >= 500:
+            time.sleep(5)
+            continue
+        break
+    return None, None, False, no_token + reason
 
-    return None, None, False
 
 def finvader_score(text):
     """FinVADER fallback — VADER + SentiBigNomics + Henry financial lexicons."""
@@ -153,6 +161,57 @@ def finvader_score(text):
     except Exception:
         sia = SentimentIntensityAnalyzer()
         return sia.polarity_scores(text)['compound']
+
+
+# ─── Headline relevance ───
+def _word_pattern(words, flags=re.IGNORECASE):
+    """Whole-word match for any of `words`, allowing a plural ending ("emission" → "emissions").
+    Substring matching would let "ETS" match "markets" and "oil" match "turmoil"."""
+    alt = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+    return re.compile(rf"(?<![A-Za-z])(?:{alt})(?:s|es)?(?![A-Za-z])", flags)
+
+
+# A headline about the United States with no link to Europe (or to the global market) is
+# dropped: US federal/state policy, pump prices, US production and inventory data.
+_US = [_word_pattern(["US", "U.S.", "USA"], flags=0),
+       _word_pattern(["America", "American", "Trump", "Biden", "White House", "Congress", "Senate",
+                      "Republican", "Democrat", "EPA", "Interior Department", "Energy Department",
+                      "Energy Secretary", "federal", "EIA", "Strategic Petroleum Reserve", "shale",
+                      "Permian", "gasoline", "at the pump", "governor", "Texas", "California", "Alaska",
+                      "Louisiana", "New York", "Pennsylvania", "North Dakota", "New Mexico", "Oklahoma",
+                      "Colorado", "Gulf of Mexico", "Wall Street"])]
+_EUROPE_OR_GLOBAL = _word_pattern([
+    "Europe", "European", "EU", "Brussels", "eurozone", "euro area", "UK", "Britain", "British",
+    "Germany", "German", "France", "French", "Italy", "Italian", "Spain", "Spanish", "Netherlands",
+    "Dutch", "Norway", "Norwegian", "Poland", "Polish", "Austria", "Belgium", "Russia", "Russian",
+    "Ukraine", "TTF", "ETS", "Nord Stream", "North Sea", "Brent", "OPEC", "Hormuz", "Suez",
+    "Red Sea", "global", "world"])
+# US LNG exports are Europe's largest source of LNG, so they are kept even without "Europe".
+_LNG_EXPORT = (_word_pattern(["LNG"]),
+               _word_pattern(["export", "exporter", "cargo", "cargoe", "shipment", "terminal"]))
+
+
+def headline_text(entry_title, source=""):
+    """The headline without the " - Publisher" suffix Google News appends."""
+    if source and entry_title.endswith(f" - {source}"):
+        return entry_title[:-len(source) - 3]
+    return entry_title
+
+
+def is_us_domestic(headline):
+    if not any(p.search(headline) for p in _US):
+        return False
+    if _EUROPE_OR_GLOBAL.search(headline):
+        return False
+    return not all(p.search(headline) for p in _LNG_EXPORT)
+
+
+def is_relevant(headline, keyword_re):
+    """Keep a headline only if it has one of the commodity keywords and is not US-domestic."""
+    return bool(keyword_re.search(headline)) and not is_us_domestic(headline)
+
+
+commodity_kw_re = _word_pattern(commodity['keywords'])
 
 
 # ─── Section 5b: European Country Energy Risk ───
@@ -365,18 +424,17 @@ country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:7d&hl
 country_headlines = []
 try:
     country_feed = feedparser.parse(country_rss_url)
-    _energy_kw = commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
-                                          'fuel', 'electricity', 'pipeline', 'LNG',
-                                          'emission', 'climate', 'price', 'supply',
-                                          'tanker', 'refinery', 'fossil', 'renewable',
-                                          'heating', 'Hormuz', 'sanction', 'ETS']
+    _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
+                                                        'fuel', 'electricity', 'pipeline', 'LNG',
+                                                        'emission', 'climate', 'price', 'supply',
+                                                        'tanker', 'refinery', 'fossil', 'renewable',
+                                                        'heating', 'Hormuz', 'sanction', 'ETS'])
     for entry in country_feed.entries[:50]:
         title = entry.title
         # Google News appends " - Publisher"; match on the headline only, so an outlet
         # name such as "Irish Times" does not count as a mention of the country.
-        source = entry.get('source', {}).get('title', '')
-        headline = title[:-len(source) - 3] if source and title.endswith(f" - {source}") else title
-        energy_match = any(kw.lower() in headline.lower() for kw in _energy_kw)
+        headline = headline_text(title, entry.get('source', {}).get('title', ''))
+        energy_match = bool(_energy_re.search(headline))
         if energy_match and mentions_country(headline, selected_country):
             country_headlines.append(title)
         if len(country_headlines) >= 5:
@@ -387,7 +445,7 @@ except Exception:
 if country_headlines:
     # FinBERT → FinVADER → VADER
     try:
-        c_scores_raw, c_labels_raw, c_ok = finbert_analyze(country_headlines[:5])
+        c_scores_raw, c_labels_raw, c_ok, _ = finbert_analyze(tuple(country_headlines[:5]))
         if c_ok:
             country_scores = c_scores_raw
             c_model = "FinBERT"
@@ -445,14 +503,6 @@ st.subheader(f"Energy News Sentiment — {selected_commodity}")
 st.write("Real-time sentiment analysis — FinBERT transformer with FinVADER lexicon fallback "
          "(the model actually used is stated below the chart)")
 
-general_keywords = ['energy', 'power', 'electricity', 'renewable', 'climate',
-                    'emission', 'fuel', 'Europe', 'European', 'heating',
-                    'petrol', 'diesel', 'fossil', 'nuclear', 'pipeline',
-                    'price hike', 'energy bill', 'energy cost', 'energy supply',
-                    'energy crisis', 'energy market', 'energy shock',
-                    'LNG', 'OPEC', 'refinery', 'carbon', 'ETS', 'Hormuz']
-nlp_keywords = commodity['keywords'] + general_keywords
-
 rss_feeds = {
     "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
     "OilPrice": "https://oilprice.com/rss/main",
@@ -466,7 +516,6 @@ headline_sources = []
 seen_titles = set()
 
 _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
-_google_sources = {k for k in rss_feeds if k.startswith("Google")}
 
 for source_name, url in rss_feeds.items():
     try:
@@ -486,34 +535,11 @@ for source_name, url in rss_feeds.items():
             link = entry.get('link', '')
             if title.lower() in seen_titles:
                 continue
-            _broad_energy = ['energy', 'gas', 'oil', 'carbon', 'power', 'fuel',
-                              'electricity', 'renewable', 'emission', 'climate',
-                              'pipeline', 'LNG', 'OPEC', 'ETS', 'EUA',
-                              'energy price', 'energy shock', 'energy market',
-                              'EU energy', 'European energy', 'energy crisis',
-                              'fossil fuel', 'coal', 'nuclear', 'solar', 'wind farm',
-                              'refinery', 'barrel', 'Brent', 'WTI', 'TTF',
-                              'Hormuz', 'Nord Stream', 'energy transition']
-            if source_name not in _google_sources:
-                if not any(kw.lower() in title.lower() for kw in nlp_keywords):
-                    continue
-                # Filter out US-domestic-only headlines that have no European relevance.
-                # Headlines mentioning global chokepoints (Hormuz, Suez) or EU/Europe are kept.
-                _us_domestic = ['US shale', 'U.S. shale', 'American oil', 'US oil output',
-                                'US gas output', 'US production', 'U.S. production',
-                                'US inventory', 'U.S. inventory', 'EIA report',
-                                'US Strategic Reserve', 'U.S. Strategic Petroleum']
-                _european_relevance = ['Europe', 'European', 'EU ', 'Hormuz', 'Suez',
-                                       'LNG', 'pipeline', 'Nord Stream', 'TTF', 'ETS',
-                                       'UK', 'Germany', 'France', 'Italy', 'Spain',
-                                       'Russia', 'OPEC', 'global', 'world']
-                is_us_only = (any(kw.lower() in title.lower() for kw in _us_domestic) and
-                              not any(kw.lower() in title.lower() for kw in _european_relevance))
-                if is_us_only:
-                    continue
-            else:
-                if not any(kw.lower() in title.lower() for kw in _broad_energy):
-                    continue
+            # Same test for every feed, BBC Business included: a commodity keyword in the
+            # headline itself, and no US-domestic story.
+            source = entry.get('source', {}).get('title', '')
+            if not is_relevant(headline_text(title, source), commodity_kw_re):
+                continue
             headlines.append(title)
             headline_links.append(link)
             headline_sources.append(source_name)
@@ -541,7 +567,7 @@ headline_links = headline_links[:10]
 headline_sources = headline_sources[:10]
 
 # FinBERT → FinVADER → VADER
-finbert_scores, finbert_labels, finbert_success = finbert_analyze(headlines)
+finbert_scores, finbert_labels, finbert_success, finbert_reason = finbert_analyze(tuple(headlines))
 
 if finbert_success:
     n = min(len(finbert_scores), len(headlines))
@@ -559,7 +585,7 @@ else:
     # FIX: FinVADER fallback (consistent with README and country sentiment)
     try:
         from finvader import finvader as _fv_main
-        nlp_model_name = "FinVADER (fallback — FinBERT API unavailable)"
+        nlp_model_name = "FinVADER (fallback — FinBERT unavailable)"
         sentiment_data = []
         for i, h in enumerate(headlines):
             score = float(_fv_main(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
@@ -626,6 +652,8 @@ if is_live:
     st.caption(f"Analyzing {len(sent_df)} live headlines from {len(set(headline_sources))} sources · Model: {nlp_model_name}")
 else:
     st.caption(f"Live feeds unavailable — showing sample headlines · Model: {nlp_model_name}")
+if not finbert_success:
+    st.caption(f"FinBERT not used: {finbert_reason}")
 
 # Sentiment chart
 fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
@@ -680,6 +708,7 @@ def get_sentiment_trend(rss_query, keywords):
     from datetime import datetime
 
     daily_scores = {}
+    keyword_re = _word_pattern(keywords)
 
     def score_text(text):
         try:
@@ -697,7 +726,8 @@ def get_sentiment_trend(rss_query, keywords):
             feed = feedparser.parse(trend_url)
             for entry in feed.entries[:100]:
                 title = entry.title
-                if not any(kw.lower() in title.lower() for kw in keywords):
+                source = entry.get('source', {}).get('title', '')
+                if not is_relevant(headline_text(title, source), keyword_re):
                     continue
                 if hasattr(entry, 'published_parsed') and entry.published_parsed:
                     pub_date = datetime(*entry.published_parsed[:3]).strftime('%Y-%m-%d')
@@ -721,8 +751,7 @@ def get_sentiment_trend(rss_query, keywords):
     trend_df = trend_df.sort_values('Date')
     return trend_df
 
-trend_keywords = commodity['keywords'] + ['energy', 'Europe', 'European']
-trend_df = get_sentiment_trend(commodity['rss_query'], trend_keywords)
+trend_df = get_sentiment_trend(commodity['rss_query'], tuple(commodity['keywords']))
 avg_30d = None  # initialized here; set inside conditional below
 
 if trend_df is not None and len(trend_df) > 3:
