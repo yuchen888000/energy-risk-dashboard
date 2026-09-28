@@ -97,8 +97,11 @@ def finbert_analyze(texts):
         pass
     if not hf_token:
         hf_token = os.environ.get("HF_TOKEN", None)
-    headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
-    no_token = "" if hf_token else "no HF_TOKEN set; "
+    if not hf_token:
+        # The router always answers 401 without a token, so don't call it.
+        return None, None, False, "no HF_TOKEN set in Secrets"
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    no_token = ""
 
     def parse_results(results, n_texts):
         scores, labels = [], []
