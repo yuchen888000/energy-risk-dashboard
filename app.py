@@ -11,6 +11,17 @@ import common
 
 st.set_page_config(page_title="European Energy & Commodity Risk Dashboard", layout="wide")
 
+# st.metric cuts values and labels off with "…" when its column is narrow (e.g. "17…" on the
+# Power page). Let them wrap instead, and scale the value font down on narrower screens.
+st.html("""<style>
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] *,
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * {
+    white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+    overflow-wrap: break-word;
+}
+[data-testid="stMetricValue"] { font-size: clamp(1.3rem, 2.6vw, 2.25rem); line-height: 1.2; }
+</style>""")
+
 carbon = common.resolve_carbon_benchmark()
 commodities = common.build_commodities(carbon)
 
