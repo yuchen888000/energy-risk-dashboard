@@ -112,7 +112,7 @@ On Streamlit Cloud, add them under Settings → Secrets (never put tokens in cod
 
 ## Project Context
 
-Built as a FinTech portfolio project during my Master's in International Economics at the Geneva Graduate Institute (IHEID), with iterative feedback from Professor Joëlle Noailly.
+Built as a FinTech portfolio project during my Master's in International Economics at the Geneva Graduate Institute (IHEID).
 
 ## License
 
