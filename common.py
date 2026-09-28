@@ -14,8 +14,6 @@ import streamlit as st
 import yfinance as yf
 from arch import arch_model
 from scipy.stats import chi2
-from sklearn.cluster import KMeans
-from sklearn.preprocessing import StandardScaler
 
 # ─── Carbon Benchmark Resolution ───
 # KEUA (KraneShares European Carbon Allowance ETF) was liquidated on 20 March 2026,
@@ -158,7 +156,7 @@ def load_close(ticker, start, end):
 # ─── Core Calculations ───
 @st.cache_data(ttl=3600, show_spinner="Computing risk metrics...")
 def compute_core(ticker, compare_ticker, start, end):
-    """Returns, rolling volatility/correlation, VaR and the relative risk signal.
+    """Returns, rolling volatility/correlation, VaR, the current regime and risk signal.
 
     Returns None when fewer than 30 overlapping observations are available.
     """
@@ -195,18 +193,16 @@ def compute_core(ticker, compare_ticker, start, end):
     returns_corr = df_analysis[['Returns', 'Compare_Returns']].dropna()
     overall_corr = returns_corr['Returns'].corr(returns_corr['Compare_Returns'])
 
-    if latest_vol > avg_vol * 1.5:
-        risk_level, risk_color = "🔴 HIGH RISK", "red"
-    elif latest_vol > avg_vol:
-        risk_level, risk_color = "🟡 MEDIUM RISK", "orange"
-    else:
-        risk_level, risk_color = "🟢 LOW RISK", "green"
+    regime_thr = regime_thresholds(ticker, df_analysis['Volatility'])
+    current_regime = regime_label(latest_vol, regime_thr)
+    risk_level, risk_color = RISK_SIGNAL[current_regime]
 
     return dict(
         df_analysis=df_analysis, has_compare=has_compare,
         latest_vol=latest_vol, avg_vol=avg_vol,
         returns_clean=returns_clean, var_95=var_95, var_99=var_99,
         overall_corr=overall_corr, risk_level=risk_level, risk_color=risk_color,
+        regime_thr=regime_thr, current_regime=current_regime,
     )
 
 
@@ -264,10 +260,15 @@ def fit_garch(returns_clean):
     )
 
 
-# ─── Hybrid Regime Detection ───
+# ─── Regime Detection (per-commodity volatility thresholds) ───
 REGIME_HISTORY_START = dt.date(2010, 1, 1)
 CALM_PCT, CRISIS_PCT = 50, 90     # percentiles of the commodity's own 30-day volatility
 _MIN_HISTORY = 250
+REGIME_COLORS = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
+# The Risk Signal headline is the regime under another name, so the two cannot disagree.
+RISK_SIGNAL = {'Calm': ("🟢 LOW RISK", "green"),
+               'Volatile': ("🟡 MEDIUM RISK", "orange"),
+               'Crisis': ("🔴 HIGH RISK", "red")}
 
 
 @st.cache_data(ttl=86400, show_spinner="Computing regime thresholds...")
@@ -287,14 +288,11 @@ def regime_thresholds(ticker, fallback_vol):
         vol, source = fallback_vol.dropna(), "selected date range only; full history unavailable"
     calm, crisis = np.percentile(vol, [CALM_PCT, CRISIS_PCT])
     return dict(calm=float(calm), crisis=float(crisis), source=source,
-                start=vol.index[0], end=vol.index[-1], n=len(vol),
-                # K-Means decides in this band around the Calm/Volatile boundary. Same
-                # proportions as the former fixed 4–9% band around 6% / 12%.
-                boundary_lo=float(calm) * 2 / 3, boundary_hi=float(crisis) * 3 / 4)
+                start=vol.index[0], end=vol.index[-1], n=len(vol))
 
 
 def regime_label(vol, thr):
-    """Threshold-only regime for one volatility value (%)."""
+    """Regime for one volatility value (%): a higher volatility never gets a lower regime."""
     if vol > thr['crisis']:
         return 'Crisis'
     if vol > thr['calm']:
@@ -308,46 +306,18 @@ def regime_caption(thr):
     return (f"Thresholds for this commodity: Calm < {thr['calm']:.2f}% · "
             f"Volatile {thr['calm']:.2f}–{thr['crisis']:.2f}% · Crisis > {thr['crisis']:.2f}% "
             f"(the {CALM_PCT}th and {CRISIS_PCT}th percentiles of its own 30-day rolling volatility, "
-            f"{period}, {thr['n']:,} days — {thr['source']}) · "
-            f"K-Means overrides the threshold in the {thr['boundary_lo']:.2f}–{thr['boundary_hi']:.2f}% "
-            "boundary zone using volatility + correlation")
+            f"{period}, {thr['n']:,} days — {thr['source']}). The Risk Signal at the top of the page "
+            "is the same classification: Calm = low, Volatile = medium, Crisis = high risk.")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def compute_regimes(features, thr):
-    """Label each day Calm / Volatile / Crisis from 30-day volatility and correlation.
+    """Label each day Calm / Volatile / Crisis from its 30-day volatility alone.
 
-    `features` has columns Volatility and Rolling Correlation; `thr` comes from
-    regime_thresholds().
+    `features` has a Volatility column (other columns are kept for the statistics);
+    `thr` comes from regime_thresholds().
     """
-    features = features.dropna().copy()
-    scaled = StandardScaler().fit_transform(features)
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
-    features['Cluster'] = kmeans.fit_predict(scaled)
-
-    # Step 1: Map K-Means clusters → regime labels by cluster-mean volatility.
-    # Sorting by mean vol assigns: lowest cluster = Calm, middle = Volatile, highest = Crisis.
-    _cluster_vol_means = features.groupby('Cluster')['Volatility'].mean().sort_values()
-    _cluster_to_regime = dict(zip(_cluster_vol_means.index.tolist(), ['Calm', 'Volatile', 'Crisis']))
-    features['KMeans_Regime'] = features['Cluster'].map(_cluster_to_regime)
-
-    # Step 2: Per-commodity threshold labels — reliable at extremes, ambiguous near boundaries.
-    features['Threshold_Regime'] = features['Volatility'].apply(regime_label, thr=thr)
-
-    # Step 3: Weighted hybrid vote.
-    # - Both agree  → unanimous (high confidence)
-    # - Boundary zone → K-Means wins: it uses *both* volatility and correlation,
-    #   so it captures regime character that pure vol thresholds miss (e.g. a low-vol period
-    #   with extreme negative correlation behaving like early-stage Volatile).
-    # - Outside boundary zone → threshold wins: at extremes the threshold is unambiguous
-    #   and K-Means adds no useful information.
-    def _hybrid_regime(row):
-        t, k = row['Threshold_Regime'], row['KMeans_Regime']
-        if t == k:
-            return t
-        return k if thr['boundary_lo'] <= row['Volatility'] <= thr['boundary_hi'] else t
-
-    features['Regime'] = features.apply(_hybrid_regime, axis=1)
+    features = features.dropna(subset=['Volatility']).copy()
+    features['Regime'] = features['Volatility'].apply(regime_label, thr=thr)
     return features
 
 

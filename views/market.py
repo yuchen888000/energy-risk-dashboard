@@ -65,9 +65,8 @@ dep_col, dep_label, _ = dependency_for(selected_commodity)
 
 garch = common.fit_garch(returns_clean)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
-regime_thr = common.regime_thresholds(commodity['ticker'], df_analysis['Volatility'])
+regime_thr, current_regime = core['regime_thr'], core['current_regime']
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
-current_regime = features['Regime'].iloc[-1]
 
 # ─── FinBERT via HuggingFace Inference API ───
 # FIX: defined here so it's available to both country sentiment (Section 5b)
@@ -914,8 +913,7 @@ st.write(f"Synthesizes today's quantitative signals into a plain-language risk a
 def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
                             _var_95, _current_regime, _garch_10d,
                             _avg_score, _avg_30d, anomaly_types_str,
-                            top_neg_str, date_str, regime_calm, regime_crisis,
-                            boundary_lo, boundary_hi):
+                            top_neg_str, date_str, regime_calm, regime_crisis):
     api_key = None
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
@@ -941,10 +939,10 @@ Volatility
 - The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
 - A GARCH expansion flag compares the forecast against CURRENT volatility only. Before calling it stress, check the forecast against the long-run average and against the {regime_calm:.2f}% Volatile boundary. A forecast that stays below both is normalisation back to typical levels, not a build-up of risk, and should be described that way.
 
-Two independent lenses - a disagreement between them is not an error
-- "Risk signal" is RELATIVE: it compares current volatility to this commodity's own long-run average. It says nothing about the absolute level.
-- "Regime" uses FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile). Between {boundary_lo:.2f}% and {boundary_hi:.2f}% a clustering model using both volatility and correlation may override that threshold, so the regime label can differ from what the volatility number alone suggests.
-- A commodity can be HIGH RISK and Calm at once: unusually volatile relative to the selected window's average, still ordinary against its full history. Where that holds, say so plainly rather than treating it as a contradiction.
+Risk signal and regime - one classification
+- "Regime" compares current 30-day volatility with FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
+- "Risk signal" is the same classification under another name: Calm = LOW, Volatile = MEDIUM, Crisis = HIGH RISK. Do not present them as two separate pieces of evidence.
+- The long-run average volatility is context only; it does not set the risk signal.
 
 VaR
 - VaR 95% is the 5th percentile of the daily return distribution: a loss threshold, given as a negative number.
@@ -1041,8 +1039,6 @@ narrative, error = generate_risk_narrative(
     date_str=today_date_str,
     regime_calm=regime_thr['calm'],
     regime_crisis=regime_thr['crisis'],
-    boundary_lo=regime_thr['boundary_lo'],
-    boundary_hi=regime_thr['boundary_hi'],
 )
 
 if narrative:

@@ -28,10 +28,10 @@ with st.sidebar.expander("Methodology — Risk page"):
     - **Value at Risk (VaR)**: 95% and 99% historical VaR.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent
       shocks (α) and persistence (β).
-    - **Hybrid Regime Detection**: K-Means (3 clusters on vol + correlation) + per-commodity
-      volatility thresholds (50th and 90th percentiles of the commodity's own 30-day
-      volatility history). Agreement → unanimous label. Disagreement in the boundary zone
-      around the lower threshold → K-Means wins. Disagreement outside it → threshold wins.
+    - **Regime Detection**: per-commodity volatility thresholds only — Volatile above the
+      50th and Crisis above the 90th percentile of the commodity's own 30-day volatility
+      history. The Risk Signal is the same classification (Calm = low, Volatile = medium,
+      Crisis = high risk), so a lower volatility can never get a higher regime.
     - **Stress Test**: Simulate price shocks and see impact on volatility,
       VaR, regime, and country exposure.
     - **Portfolio VaR**: Combined risk of holding multiple commodities,
@@ -57,12 +57,15 @@ returns_clean = core['returns_clean']
 var_95, var_99 = core['var_95'], core['var_99']
 overall_corr = core['overall_corr']
 risk_level, risk_color = core['risk_level'], core['risk_color']
+regime_thr, current_regime = core['regime_thr'], core['current_regime']
 dep_col, dep_label, dep_table = dependency_for(selected_commodity)
 
 # ─── Section 1: Risk Signal ───
 st.subheader(f"Current Risk Signal — {selected_commodity}")
 st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
             unsafe_allow_html=True)
+st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% against this commodity's "
+           f"thresholds (Volatile above {regime_thr['calm']:.2f}%, Crisis above {regime_thr['crisis']:.2f}%).")
 
 mc1, mc2, mc3, mc4 = st.columns(4)
 mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
@@ -322,16 +325,12 @@ else:
     st.caption("GARCH forecast unavailable for this date range — try a longer window.")
 
 
-# ─── Section 5: Market Regime Clustering ───
-st.subheader("Market Regime Clustering (AI)")
-st.write("Hybrid approach: K-Means clustering + per-commodity volatility thresholds for regime labeling")
+# ─── Section 5: Market Regime ───
+st.subheader("Market Regime")
+st.write("Each day is labelled by its 30-day volatility against this commodity's own thresholds")
 
-regime_thr = common.regime_thresholds(commodity['ticker'], df_analysis['Volatility'])
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
-
-current_regime = features['Regime'].iloc[-1]
-regime_colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
-regime_color = regime_colors.get(current_regime, 'gray')
+regime_color = common.REGIME_COLORS[current_regime]
 st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
             unsafe_allow_html=True)
 st.caption(common.regime_caption(regime_thr))
@@ -346,10 +345,9 @@ regime_stats.columns = ['Trading Days', 'Avg Volatility (%)', 'Avg Correlation']
 rcol1, rcol2 = st.columns([2, 1])
 with rcol1:
     fig2, ax3 = plt.subplots(figsize=(12, 4))
-    colors = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
     for regime, group in features.groupby('Regime'):
         ax3.scatter(group.index, group['Volatility'],
-                   c=colors[regime], label=regime, alpha=0.5, s=10)
+                   c=common.REGIME_COLORS[regime], label=regime, alpha=0.5, s=10)
     ax3.axhline(y=regime_thr['calm'], color='orange', linewidth=1, linestyle='--', alpha=0.5,
                 label=f"Volatile threshold ({regime_thr['calm']:.2f}%, p{common.CALM_PCT})")
     ax3.axhline(y=regime_thr['crisis'], color='red', linewidth=1, linestyle='--', alpha=0.5,

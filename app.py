@@ -25,7 +25,7 @@ with st.sidebar:
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"
-                   "Python · Streamlit · yfinance · scikit-learn · arch (GARCH) · FinBERT · FinVADER · "
+                   "Python · Streamlit · yfinance · arch (GARCH) · FinBERT · FinVADER · "
                    "Anthropic Claude API · Energy-Charts")
 
 risk_page = st.Page("views/risk.py", title="Risk", icon="📉", url_path="risk")
