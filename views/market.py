@@ -60,7 +60,8 @@ if core is None:
 df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
 returns_clean = core['returns_clean']
-var_95, var_99 = core['var_95'], core['var_99']
+var_95 = core['var_95']              # last 250 trading days
+var_99_full = core['var_99_full']    # full period: the tail check looks back further
 risk_level = core['risk_level']
 dep_col, dep_label, _ = dependency_for(selected_commodity)
 
@@ -895,22 +896,22 @@ if avg_score is not None and avg_30d is not None:
 # This is a genuinely rare event that warrants attention.
 recent_returns = returns_clean.iloc[-252:]
 recent_min = recent_returns.min() * 100
-if abs(recent_min) > abs(var_99) * 2.0:
+if abs(recent_min) > abs(var_99_full) * 2.0:
     anomalies.append({
         'level': '🔵 WATCH',
         'type': 'Recent Tail Event Beyond 2× VaR99',
         'detail': (f'A daily loss of {recent_min:.2f}% occurred in the past 12 months — '
-                   f'{abs(recent_min)/abs(var_99):.1f}x the 99% VaR ({var_99:.2f}%). '
+                   f'{abs(recent_min)/abs(var_99_full):.1f}x the full-period 99% VaR ({var_99_full:.2f}%). '
                    f'Recent fat-tail risk present; historical VaR may understate exposure.'),
     })
-elif abs(returns_clean.min() * 100) > abs(var_99) * 3.0:
+elif abs(returns_clean.min() * 100) > abs(var_99_full) * 3.0:
     # All-time extreme that is genuinely beyond 3x VaR99 (very rare)
     max_loss = returns_clean.min() * 100
     anomalies.append({
         'level': '🔵 WATCH',
         'type': 'Historical Tail Beyond 3× VaR99',
-        'detail': (f'Max observed daily loss ({max_loss:.2f}%) is {abs(max_loss)/abs(var_99):.1f}x '
-                   f'the 99% VaR ({var_99:.2f}%). Extreme historical fat-tail present.'),
+        'detail': (f'Max observed daily loss ({max_loss:.2f}%) is {abs(max_loss)/abs(var_99_full):.1f}x '
+                   f'the full-period 99% VaR ({var_99_full:.2f}%). Extreme historical fat-tail present.'),
     })
 
 if anomalies:
@@ -939,7 +940,7 @@ else:
         unsafe_allow_html=True
     )
 
-st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH 10-day forecast more than 30% above or below the long-run GARCH volatility · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× VaR99")
+st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH 10-day forecast more than 30% above or below the long-run GARCH volatility · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× full-period VaR99")
 
 # ─── Section 6d: AI Risk Narrative (LLM) ───
 st.subheader("🤖 AI Risk Interpretation")
@@ -983,7 +984,7 @@ Risk signal and regime - one classification
 - The long-run average volatility is context only; it does not set the risk signal.
 
 VaR
-- VaR 95% is the 5th percentile of the daily return distribution: a loss threshold, given as a negative number.
+- VaR 95% is the 5th percentile of daily returns over the last 250 trading days: a loss threshold, given as a negative number.
 
 Sentiment - weak evidence, handle with care
 - Computed from at most ten scraped headlines.
@@ -997,7 +998,7 @@ Anomalies and headlines
 MARKET DATA AS OF {date_str}
 - Risk signal: {risk_level_str}
 - 30-day rolling volatility: {_latest_vol:.2f}% (long-run average {_avg_vol:.2f}%)
-- VaR 95%, 1-day: {_var_95:.2f}%
+- VaR 95%, 1-day (historical, last 250 trading days): {_var_95:.2f}%
 - {garch_line}
 - Regime: {_current_regime}
 - Sentiment now: {_avg_score:+.3f} | 30-day average: {sentiment_30d_line}

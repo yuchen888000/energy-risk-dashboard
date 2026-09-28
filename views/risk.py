@@ -24,7 +24,8 @@ with st.sidebar.expander("Methodology — Risk page"):
     - **30-Day Rolling Volatility**: Std dev of daily returns over 30 days.
     - **Rolling Correlation**: Pearson correlation of daily returns with the comparison asset over 30 days.
     - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs 30-day).
-    - **Value at Risk (VaR)**: 95% and 99% historical VaR.
+    - **Value at Risk (VaR)**: 95% and 99% historical VaR and 97.5% Expected Shortfall
+      from the last 250 trading days, with the full-period figures alongside.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent
       shocks (α) and persistence (β).
     - **Regime Detection**: per-commodity volatility thresholds only — Volatile above the
@@ -53,7 +54,8 @@ if not ctx.is_carbon and not core['has_compare']:
 df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
 returns_clean = core['returns_clean']
-var_95, var_99 = core['var_95'], core['var_99']
+var_95, var_99, es_975 = core['var_95'], core['var_99'], core['es_975']
+var_days = core['var_days']
 overall_corr = core['overall_corr']
 risk_level, risk_color = core['risk_level'], core['risk_color']
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
@@ -69,7 +71,7 @@ mc1, mc2, mc3, mc4 = st.columns(4)
 mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
 mc2.metric("Average Volatility", f"{avg_vol:.2f}%")
 mc3.metric("Correlation", f"{overall_corr:.2f}")
-mc4.metric("VaR (95%, 1-day)", f"{var_95:.2f}%")
+mc4.metric("VaR 95% (1-day)", f"{var_95:.2f}%", help=f"Historical, last {var_days} trading days.")
 
 # ─── Section 2: Price Chart ───
 # FIX: corrected policy event dates
@@ -286,18 +288,40 @@ else:
 
 # ─── Section 4: Value at Risk ───
 st.subheader(f"Value at Risk (VaR) — {selected_commodity}")
-st.write(f"Historical simulation VaR — worst-case daily losses on {selected_commodity} positions")
+st.write(f"Historical simulation, 1-day horizon — worst-case daily losses on {selected_commodity} positions. "
+         f"Headline figures use the last {var_days} trading days.")
+
+_first, _last = returns_clean.index.min(), returns_clean.index.max()
+if _first <= pd.Timestamp("2022-12-31") and _last >= pd.Timestamp("2022-01-01"):
+    full_label = "full period (includes 2022 crisis)"
+else:
+    full_label = f"full period ({_first:%b %Y} – {_last:%b %Y})"
+
+vc1, vc2, vc3, vc4 = st.columns(4)
+for _col, _name, _recent, _full in (
+        (vc1, "VaR 95%", var_95, core['var_95_full']),
+        (vc2, "VaR 99%", var_99, core['var_99_full']),
+        (vc3, "ES 97.5%", es_975, core['es_975_full'])):
+    _col.metric(_name, f"{_recent:.2f}%", help=f"Last {var_days} trading days, 1-day horizon.")
+    _col.caption(f"{full_label}: **{_full:.2f}%**")
+vc4.metric("Max daily loss", f"{returns_clean.tail(var_days).min() * 100:.2f}%",
+           help=f"Last {var_days} trading days.")
+vc4.caption(f"{full_label}: **{returns_clean.min() * 100:.2f}%**")
+st.caption("Expected Shortfall (ES) 97.5% is the average loss on the days beyond the 97.5% VaR, i.e. the worst "
+           "2.5% of days: how large losses are once VaR is breached.")
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
-ax_hist.hist(returns_clean * 100, bins=80, color=commodity['color'], alpha=0.7, edgecolor='white')
+ax_hist.hist(returns_clean.tail(var_days) * 100, bins=50, color=commodity['color'], alpha=0.7, edgecolor='white')
 ax_hist.axvline(x=var_95, color='red', linewidth=2, linestyle='--',
                 label=f'95% VaR: {var_95:.2f}%')
 ax_hist.axvline(x=var_99, color='darkred', linewidth=2, linestyle=':',
                 label=f'99% VaR: {var_99:.2f}%')
+ax_hist.axvline(x=es_975, color='black', linewidth=1.5, linestyle='-.',
+                label=f'97.5% ES: {es_975:.2f}%')
 ax_hist.set_xlabel('Daily Returns (%)')
 ax_hist.set_ylabel('Frequency')
-ax_hist.set_title(f'{selected_commodity} Daily Return Distribution')
+ax_hist.set_title(f'{selected_commodity} Daily Returns — last {var_days} trading days')
 ax_hist.legend(fontsize=8)
 
 rolling_var = returns_clean.rolling(60).quantile(0.05) * 100
@@ -309,11 +333,6 @@ ax_ts.axhline(y=0, color='black', linewidth=0.5)
 
 plt.tight_layout()
 st.pyplot(fig_var)
-
-vc1, vc2, vc3 = st.columns(3)
-vc1.metric("VaR 95% (1-day)", f"{var_95:.2f}%")
-vc2.metric("VaR 99% (1-day)", f"{var_99:.2f}%")
-vc3.metric("Max Daily Loss", f"{returns_clean.min() * 100:.2f}%")
 
 
 # ─── Section 4b: GARCH ───

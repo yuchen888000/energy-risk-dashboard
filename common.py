@@ -154,6 +154,15 @@ def load_close(ticker, start, end):
 
 
 # ─── Core Calculations ───
+VAR_WINDOW = 250     # trading days behind the headline VaR and Expected Shortfall
+
+
+def _var_es(returns):
+    """Historical VaR 95%, VaR 99% and ES 97.5% of daily returns, in % (losses negative)."""
+    q95, q99, q975 = np.percentile(returns, [5, 1, 2.5])
+    return q95 * 100, q99 * 100, returns[returns <= q975].mean() * 100
+
+
 @st.cache_data(ttl=3600, show_spinner="Computing risk metrics...")
 def compute_core(ticker, compare_ticker, start, end):
     """Returns, rolling volatility/correlation, VaR, the current regime and risk signal.
@@ -187,8 +196,10 @@ def compute_core(ticker, compare_ticker, start, end):
     avg_vol = df_analysis['Volatility'].dropna().mean()
 
     returns_clean = df_analysis['Returns'].dropna()
-    var_95 = np.percentile(returns_clean, 5) * 100
-    var_99 = np.percentile(returns_clean, 1) * 100
+    # Headline VaR / ES from the last VAR_WINDOW trading days; full-period figures alongside.
+    var_returns = returns_clean.tail(VAR_WINDOW)
+    var_95, var_99, es_975 = _var_es(var_returns)
+    var_95_full, var_99_full, es_975_full = _var_es(returns_clean)
 
     returns_corr = df_analysis[['Returns', 'Compare_Returns']].dropna()
     overall_corr = returns_corr['Returns'].corr(returns_corr['Compare_Returns'])
@@ -200,7 +211,9 @@ def compute_core(ticker, compare_ticker, start, end):
     return dict(
         df_analysis=df_analysis, has_compare=has_compare,
         latest_vol=latest_vol, avg_vol=avg_vol,
-        returns_clean=returns_clean, var_95=var_95, var_99=var_99,
+        returns_clean=returns_clean, var_95=var_95, var_99=var_99, es_975=es_975,
+        var_days=len(var_returns), var_95_full=var_95_full, var_99_full=var_99_full,
+        es_975_full=es_975_full,
         overall_corr=overall_corr, risk_level=risk_level, risk_color=risk_color,
         regime_thr=regime_thr, current_regime=current_regime,
     )
