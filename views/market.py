@@ -238,7 +238,8 @@ st.write("Which European countries are most vulnerable to energy price shocks?")
 st.caption("Coverage: EU-27 + Switzerland, UK, Norway, Turkey · Import dependency and renewable share: "
            "Eurostat API (nrg_ind_id, nrg_ind_ren) where available · Carbon intensity and any value "
            "Eurostat does not return: illustrative estimates based on Eurostat, EEA and IEA publications "
-           "(hand-entered, not a live download). Illustrative index, not an official risk rating.")
+           "(hand-entered, not a live download). Dependency is clipped to 0-100%: net exporters such as "
+           "Norway show 0%. Illustrative index, not an official risk rating.")
 
 selected_year = st.slider("Select Year", min_value=2020, max_value=2024, value=2024, step=1)
 
@@ -258,13 +259,13 @@ cr_df['Data source'] = [
     for c in COUNTRIES
 ]
 
-cr_df['Dep Clipped'] = cr_df[dep_col].clip(lower=0)
-cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)
-
-# Norway is a net energy exporter; negative total_dep values are economically meaningful
-# (surplus) but would display confusingly and skew any ranking column.
-# Clamp display column to 0 — the scoring already uses Total Clipped internally.
-cr_df['Total Energy Dep. (%)'] = cr_df['Total Energy Dep. (%)'].clip(lower=0)
+# Eurostat import dependency = net imports / gross available energy. A net exporter has a
+# negative value (Norway's gas was about -2600% in 2024), and stock changes can push an
+# importer slightly above 100%. Both are clipped to 0-100 for display and scoring.
+for _c in ('Gas Dep. (%)', 'Oil Dep. (%)', 'Total Energy Dep. (%)'):
+    cr_df[_c] = cr_df[_c].clip(lower=0, upper=100)
+cr_df['Dep Clipped'] = cr_df[dep_col]
+cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)']
 
 # Structural Score: each variable enters once (no level + rank of the same variable),
 # weights sum to 100%. No subjective "price sensitivity" score: it had no source.
@@ -383,7 +384,7 @@ st.write(f"**{selected_country} — Risk Trend 2020–2024:**")
 trend_data = []
 for yr in YEARS:
     idx = COUNTRIES.index(selected_country)
-    dep_val = max(country_series[dep_key][yr][idx], 0)
+    dep_val = min(max(country_series[dep_key][yr][idx], 0), 100)
     trend_data.append({
         'Year': yr,
         dep_label + ' (%)': dep_val,

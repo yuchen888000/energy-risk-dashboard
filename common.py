@@ -228,8 +228,11 @@ def compute_core(ticker, compare_ticker, start, end):
 
     # Percentage returns are undefined across a sign change in the price level.
     # WTI (CL=F) settled negative on 2020-04-20, so non-positive prices are excluded.
-    df_analysis = df.dropna(subset=['Price', 'Compare'])
-    df_analysis = df_analysis[(df_analysis['Price'] > 0) & (df_analysis['Compare'] > 0)].copy()
+    # Only the commodity's own price decides which days are kept: a gap in the comparison
+    # series (CARB.L was stale from June 2020 to August 2021) must not remove days from the
+    # commodity's volatility and VaR. The comparison is simply missing on those days.
+    df_analysis = df[df['Price'] > 0].copy()
+    df_analysis['Compare'] = df_analysis['Compare'].where(df_analysis['Compare'] > 0)
     if len(df_analysis) < 30:
         return None
 

@@ -70,7 +70,7 @@ except Exception:
 
 w("\n## Pages")
 try:
-    at = AppTest.from_file("app.py", default_timeout=600); at.run()
+    at = AppTest.from_file(str(__import__("pathlib").Path(__file__).resolve().parents[2] / "app.py"), default_timeout=600); at.run()
     for o in at.selectbox(key="commodity").options:
         at.selectbox(key="commodity").set_value(o)
         for page in ("views/risk.py", "views/power.py", "views/market.py"):
