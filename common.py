@@ -138,9 +138,12 @@ def context():
 
 
 # ─── Data Download (cached) ───
+STALE_RUN = 5   # this many identical consecutive closes = a stale feed (suspension, no trading)
+
+
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
-def load_close(ticker, start, end):
-    """Daily closing prices for one ticker as a float Series (empty if unavailable)."""
+def _raw_close(ticker, start, end):
+    """Daily closing prices for one ticker exactly as downloaded (empty if unavailable)."""
     try:
         data = yf.download(ticker, start=start, end=end, progress=False)
     except Exception:
@@ -151,6 +154,48 @@ def load_close(ticker, start, end):
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
     return close.astype(float)
+
+
+def _stale_mask(close):
+    """True on the repeated days of any run of STALE_RUN or more identical closes.
+
+    The first day of a run is a real traded price and is kept; the repeats after it are
+    not market data (e.g. CARB.L was suspended from June 2020 to August 2021 and the
+    feed repeated the last price).
+    """
+    if close.empty:
+        return pd.Series(False, index=close.index)
+    same = close.eq(close.shift())
+    run_id = (~same).cumsum()
+    run_len = close.groupby(run_id).transform('size')
+    return same & (run_len >= STALE_RUN)
+
+
+@st.cache_data(ttl=3600)
+def stale_periods(ticker, start, end):
+    """(first, last) dates of every excluded stale run in a ticker's series."""
+    close = _raw_close(ticker, start, end)
+    mask = _stale_mask(close)
+    if not mask.any():
+        return []
+    run_id = (~mask).cumsum()[mask]
+    return [(g.index[0].date(), g.index[-1].date()) for _, g in run_id.groupby(run_id)]
+
+
+def load_close(ticker, start, end):
+    """Daily closes with stale repeats set to NaN.
+
+    The dates stay in the index, so a return computed with pct_change(fill_method=None)
+    is NaN across the gap instead of one fake return spanning the whole suspension.
+    """
+    close = _raw_close(ticker, start, end)
+    return close.mask(_stale_mask(close))
+
+
+def simple_returns(close):
+    """Daily simple returns on the series' own trading days; NaN after a gap or a
+    non-positive price (WTI settled negative on 2020-04-20)."""
+    return close.where(close > 0).pct_change(fill_method=None)
 
 
 # ─── Core Calculations ───
@@ -169,23 +214,26 @@ def compute_core(ticker, compare_ticker, start, end):
 
     Returns None when fewer than 30 overlapping observations are available.
     """
+    price = load_close(ticker, start, end)
+    compare = load_close(compare_ticker, start, end)
     df = pd.DataFrame({
-        'Price': load_close(ticker, start, end),
-        'Compare': load_close(compare_ticker, start, end),
+        'Price': price,
+        'Compare': compare,
+        # Returns on each series' own trading days, so a stale gap or a non-positive
+        # price gives NaN instead of a return that spans the gap.
+        'Returns': simple_returns(price),
+        'Compare_Returns': simple_returns(compare),
     }).dropna(subset=['Price'])
     has_compare = df['Compare'].notna().sum() > 30
 
-    df_analysis = df[['Price', 'Compare']].dropna()
+    # Percentage returns are undefined across a sign change in the price level.
+    # WTI (CL=F) settled negative on 2020-04-20, so non-positive prices are excluded.
+    df_analysis = df.dropna(subset=['Price', 'Compare'])
+    df_analysis = df_analysis[(df_analysis['Price'] > 0) & (df_analysis['Compare'] > 0)].copy()
     if len(df_analysis) < 30:
         return None
 
-    df_analysis = df_analysis.copy()
-    # Percentage returns are undefined across a sign change in the price level.
-    # WTI (CL=F) settled negative on 2020-04-20, so non-positive prices are excluded.
-    df_analysis = df_analysis[(df_analysis['Price'] > 0) & (df_analysis['Compare'] > 0)]
-    df_analysis['Returns'] = df_analysis['Price'].pct_change()
-    df_analysis['Compare_Returns'] = df_analysis['Compare'].pct_change()
-    df_analysis['Volatility'] = df_analysis['Returns'].rolling(30).std() * 100
+    df_analysis['Volatility'] = df_analysis['Returns'].rolling(30, min_periods=20).std() * 100
 
     # Rolling correlation on returns (not price levels) to avoid spurious correlation
     df_analysis['Rolling Correlation'] = (
@@ -228,7 +276,9 @@ def fit_garch(returns_clean):
     """
     garch_returns = returns_clean.dropna() * 100
     try:
-        model = arch_model(garch_returns, vol='Garch', p=1, q=1, dist='normal', rescale=False)
+        # Student-t shocks: daily energy returns are fat-tailed, a normal distribution
+        # understates how often large moves happen.
+        model = arch_model(garch_returns, vol='Garch', p=1, q=1, dist='t', rescale=False)
         result = model.fit(disp='off')
         forecast = result.forecast(horizon=10)
     except Exception:
@@ -262,11 +312,24 @@ def fit_garch(returns_clean):
     # Long-run (unconditional) volatility the forecast reverts to: sqrt(ω / (1 − α − β)).
     # Undefined when α + β ≥ 1, since shocks then never fade.
     persistence = _alpha_b + _beta_b
-    long_run_vol = float(np.sqrt(_omega_b / (1 - persistence))) if persistence < 1 else None
+    garch_long_run = float(np.sqrt(_omega_b / (1 - persistence))) if persistence < 1 else None
+    # When α + β is close to 1 the formula divides by almost zero and gives absurd values
+    # (on real TTF data it returned millions of %). Fall back to the sample average of the
+    # 30-day rolling volatility as the reference level in that case.
+    sample_avg_vol = float((returns_clean.dropna().rolling(30).std() * 100).mean())
+    if (garch_long_run is None or persistence >= 0.99
+            or garch_long_run > 3 * sample_avg_vol):
+        long_run_vol, long_run_source = sample_avg_vol, 'sample'
+    else:
+        long_run_vol, long_run_source = garch_long_run, 'garch'
 
     return dict(
         params={k: float(result.params[k]) for k in ('omega', 'alpha[1]', 'beta[1]')},
         long_run_vol=long_run_vol,
+        long_run_source=long_run_source,     # 'garch' or 'sample' (see fallback above)
+        persistence=float(persistence),
+        sample_avg_vol=sample_avg_vol,
+        nu=float(result.params['nu']) if 'nu' in result.params else None,
         loglikelihood=float(result.loglikelihood),
         conditional_volatility=result.conditional_volatility,
         # conditional_volatility is already a volatility series, no need for sqrt(x**2)
@@ -300,8 +363,7 @@ def regime_thresholds(ticker, fallback_vol):
     30-day volatility of the selected range) is used instead.
     """
     close = load_close(ticker, REGIME_HISTORY_START, dt.date.today())
-    close = close[close > 0]
-    vol = (close.pct_change().rolling(30).std() * 100).dropna()
+    vol = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
     source = "full history"
     if len(vol) < _MIN_HISTORY:
         vol, source = fallback_vol.dropna(), "selected date range only; full history unavailable"
@@ -355,8 +417,7 @@ def returns_panel(start, end, carbon_short, carbon_ticker):
         if len(close) > 30:
             # WTI (CL=F) settled negative on 2020-04-20; percentage returns are
             # undefined across a sign change, so those observations are excluded.
-            close = close.where(close > 0)
-            returns[name] = close.pct_change()
+            returns[name] = simple_returns(close)
     if len(returns) < 2:
         return None
     return pd.DataFrame(returns)
@@ -424,8 +485,10 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     shocks (fat tails). Simulated paths give, for each day ahead, the lower, median
     and upper percentile of the price. Returns None if the fit fails.
     """
-    close = close[close > 0].dropna()
-    log_ret = 100 * np.log(close).diff().dropna()
+    close = close.where(close > 0)
+    # Log returns on the series' own days; NaN across a stale gap rather than one jump.
+    log_ret = (100 * np.log(close).diff()).dropna()
+    close = close.dropna()
     try:
         res = arch_model(log_ret, mean='Zero', vol='GARCH', p=1, q=1, dist='t',
                          rescale=False).fit(disp='off')

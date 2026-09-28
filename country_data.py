@@ -1,9 +1,17 @@
 """Structural country energy data for EU-27 + CH, UK, NO, TR (2020–2024).
 
-Source: Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA. 2024 = preliminary.
+Import dependency (gas, oil, total) and the renewable share are downloaded from the
+Eurostat API at run time (datasets nrg_ind_id and nrg_ind_ren) and cached for a day.
+The hard-coded lists below are fallbacks only: they are hand-entered estimates, used
+for any country, year or series Eurostat does not return, and every value is labelled
+with where it came from. Carbon intensity has no Eurostat download here and is always
+a hand-entered estimate.
 Every list follows the order of COUNTRIES.
 """
 import re
+
+import requests
+import streamlit as st
 
 COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
              'Poland', 'Belgium', 'Austria', 'Greece', 'Czech Republic',
@@ -68,6 +76,98 @@ price_sens = {
     2023: [9.2,7.5,8.8,7.2,8.5,6.8,8.0,7.8,8.5,7.0,7.5,6.5,7.2,7.8,3.5,5.8,7.0,6.8,8.2,7.5,7.8,7.2,6.0,6.5,6.2,8.0,7.3,7.0,8.0,2.0,8.5],
     2024: [9.0,7.3,8.6,7.0,8.3,6.6,7.8,7.6,8.3,6.8,7.3,6.3,7.0,7.6,3.4,5.6,6.8,6.6,8.0,7.3,7.6,7.0,5.8,6.3,6.0,7.8,7.1,6.8,7.8,1.8,8.3],
 }
+
+
+# ─── Eurostat download ───
+EUROSTAT_GEO = {
+    'Germany': 'DE', 'France': 'FR', 'Italy': 'IT', 'Spain': 'ES', 'Netherlands': 'NL',
+    'Poland': 'PL', 'Belgium': 'BE', 'Austria': 'AT', 'Greece': 'EL', 'Czech Republic': 'CZ',
+    'Hungary': 'HU', 'Romania': 'RO', 'Bulgaria': 'BG', 'Finland': 'FI', 'Sweden': 'SE',
+    'Denmark': 'DK', 'Ireland': 'IE', 'Portugal': 'PT', 'Lithuania': 'LT', 'Latvia': 'LV',
+    'Estonia': 'EE', 'Slovakia': 'SK', 'Croatia': 'HR', 'Slovenia': 'SI', 'Luxembourg': 'LU',
+    'Cyprus': 'CY', 'Malta': 'MT', 'Switzerland': 'CH', 'United Kingdom': 'UK',
+    'Norway': 'NO', 'Turkey': 'TR',
+}
+YEARS = [2020, 2021, 2022, 2023, 2024]
+_EUROSTAT_URL = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/{}"
+EUROSTAT = "Eurostat"
+ESTIMATE = "hand-entered estimate"
+
+# (dataset, extra filters) for each downloaded series
+_SERIES = {
+    'gas':   ('nrg_ind_id', {'siec': 'G3000', 'unit': 'PC'}),      # natural gas
+    'oil':   ('nrg_ind_id', {'siec': 'O4000XBIO', 'unit': 'PC'}),  # oil and petroleum products
+    'total': ('nrg_ind_id', {'siec': 'TOTAL', 'unit': 'PC'}),      # all products
+    'ren':   ('nrg_ind_ren', {'nrg_bal': 'REN', 'unit': 'PC'}),    # renewables, gross final consumption
+}
+
+
+def _jsonstat_values(js):
+    """{(geo, year): value} from a Eurostat JSON-stat 2.0 response filtered to one series."""
+    ids, sizes = js['id'], js['size']
+    cats = {d: js['dimension'][d]['category']['index'] for d in ids}
+    # position -> code for each dimension
+    pos = {d: {v: k for k, v in cats[d].items()} for d in ids}
+    out = {}
+    for flat, val in js.get('value', {}).items():
+        if val is None:
+            continue
+        idx, rem = {}, int(flat)
+        for d, n in zip(reversed(ids), reversed(sizes)):
+            idx[d] = pos[d][rem % n]
+            rem //= n
+        out[(idx['geo'], int(idx['time']))] = float(val)
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner="Downloading country data from Eurostat...")
+def _fetch_eurostat(dataset, filters):
+    params = [('format', 'JSON'), ('lang', 'EN'), ('freq', 'A'),
+              ('sinceTimePeriod', str(YEARS[0])), ('untilTimePeriod', str(YEARS[-1]))]
+    params += list(filters.items())
+    params += [('geo', g) for g in EUROSTAT_GEO.values()]
+    # Raises on failure, so a failed download is not cached for a day.
+    r = requests.get(_EUROSTAT_URL.format(dataset), params=params, timeout=30)
+    r.raise_for_status()
+    return _jsonstat_values(r.json())
+
+
+def load_country_data():
+    """Country series for 2020–2024 with the source of every value.
+
+    Returns (data, source): data[series][year] is a list in COUNTRIES order, source has
+    the same shape with EUROSTAT or ESTIMATE. Series: gas, oil, total, ren (downloaded,
+    estimate fallback) and carbon (always the hand-entered estimate).
+    """
+    fallback = {'gas': gas_dep, 'oil': oil_dep, 'total': total_dep, 'ren': ren_share}
+    data, source = {}, {}
+    for key, (dataset, filters) in _SERIES.items():
+        try:
+            got = _fetch_eurostat(dataset, filters)
+        except Exception:
+            got = {}
+        data[key], source[key] = {}, {}
+        for yr in YEARS:
+            vals, srcs = [], []
+            for i, country in enumerate(COUNTRIES):
+                v = got.get((EUROSTAT_GEO[country], yr))
+                if v is None:
+                    vals.append(fallback[key][yr][i]); srcs.append(ESTIMATE)
+                else:
+                    vals.append(round(v, 1)); srcs.append(EUROSTAT)
+            data[key][yr], source[key][yr] = vals, srcs
+    data['carbon'] = carbon_int
+    source['carbon'] = {yr: [ESTIMATE] * len(COUNTRIES) for yr in YEARS}
+    return data, source
+
+
+def dependency_key(commodity_name):
+    """Series key and label of the import dependency relevant to a commodity."""
+    if commodity_name == 'TTF Natural Gas':
+        return 'gas', 'Gas Import Dependency'
+    if commodity_name in ('WTI Crude Oil', 'Brent Crude Oil'):
+        return 'oil', 'Oil Import Dependency'
+    return 'total', 'Total Energy Dependency'
 
 
 def dependency_for(commodity_name):

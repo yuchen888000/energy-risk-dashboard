@@ -32,8 +32,9 @@ with st.sidebar.expander("Methodology — Risk page"):
       50th and Crisis above the 90th percentile of the commodity's own 30-day volatility
       history. The Risk Signal is the same classification (Calm = low, Volatile = medium,
       Crisis = high risk), so a lower volatility can never get a higher regime.
-    - **Stress Test**: Simulate price shocks and see impact on volatility,
-      VaR and regime.
+    - **Stress Test**: illustrative heuristic, not a calibrated model. Absolute price
+      moves are scaled by 1 + |shock| / 50 and divided by the new price level, so a crash
+      raises percentage volatility more than a spike of the same size.
     - **Portfolio VaR**: Combined risk of holding multiple commodities,
       accounting for cross-commodity correlations. Shows diversification benefit.
     """)
@@ -50,6 +51,14 @@ if core is None:
 if not ctx.is_carbon and not core['has_compare']:
     st.caption(f"{CARBON_LABEL} has limited coverage over the selected range — "
                "widen the date window for a fuller comparison.")
+
+_stale = [(n, a, b) for n, t in ((selected_commodity, commodity['ticker']),
+                                   (compare_label, ctx.compare_ticker))
+          for a, b in common.stale_periods(t, start_date, end_date)]
+if _stale:
+    st.caption("Excluded stale prices (5+ identical closes in a row, treated as missing, no return "
+               "computed across the gap): "
+               + "; ".join(f"{n} {a:%d %b %Y} to {b:%d %b %Y}" for n, a, b in _stale) + ".")
 
 df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
@@ -80,12 +89,12 @@ macro_events = {
     "2022-02-24": "Russia invades Ukraine",
     "2022-06-01": "EU bans Russian oil",
     "2022-09-26": "Nord Stream sabotage",
-    "2023-01-01": "EU gas price cap",
+    "2023-02-15": "EU gas price cap in force",
     "2023-04-18": "EU ETS 2 passed",
     "2024-01-01": "EU ETS reform",
     "2025-12-31": "CBAM transition ends",
     "2026-01-01": "CBAM full enforcement",
-    "2027-01-01": "EU ETS 2 starts",
+    "2028-01-01": "EU ETS 2 starts (postponed)",
 }
 
 st.subheader("Price Trends with Key EU Policy Events")
@@ -334,10 +343,33 @@ ax_ts.axhline(y=0, color='black', linewidth=0.5)
 plt.tight_layout()
 st.pyplot(fig_var)
 
+# Backtest of the headline VaR for this commodity alone (per unit of exposure).
+_bt = common.var_backtest(returns_clean, window=var_days, test_days=250)
+if len(_bt) >= 100:
+    _n = len(_bt)
+    _rows = []
+    for _conf, _col in [(0.95, 'Exc95'), (0.99, 'Exc99')]:
+        _x = int(_bt[_col].sum())
+        _lr, _p = common.kupiec_pof(_n, _x, 1 - _conf)
+        _rows.append({'VaR level': f"{_conf:.0%}", 'Exceptions': _x,
+                      'Expected': round(_n * (1 - _conf), 1), 'Kupiec LR': round(_lr, 2),
+                      'p-value': round(_p, 3),
+                      'Kupiec result': 'Reject (miscalibrated)' if _p < 0.05 else 'Accept'})
+    _zone = common.basel_zone(_rows[1]['Exceptions'], _n)
+    st.write(f"**VaR Backtest ({selected_commodity}) — last {_n} trading days:** "
+             f"Basel traffic light **{_zone}** ({_rows[1]['Exceptions']} exceptions at 99%).")
+    st.dataframe(pd.DataFrame(_rows).set_index('VaR level'), width="stretch")
+    st.caption(f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
+               "and compared with that day's return. Kupiec also rejects too few exceptions. Basel zones: "
+               "green 0–4, yellow 5–9, red 10+ exceptions at 99% over 250 days.")
+else:
+    st.caption(f"VaR backtest needs at least {var_days + 100} trading days of history; widen the date range.")
+
 
 # ─── Section 4b: GARCH ───
 st.subheader("GARCH Volatility Forecast")
-st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1)")
+st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1) "
+         "with Student-t shocks (fat tails)")
 
 garch = common.fit_garch(returns_clean)
 if garch is not None:
@@ -380,9 +412,16 @@ if garch is not None:
         persistence = params['alpha[1]'] + params['beta[1]']
         st.write(f"**α + β = {persistence:.4f}** — "
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
-        if garch['long_run_vol'] is not None:
+        if garch.get('nu') is not None:
+            st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} — lower means fatter tails")
+        if garch['long_run_source'] == 'garch':
             st.write(f"**Long-run volatility √(ω / (1 − α − β)) = {garch['long_run_vol']:.2f}%** (daily) — "
                      "the level the forecast reverts to")
+        else:
+            st.write(f"**Reference level: sample average 30-day volatility = {garch['long_run_vol']:.2f}%** "
+                     f"(daily). With α + β = {garch['persistence']:.4f}, the GARCH long-run formula "
+                     "√(ω / (1 − α − β)) divides by almost zero and is not meaningful, so the sample "
+                     "average is used instead.")
         st.write(f"**Log-Likelihood:** {garch['loglikelihood']:.2f}")
         st.caption("Confidence band: bootstrap residual resampling — 500 draws of standardised "
                    "innovations propagated through the GARCH recursion; 5th–95th percentile shown.")
@@ -435,19 +474,22 @@ st.write(f"What happens if {selected_commodity} prices spike? Simulate the impac
 stress_pct = st.slider("Simulate price shock (%)", min_value=-50, max_value=100, value=30, step=5,
                         help="Positive = price spike, Negative = price crash")
 
-shock_vol_multiplier = 1 + abs(stress_pct) / 50
+# Illustrative heuristic: absolute price moves grow with the size of the shock (1 + |shock|/50),
+# and percentage volatility is absolute moves divided by the new price level (1 + shock/100).
+# A crash therefore raises percentage volatility more than a spike of the same size.
+shock_vol_multiplier = (1 + abs(stress_pct) / 50) / (1 + stress_pct / 100)
 stressed_vol = latest_vol * shock_vol_multiplier
-stressed_var_95 = var_95 * shock_vol_multiplier
-stressed_var_99 = var_99 * shock_vol_multiplier
+stressed_var_95 = max(var_95 * shock_vol_multiplier, -100.0)   # a long position cannot lose more than 100%
+stressed_var_99 = max(var_99 * shock_vol_multiplier, -100.0)
 
 st1, st2, st3, st4 = st.columns(4)
 st1.metric("Current Volatility", f"{latest_vol:.2f}%")
 st2.metric("Stressed Volatility", f"{stressed_vol:.2f}%",
-           delta=f"+{stressed_vol - latest_vol:.2f}%")
+           delta=f"{stressed_vol - latest_vol:+.2f} pp", delta_color="inverse")
 st3.metric("Stressed VaR 95%", f"{stressed_var_95:.2f}%",
-           delta=f"{stressed_var_95 - var_95:.2f}%")
+           delta=f"{stressed_var_95 - var_95:+.2f} pp")
 st4.metric("Stressed VaR 99%", f"{stressed_var_99:.2f}%",
-           delta=f"{stressed_var_99 - var_99:.2f}%")
+           delta=f"{stressed_var_99 - var_99:+.2f} pp")
 
 # FIX: avoid uninformative "Regime shifts to Calm (from Calm)"
 stressed_regime_name = common.regime_label(stressed_vol, regime_thr)
@@ -460,8 +502,10 @@ else:
     st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime shifts to **{stressed_regime}** "
                 f"(from {current_regime})")
 
-st.caption(f"Stressed volatility and VaR = current values × shock multiplier ({shock_vol_multiplier:.2f}x, "
-           "i.e. 1 + |shock| / 50).")
+st.caption(f"Illustrative heuristic, not a calibrated stress model. Stressed volatility and VaR = current "
+           f"values × {shock_vol_multiplier:.2f}, where the multiplier is (1 + |shock| / 50) / (1 + shock / 100): "
+           "absolute moves grow with the shock and are measured against the new price level, so a crash "
+           "raises percentage risk more than a spike. VaR is capped at −100% (a long position cannot lose more).")
 
 
 # ─── Section 5ab: Portfolio VaR ───
@@ -554,14 +598,15 @@ if port_returns is not None and len(port_returns.columns) >= 2:
         st.pyplot(fig_pvar)
 
         st.write("**Portfolio Composition:**")
-        fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
+        pie_col, _ = st.columns([1, 2])
+        fig_pie, ax_pie = plt.subplots(figsize=(3, 3))
         pie_labels = [f"{k}\n({w_array[i]*100:.0f}%)" for i, k in enumerate(available)]
         pie_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)]
         ax_pie.pie(w_array, labels=pie_labels, colors=pie_colors,
-                  autopct='', startangle=90)
-        ax_pie.set_title('Portfolio Weight Allocation')
+                  autopct='', startangle=90, textprops={'fontsize': 7})
+        ax_pie.set_title('Portfolio Weight Allocation', fontsize=9)
         plt.tight_layout()
-        st.pyplot(fig_pie)
+        pie_col.pyplot(fig_pie)
 
         st.caption(f"Portfolio VaR accounts for cross-commodity correlations — "
                    f"diversification reduces risk by {diversification_benefit:.2f}% compared to "
