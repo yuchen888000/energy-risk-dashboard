@@ -433,6 +433,7 @@ MONTH_CODES = "FGHJKMNQUVXZ"
 # Continuous ticker → (monthly contract root on NYMEX, unit). EU carbon has no monthly
 # contracts on Yahoo Finance: EUA futures are annual December contracts on ICE Endex.
 CURVE_ROOTS = {"CL=F": ("CL", "$/barrel"), "BZ=F": ("BZ", "$/barrel"), "TTF=F": ("TTF", "€/MWh")}
+CURVE_FRESH_DAYS = 5     # a contract needs a settlement within this many trading days
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching monthly futures contracts...")
@@ -440,10 +441,12 @@ def forward_curve(root, n=12, today=None):
     """Latest prices of the next `n` monthly contracts, e.g. CLX26.NYM, CLZ26.NYM, ...
 
     Symbols are generated from the current month onwards (with spares for contracts
-    that have already expired) and downloaded in one batch. Only contracts that traded
-    on the latest date in the batch are kept, so expired or stale contracts drop out.
-    Nothing is interpolated: missing contracts are simply absent. Returns a DataFrame
-    with Contract, Delivery, Price and Last trade, sorted by delivery month.
+    that have already expired) and downloaded in one batch. A contract is kept if it
+    has a settlement within the last CURVE_FRESH_DAYS trading days of the batch (the
+    dates on which any contract settled), so expired or stale contracts drop out while
+    a contract that missed only the latest day stays. Its price is its latest
+    settlement. Nothing is interpolated: missing contracts are simply absent. Returns a
+    DataFrame with Contract, Delivery, Price and Last trade, sorted by delivery month.
     """
     today = today or dt.date.today()
     symbols = {}
@@ -472,5 +475,17 @@ def forward_curve(root, n=12, today=None):
     if not rows:
         return empty
     df = pd.DataFrame(rows)
-    df = df[df['Last trade'] == df['Last trade'].max()]
+    trading_days = closes.dropna(how='all').index
+    cutoff = trading_days[-min(CURVE_FRESH_DAYS, len(trading_days))]
+    df = df[df['Last trade'] >= cutoff]
     return df.sort_values('Delivery').head(n).reset_index(drop=True)
+
+
+def gas_season(delivery):
+    """Gas-year season of a delivery month: Winter = Oct–Mar, Summer = Apr–Sep."""
+    y = delivery.year % 100
+    if delivery.month >= 10:
+        return f"Winter {y:02d}/{(y + 1) % 100:02d}"
+    if delivery.month <= 3:
+        return f"Winter {(y - 1) % 100:02d}/{y:02d}"
+    return f"Summer {y:02d}"

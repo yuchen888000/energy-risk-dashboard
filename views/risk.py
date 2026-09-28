@@ -126,32 +126,80 @@ else:
                    "Missing contracts are not filled in.")
     else:
         front, back = curve.iloc[0], curve.iloc[-1]
-        fb_spread = front['Price'] - back['Price']
-        if abs(fb_spread) < 0.005 * front['Price']:
-            curve_shape, shape_color = "Flat", "gray"
-        elif fb_spread < 0:
-            curve_shape, shape_color = "Contango", "steelblue"
-        else:
-            curve_shape, shape_color = "Backwardation", "darkorange"
         n_curve = len(curve)
-        back_label = "12th month" if n_curve == 12 else f"month {n_curve} (furthest available)"
-
-        fc1, fc2, fc3 = st.columns(3)
-        fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
-                     unsafe_allow_html=True)
-        fc2.metric(f"Front month ({front['Delivery']:%b %y})", f"{front['Price']:.2f} {curve_unit}")
-        fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}")
-
-        fig_fc, ax_fc = plt.subplots(figsize=(14, 3.8))
+        first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
+        settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
+                   else f"{first_trade:%d %b} – {last_trade:%d %b %Y}")
         labels_fc = [f"{d:%b %y}" for d in curve['Delivery']]
-        ax_fc.plot(labels_fc, curve['Price'], color=commodity['color'], marker='o', linewidth=1.5)
+        fig_fc, ax_fc = plt.subplots(figsize=(14, 3.8))
+        ax_fc.plot(labels_fc, curve['Price'], color=commodity['color'], linewidth=1.5, zorder=1)
+
+        if curve_root == "TTF":
+            # Gas curves are seasonal: winter delivery carries a heating premium, so front
+            # vs. back month says little. Compare winter and summer contracts instead.
+            curve['Season'] = curve['Delivery'].map(common.gas_season)
+            seasons = (curve.groupby('Season', sort=False)
+                       .agg(Price=('Price', 'mean'), Contracts=('Price', 'size'),
+                            From=('Delivery', 'min'), To=('Delivery', 'max')))
+            # The next winter against the summer that follows it (not a leftover summer month
+            # before that winter); without one, the nearest summer on the curve.
+            winter = next((k for k in seasons.index if k.startswith("Winter")), None)
+            summers = [k for k in seasons.index if k.startswith("Summer")]
+            summer = next((k for k in summers if winter is None or seasons.loc[k, 'From'] > seasons.loc[winter, 'From']),
+                          summers[0] if summers else None)
+            curve_shape = "Seasonal curve"
+
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            fc1.markdown("<h3 style='color:steelblue; margin-top:0'>Seasonal curve</h3>",
+                         unsafe_allow_html=True)
+            for col_fc, key in ((fc2, winter), (fc3, summer)):
+                if key is not None:
+                    n_season = seasons.loc[key, 'Contracts']
+                    col_fc.metric(f"{key} average ({n_season} contract{'s' if n_season > 1 else ''})",
+                                  f"{seasons.loc[key, 'Price']:.2f} {curve_unit}")
+            if winter is not None and summer is not None:
+                fc4.metric(f"{winter} − {summer}",
+                           f"{seasons.loc[winter, 'Price'] - seasons.loc[summer, 'Price']:+.2f} {curve_unit}",
+                           help="Average winter contract minus average summer contract: the seasonal premium.")
+
+            season_colors = ['steelblue' if k.startswith("Winter") else 'darkorange' for k in curve['Season']]
+            ax_fc.scatter(labels_fc, curve['Price'], c=season_colors, s=36, zorder=2)
+            ax_fc.scatter([], [], c='steelblue', label='Winter (Oct–Mar)')
+            ax_fc.scatter([], [], c='darkorange', label='Summer (Apr–Sep)')
+            ax_fc.legend(fontsize=8, loc='upper right')
+            shape_note = (
+                "TTF is not labelled contango or backwardation: gas curves are seasonal, with winter "
+                "deliveries (Oct–Mar) usually priced above summer (Apr–Sep) because of heating demand "
+                "and storage costs, so comparing the front month with the last month mostly measures "
+                "which seasons they fall in. The figures above average the contracts available in each "
+                "season; a season with only some of its months listed is averaged over those. ")
+        else:
+            fb_spread = front['Price'] - back['Price']
+            if abs(fb_spread) < 0.005 * front['Price']:
+                curve_shape, shape_color = "Flat", "gray"
+            elif fb_spread < 0:
+                curve_shape, shape_color = "Contango", "steelblue"
+            else:
+                curve_shape, shape_color = "Backwardation", "darkorange"
+            back_label = "12th month" if n_curve == 12 else f"month {n_curve} (furthest available)"
+
+            fc1, fc2, fc3 = st.columns(3)
+            fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
+                         unsafe_allow_html=True)
+            fc2.metric(f"Front month ({front['Delivery']:%b %y})", f"{front['Price']:.2f} {curve_unit}")
+            fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}")
+            ax_fc.scatter(labels_fc, curve['Price'], color=commodity['color'], s=30, zorder=2)
+            shape_note = (
+                "Contango: later deliveries cost more than the front month (spread negative). "
+                "Backwardation: the front month costs more (spread positive), usually a sign of tight "
+                "prompt supply. The label compares only the front and the last month shown. ")
+
         for x_fc, y_fc in zip(labels_fc, curve['Price']):
             ax_fc.annotate(f"{y_fc:.2f}", (x_fc, y_fc), textcoords='offset points', xytext=(0, 7),
                            ha='center', fontsize=7)
         ax_fc.set_ylabel(curve_unit)
         ax_fc.set_xlabel('Delivery month')
-        ax_fc.set_title(f"{selected_commodity} futures curve, settlement {curve['Last trade'].iloc[0]:%d %b %Y} "
-                        f"— {curve_shape.lower()}")
+        ax_fc.set_title(f"{selected_commodity} futures curve, settlements {settled} — {curve_shape.lower()}")
         plt.tight_layout()
         st.pyplot(fig_fc)
 
@@ -160,13 +208,11 @@ else:
                                       **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')}),
                          width="stretch", hide_index=True)
         st.caption(
-            "Contango: later deliveries cost more than the front month (spread negative). "
-            "Backwardation: the front month costs more (spread positive), usually a sign of tight "
-            "prompt supply. The label compares only the front and the last month shown; gas curves are "
-            "seasonal, so the shape in between can differ. "
-            f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, "
-            "delayed; only contracts with a price on the latest trading date are shown, nothing is "
-            f"interpolated. {n_curve} of 12 contracts available."
+            shape_note
+            + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
+            f"A contract is shown if it settled within the last {common.CURVE_FRESH_DAYS} trading days, at "
+            "its latest settlement, so prices can be from different days (see Last trade); older or missing "
+            f"contracts are left out and nothing is interpolated. {n_curve} of 12 contracts available."
         )
 
 # ─── Section 3: Volatility & Correlation ───
