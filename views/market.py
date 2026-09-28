@@ -641,6 +641,9 @@ else:
 
 st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
             unsafe_allow_html=True)
+st.caption("The score measures the tone of the headlines (positive or negative wording), not whether "
+           "the news is bullish or bearish for prices: \"gas prices surge\" can score negative although "
+           "it describes a price rise.")
 
 sc1, sc2, sc3, sc4 = st.columns(4)
 sc1.metric("Avg Sentiment", f"{avg_score:.3f}")
