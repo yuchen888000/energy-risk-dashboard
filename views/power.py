@@ -56,6 +56,7 @@ with st.spinner("Fetching EUA auction prices (EEX)..."):
 
 if not eua_auctions.empty:
     eua = eua_auctions
+    eua_row_source = None   # per day, set below: auction day or carried forward
     eua_source = (f"EUA: EEX primary-auction clearing prices, €/tCO2 "
                   f"({eua.index.min():%d %b %Y} – {eua.index.max():%d %b %Y}); "
                   "carried forward on business days without an auction.")
@@ -67,11 +68,13 @@ else:
     carb = common.load_close("CARB.L", start_date, end_date).dropna()
     if not carb.empty:
         eua = carb * (eua_now / carb.iloc[-1])
+        eua_row_source = f"Approximation: CARB.L rescaled to latest EUR {eua_now:.2f}/t"
         eua_source = ("EUA: **approximation** — CARB.L (USD ETC tracking EUA futures) rescaled so its "
                       f"latest close equals €{eua_now:.2f}/t. The ratio is held fixed over time, so "
                       "EUR/USD, roll yield and fees make earlier values drift from the true EUA price.")
     else:
         eua = pd.Series(eua_now, index=ttf.index)
+        eua_row_source = f"Flat assumption: EUR {eua_now:.2f}/t"
         eua_source = (f"EUA: **flat assumption** of €{eua_now:.2f}/t — neither EEX auction data nor "
                       "the carbon ETC could be loaded.")
     st.warning("EEX auction prices could not be loaded; EUA is approximated (see note under the charts).")
@@ -91,6 +94,16 @@ df["Carbon cost"] = CARBON_PER_MWH * df["EUA"]
 df["CSS"] = df["Power"] - df["Fuel cost"] - df["Carbon cost"]
 df["dCSS"] = df["CSS"].diff()
 df["dCSS vol"] = df["dCSS"].rolling(30).std()
+
+# Where each day's EUA price comes from, for the CSV export.
+if eua_row_source is None:
+    last_auction = (pd.Series(eua.index, index=eua.index).reindex(eua_ext.index)
+                    .ffill(limit=10).reindex(df.index))
+    df["EUA source"] = [f"EEX auction {a:%Y-%m-%d}" if a == d
+                        else f"EEX auction {a:%Y-%m-%d}, carried forward"
+                        for d, a in zip(df.index, last_auction)]
+else:
+    df["EUA source"] = eua_row_source
 
 # ─── Headline: current spread ───
 latest = df.iloc[-1]
@@ -133,6 +146,22 @@ ax2.set_title("Spread = power price − fuel cost − carbon cost")
 ax2.legend(fontsize=8, loc="upper left")
 plt.tight_layout()
 st.pyplot(fig2)
+
+export = pd.DataFrame({
+    "Date": df.index.strftime("%Y-%m-%d"),
+    "DE power price (EUR/MWh)": df["Power"].round(2).values,
+    "TTF (EUR/MWh)": df["TTF"].round(3).values,
+    "EUA price (EUR/tCO2)": df["EUA"].round(2).values,
+    "EUA source": df["EUA source"].values,
+    "Fuel cost (EUR/MWh)": df["Fuel cost"].round(3).values,
+    "Carbon cost (EUR/MWh)": df["Carbon cost"].round(3).values,
+    "Clean spark spread (EUR/MWh)": df["CSS"].round(3).values,
+})
+st.download_button("Download CSV", data=export.to_csv(index=False), file_name="clean_spark_spread_de.csv",
+                   mime="text/csv",
+                   help=f"Daily data behind the charts ({len(export):,} business days): DE-LU baseload power, TTF, "
+                        f"EUA and its source, fuel cost (TTF / {EFFICIENCY}), carbon cost ({CARBON_PER_MWH:.3f} × EUA) "
+                        "and the clean spark spread.")
 
 # ─── Risk: day-on-day changes in €/MWh ───
 st.subheader("Spread Risk")
