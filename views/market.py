@@ -42,7 +42,7 @@ with st.sidebar.expander("Methodology — Market page"):
     - **30-Day Sentiment Trend**: Daily average sentiment via Google News RSS,
       scored with FinVADER. Visualised as bar chart with trend line.
     - **Anomaly Detection**: 5 automated signal checks — volatility z-score,
-      GARCH divergence, correlation regime shift, sentiment-volatility divergence,
+      GARCH forecast vs long-run GARCH volatility, correlation regime shift, sentiment-volatility divergence,
       recent tail event (loss > 2× VaR99 in past 252 days).
     - **AI Risk Interpretation**: Quantitative signals (vol, VaR, GARCH,
       regime, sentiment, anomalies) fed to Claude Sonnet via Anthropic API.
@@ -66,6 +66,7 @@ dep_col, dep_label, _ = dependency_for(selected_commodity)
 
 garch = common.fit_garch(returns_clean)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
+garch_long_run = garch['long_run_vol'] if garch is not None else None
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
 
@@ -830,22 +831,25 @@ if vol_std > 0:
         })
 
 # ── 2. GARCH forward signal ──
-if garch_forecast_10d is not None and latest_vol > 0:
-    garch_ratio = garch_forecast_10d / latest_vol
+# The forecast is compared with the long-run GARCH volatility (the level it reverts to), not
+# with current rolling volatility: a forecast rising from a quiet spell back towards the
+# long-run level is normal mean reversion, not a warning.
+if garch_forecast_10d is not None and garch_long_run:
+    garch_ratio = garch_forecast_10d / garch_long_run
     if garch_ratio > 1.30:
         anomalies.append({
             'level': '🟡 WARNING',
-            'type': 'GARCH Vol Expansion Signal',
-            'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.1f}%) exceeds current rolling vol '
-                       f'({latest_vol:.1f}%) by {(garch_ratio-1)*100:.0f}%. '
-                       f'Model projects volatility expansion ahead.'),
+            'type': 'GARCH Forecast Above Long-Run Level',
+            'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.2f}%) is {(garch_ratio-1)*100:.0f}% above '
+                       f'the long-run GARCH volatility ({garch_long_run:.2f}%). The model expects volatility '
+                       f'to stay elevated over the next 10 days.'),
         })
     elif garch_ratio < 0.70:
         anomalies.append({
             'level': '🟢 INFO',
-            'type': 'GARCH Mean Reversion',
-            'detail': (f'GARCH forecast ({garch_forecast_10d:.1f}%) well below current vol '
-                       f'({latest_vol:.1f}%). Model projects volatility normalization.'),
+            'type': 'GARCH Forecast Below Long-Run Level',
+            'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.2f}%) is {(1-garch_ratio)*100:.0f}% below '
+                       f'the long-run GARCH volatility ({garch_long_run:.2f}%): quieter than usual.'),
         })
 
 # ── 3. Correlation regime shift ──
@@ -935,7 +939,7 @@ else:
         unsafe_allow_html=True
     )
 
-st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH divergence > 30% · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× VaR99")
+st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH 10-day forecast more than 30% above or below the long-run GARCH volatility · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× VaR99")
 
 # ─── Section 6d: AI Risk Narrative (LLM) ───
 st.subheader("🤖 AI Risk Interpretation")
@@ -943,7 +947,7 @@ st.write(f"Synthesizes today's quantitative signals into a plain-language risk a
 
 @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
 def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
-                            _var_95, _current_regime, _garch_10d,
+                            _var_95, _current_regime, _garch_10d, _garch_long_run,
                             _avg_score, _avg_30d, anomaly_types_str,
                             top_neg_str, date_str, regime_calm, regime_crisis):
     api_key = None
@@ -958,6 +962,8 @@ def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vo
 
     garch_line = (f"GARCH forecast of daily volatility on day 10 ahead: {_garch_10d:.2f}%"
                   if _garch_10d else "GARCH forecast: unavailable")
+    if _garch_10d and _garch_long_run:
+        garch_line += f" (long-run GARCH volatility {_garch_long_run:.2f}%)"
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
     headline_line = top_neg_str if top_neg_str else "None retrieved"
     sentiment_30d_line = (f"{_avg_30d:+.3f}" if _avg_30d is not None else "N/A")
@@ -969,7 +975,7 @@ HOW TO READ THE INPUTS
 Volatility
 - All volatility figures are DAILY standard deviation of returns, in percent. Not annualised.
 - The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
-- A GARCH expansion flag compares the forecast against CURRENT volatility only. Before calling it stress, check the forecast against the long-run average and against the {regime_calm:.2f}% Volatile boundary. A forecast that stays below both is normalisation back to typical levels, not a build-up of risk, and should be described that way.
+- The GARCH anomaly flag compares the forecast with the long-run GARCH volatility (the level the model reverts to), not with current volatility. A forecast moving back towards the long-run level is normalisation, not a build-up of risk, and should be described that way. Also check the forecast against the {regime_calm:.2f}% Volatile boundary.
 
 Risk signal and regime - one classification
 - "Regime" compares current 30-day volatility with FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
@@ -1064,6 +1070,7 @@ narrative, error = generate_risk_narrative(
     _var_95=var_95,
     _current_regime=current_regime,
     _garch_10d=garch_forecast_10d,
+    _garch_long_run=garch_long_run,
     _avg_score=avg_score,
     _avg_30d=avg_30d,
     anomaly_types_str=anomaly_types_for_llm,

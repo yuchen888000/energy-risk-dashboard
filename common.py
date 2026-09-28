@@ -246,8 +246,14 @@ def fit_garch(returns_clean):
             _e2 = _s2 * _z[_h] ** 2
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Long-run (unconditional) volatility the forecast reverts to: sqrt(ω / (1 − α − β)).
+    # Undefined when α + β ≥ 1, since shocks then never fade.
+    persistence = _alpha_b + _beta_b
+    long_run_vol = float(np.sqrt(_omega_b / (1 - persistence))) if persistence < 1 else None
+
     return dict(
         params={k: float(result.params[k]) for k in ('omega', 'alpha[1]', 'beta[1]')},
+        long_run_vol=long_run_vol,
         loglikelihood=float(result.loglikelihood),
         conditional_volatility=result.conditional_volatility,
         # conditional_volatility is already a volatility series, no need for sqrt(x**2)

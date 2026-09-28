@@ -361,6 +361,9 @@ if garch is not None:
         persistence = params['alpha[1]'] + params['beta[1]']
         st.write(f"**α + β = {persistence:.4f}** — "
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
+        if garch['long_run_vol'] is not None:
+            st.write(f"**Long-run volatility √(ω / (1 − α − β)) = {garch['long_run_vol']:.2f}%** (daily) — "
+                     "the level the forecast reverts to")
         st.write(f"**Log-Likelihood:** {garch['loglikelihood']:.2f}")
         st.caption("Confidence band: bootstrap residual resampling — 500 draws of standardised "
                    "innovations propagated through the GARCH recursion; 5th–95th percentile shown.")
