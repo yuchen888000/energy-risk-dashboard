@@ -8,7 +8,6 @@ import pandas as pd
 import streamlit as st
 
 import common
-from country_data import COUNTRIES, dependency_for
 
 ctx = common.context()
 selected_commodity = ctx.selected_commodity
@@ -33,7 +32,7 @@ with st.sidebar.expander("Methodology — Risk page"):
       history. The Risk Signal is the same classification (Calm = low, Volatile = medium,
       Crisis = high risk), so a lower volatility can never get a higher regime.
     - **Stress Test**: Simulate price shocks and see impact on volatility,
-      VaR, regime, and country exposure.
+      VaR and regime.
     - **Portfolio VaR**: Combined risk of holding multiple commodities,
       accounting for cross-commodity correlations. Shows diversification benefit.
     """)
@@ -58,7 +57,6 @@ var_95, var_99 = core['var_95'], core['var_99']
 overall_corr = core['overall_corr']
 risk_level, risk_color = core['risk_level'], core['risk_color']
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
-dep_col, dep_label, dep_table = dependency_for(selected_commodity)
 
 # ─── Section 1: Risk Signal ───
 st.subheader(f"Current Risk Signal — {selected_commodity}")
@@ -364,7 +362,7 @@ with rcol2:
 
 # ─── Section 5a: Stress Test Scenario ───
 st.subheader("Stress Test Scenario")
-st.write(f"What happens if {selected_commodity} prices spike? Simulate the impact on volatility, VaR, and country risk.")
+st.write(f"What happens if {selected_commodity} prices spike? Simulate the impact on volatility, VaR and the regime.")
 
 stress_pct = st.slider("Simulate price shock (%)", min_value=-50, max_value=100, value=30, step=5,
                         help="Positive = price spike, Negative = price crash")
@@ -394,28 +392,8 @@ else:
     st.markdown(f"**Under a {stress_pct:+d}% price shock:** Regime shifts to **{stressed_regime}** "
                 f"(from {current_regime})")
 
-st.write("**Most impacted countries under this scenario:**")
-
-dep_vals = [max(x, 0) for x in dep_table[2024]]
-
-stress_impact = []
-for i, country in enumerate(COUNTRIES):
-    dep_pct = max(dep_vals[i], 0) / 100
-    country_stressed_vol = stressed_vol * dep_pct
-    normal_vol = latest_vol * dep_pct
-    stress_impact.append({
-        'Country': country,
-        'Normal Adj. Vol': f"{normal_vol:.1f}%",
-        'Stressed Adj. Vol': f"{country_stressed_vol:.1f}%",
-        'Vol Increase': f"+{country_stressed_vol - normal_vol:.1f}%",
-        dep_label: f"{dep_vals[i]:.0f}%",
-    })
-stress_df = pd.DataFrame(stress_impact)
-stress_df['sort_key'] = [float(x.replace('%', '').replace('+', '')) for x in stress_df['Vol Increase']]
-stress_df = stress_df.sort_values('sort_key', ascending=False).drop('sort_key', axis=1)
-st.dataframe(stress_df.head(10).reset_index(drop=True), width="stretch")
-st.caption(f"Stressed volatility = current volatility × shock multiplier ({shock_vol_multiplier:.2f}x), "
-           f"then weighted by each country's {dep_label.lower()}.")
+st.caption(f"Stressed volatility and VaR = current values × shock multiplier ({shock_vol_multiplier:.2f}x, "
+           "i.e. 1 + |shock| / 50).")
 
 
 # ─── Section 5ab: Portfolio VaR ───
