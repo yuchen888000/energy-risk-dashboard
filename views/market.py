@@ -277,10 +277,15 @@ cr_df['Country Vol Multiplier'] = (
 cr_df['Risk Score'] = (cr_df['Structural Score'] * cr_df['Country Vol Multiplier']).round(1)
 cr_df = cr_df.sort_values('Risk Score', ascending=False)
 
+# One set of thresholds for the ranking table, the detail panel and the bar chart.
+RISK_HIGH, RISK_MEDIUM = 70, 50
+RISK_LEVEL_COLORS = {'🔴 High': 'red', '🟡 Medium': 'orange', '🟢 Low': 'green'}
+
+
 def risk_category(score):
-    if score > 70:
+    if score > RISK_HIGH:
         return '🔴 High'
-    elif score > 50:
+    elif score > RISK_MEDIUM:
         return '🟡 Medium'
     else:
         return '🟢 Low'
@@ -292,7 +297,7 @@ st.markdown(f"**Real-time risk adjustment:** Current {selected_commodity} volati
 st.caption("Each country's multiplier is weighted by its own dependency — high-dependency countries "
            "feel the same market volatility much more than low-dependency ones.")
 
-cr_col1, cr_col2 = st.columns([1, 1])
+cr_col1, cr_col2 = st.columns([2, 1])
 
 with cr_col1:
     st.write(f"**Risk Ranking ({selected_year}) — by {dep_label}:**")
@@ -303,7 +308,8 @@ with cr_col1:
     display_cols = [c for c in display_cols if not (c in seen or seen.add(c))]
     display_df = cr_df[display_cols].reset_index(drop=True)
     display_df.index = display_df.index + 1
-    st.dataframe(display_df, width="stretch", height=400)
+    # Tall enough to show every country without scrolling (35 px per row plus the header).
+    st.dataframe(display_df, width="stretch", height=(len(display_df) + 1) * 35 + 3)
 
 with cr_col2:
     selected_country = st.selectbox("Select Country for Detail", cr_df['Country'].tolist())
@@ -313,48 +319,42 @@ with cr_col2:
     country_adj_vol = latest_vol * country_dep_val
     country_adj_var = var_95 * country_dep_val
 
-    if country_adj_vol > 6:
-        c_risk_level = "🔴 HIGH RISK"
-        c_risk_color = "red"
-    elif country_adj_vol > 3:
-        c_risk_level = "🟡 MEDIUM RISK"
-        c_risk_color = "orange"
-    else:
-        c_risk_level = "🟢 LOW RISK"
-        c_risk_color = "green"
+    # Same score and thresholds as the Risk Level column of the ranking table.
+    c_risk_level = country_data['Risk Level']
+    c_risk_color = RISK_LEVEL_COLORS[c_risk_level]
 
     st.markdown(f"### {selected_country} ({selected_year})")
-    st.markdown(f"<h3 style='color:{c_risk_color}'>{c_risk_level}</h3>",
+    st.markdown(f"<h3 style='color:{c_risk_color}; margin-top:0'>{c_risk_level.upper()} RISK</h3>",
                 unsafe_allow_html=True)
+    st.metric("Dynamic Risk Score", f"{country_data['Risk Score']:.1f}")
+    st.caption(f"High above {RISK_HIGH}, Medium above {RISK_MEDIUM}, the same thresholds as the ranking table.")
 
-    cr_m1, cr_m2 = st.columns(2)
-    cr_m1.metric("Adjusted Volatility (live)", f"{country_adj_vol:.2f}%")
-    cr_m2.metric("Adjusted VaR 95% (live)", f"{country_adj_var:.2f}%")
-
-    cd1, cd2 = st.columns(2)
-    cd1.metric(dep_label, f"{country_data[dep_col]:.0f}%")
-    cd2.metric("Carbon Intensity", f"{country_data['Carbon Int. (tCO2/M€)']:.0f} tCO2/M€")
-    cd3, cd4 = st.columns(2)
-    cd3.metric("Total Energy Dep.", f"{country_data['Total Energy Dep. (%)']:.0f}%")
-    cd4.metric("Renewable Share", f"{country_data['Renewable (%)']:.0f}%")
-    cd5, cd6 = st.columns(2)
-    cd5.metric("Price Sensitivity", f"{country_data['Price Sensitivity']:.1f}/10")
-    cd6.metric("Structural Score", f"{country_data['Structural Score']:.1f}")
-    cd7, cd8 = st.columns(2)
-    cd7.metric("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x")
-    cd8.metric("Dynamic Risk Score", f"{country_data['Risk Score']:.1f}")
+    # A two-column table wraps inside the narrow panel, where side-by-side metrics overlap.
+    detail_rows = [
+        ("Structural Score", f"{country_data['Structural Score']:.1f}"),
+        ("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x"),
+        (dep_label, f"{country_data[dep_col]:.0f}%"),
+        ("Total Energy Dep.", f"{country_data['Total Energy Dep. (%)']:.0f}%"),
+        ("Carbon Intensity", f"{country_data['Carbon Int. (tCO2/M€)']:.0f} tCO2/M€"),
+        ("Renewable Share", f"{country_data['Renewable (%)']:.0f}%"),
+        ("Price Sensitivity", f"{country_data['Price Sensitivity']:.1f}/10"),
+        ("Adjusted Volatility (live)", f"{country_adj_vol:.2f}%"),
+        ("Adjusted VaR 95% (live)", f"{country_adj_var:.2f}%"),
+    ]
+    st.markdown("| Indicator | Value |\n|---|---:|\n"
+                + "\n".join(f"| {k} | {v} |" for k, v in detail_rows))
 
 # Bar chart
 fig_cr, ax_cr = plt.subplots(figsize=(14, 6))
 top_n = cr_df.head(20)
-bar_colors_cr = ['red' if s > 70 else 'orange' if s > 50 else 'green' for s in top_n['Risk Score']]
+bar_colors_cr = [RISK_LEVEL_COLORS[risk_category(s)] for s in top_n['Risk Score']]
 ax_cr.barh(range(len(top_n)), top_n['Risk Score'], color=bar_colors_cr, height=0.6)
 ax_cr.set_yticks(range(len(top_n)))
 ax_cr.set_yticklabels(top_n['Country'], fontsize=9)
 ax_cr.set_xlabel('Composite Energy Risk Score')
 ax_cr.set_title(f'European Countries — Energy Risk Ranking ({selected_year}, by {dep_label})')
-ax_cr.axvline(x=70, color='red', linewidth=1, linestyle='--', alpha=0.4, label='High risk')
-ax_cr.axvline(x=50, color='orange', linewidth=1, linestyle='--', alpha=0.4, label='Medium risk')
+ax_cr.axvline(x=RISK_HIGH, color='red', linewidth=1, linestyle='--', alpha=0.4, label='High risk')
+ax_cr.axvline(x=RISK_MEDIUM, color='orange', linewidth=1, linestyle='--', alpha=0.4, label='Medium risk')
 ax_cr.legend(fontsize=8)
 ax_cr.invert_yaxis()
 plt.tight_layout()
