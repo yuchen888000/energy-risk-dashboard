@@ -15,14 +15,15 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 ## Risk page
 
 **Market risk of the selected commodity**
-- **Risk Signal** — current 30-day volatility vs its own history (High / Medium / Low).
+- **Risk Signal** — the current regime under another name: Calm = Low, Volatile = Medium, Crisis = High risk.
 - **Price Trends** — dual-axis chart with EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
+- **Forward Curve** — monthly NYMEX contracts settled within the last 5 trading days. Oil curves are labelled contango or backwardation; TTF is shown as a seasonal curve comparing the next winter (Oct–Mar) with the following summer (Apr–Sep).
 - **Volatility & Correlation** — 30-day rolling volatility and rolling correlation of returns.
 - **Cross-Commodity Correlation Matrix** — TTF, WTI, Brent and carbon, full period vs last 30 days.
-- **Value at Risk** — 95% and 99% historical VaR, return distribution, 60-day rolling VaR.
+- **Value at Risk** — historical VaR 95%, VaR 99% and Expected Shortfall 97.5% on the last 250 trading days, with the full-period figures alongside; return distribution, 60-day rolling VaR.
 - **GARCH(1,1) Forecast** — 10-day volatility forecast with a bootstrap 90% band.
-- **Market Regime** — hybrid K-Means + per-commodity volatility thresholds: Calm, Volatile, Crisis.
-- **Stress Test** — price-shock slider; stressed volatility, VaR, regime and most-affected countries.
+- **Market Regime** — per-commodity volatility thresholds: Calm, Volatile, Crisis.
+- **Stress Test** — price-shock slider; stressed volatility, VaR and regime.
 - **Portfolio VaR** — custom weights across the four commodities, with the diversification benefit.
 
 **Positions & Limits**
@@ -39,13 +40,14 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 - Charts: the spread over time, and its decomposition into power price, fuel cost and carbon cost.
 - **Spread risk** in €/MWh (not %, since power prices and the spread can be negative): 30-day volatility and 95% historical VaR of daily changes, plus the daily € VaR for a **400 MW unit running 16 hours a day**.
 - **EUA price** from EEX primary-auction results (€/t). If EEX cannot be reached, the carbon ETC is rescaled to a user-entered EUA price and labelled as an approximation.
+- **Download CSV** — date, DE power price, TTF, EUA price and its source, fuel cost, carbon cost and clean spark spread per business day.
 
 ## Market page
 
 - **Country Risk** — 31 countries (EU-27 + Switzerland, UK, Norway, Turkey), 2020–2024. A structural score (dependency, carbon intensity, renewables, price sensitivity) is scaled by live market volatility, weighted by each country's dependency. Includes per-country trend, dependency-weighted volatility and country news sentiment (only headlines that name the country or use its adjective).
-- **News Sentiment** — FinBERT (ProsusAI/finbert via HuggingFace) on live headlines from BBC Business, OilPrice and Google News; FinVADER as fallback.
+- **News Sentiment** — FinBERT (ProsusAI/finbert via HuggingFace) on live headlines from BBC Business, OilPrice and Google News; FinVADER as fallback, with the reason FinBERT was not used shown on the page. Every feed keeps only headlines containing one of the selected commodity's keywords (whole words), and drops US-domestic stories with no link to Europe (US LNG export news is kept). The score measures headline tone, not whether the news is bullish or bearish for prices.
 - **30-Day Sentiment Trend** — daily average sentiment, scored with FinVADER.
-- **Anomaly Detection** — volatility z-score, GARCH divergence, correlation shift, sentiment–regime divergence, recent tail events.
+- **Anomaly Detection** — volatility z-score, GARCH 10-day forecast vs long-run GARCH volatility, correlation shift, sentiment–regime divergence, recent tail events.
 - **AI Risk Interpretation** — the signals above summarised in three sentences by Claude via the Anthropic API (optional).
 - **Data Export** — CSV downloads of commodity risk data, sentiment and country risk.
 
@@ -59,7 +61,6 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 | Framework | Streamlit (multi-page with `st.navigation`) |
 | Risk analytics | NumPy, Pandas, SciPy |
 | Volatility modelling | arch (GARCH) |
-| Machine learning | scikit-learn (KMeans, StandardScaler) |
 | NLP | FinBERT (HuggingFace Inference API), FinVADER fallback |
 | News feeds | feedparser + requests (BBC, OilPrice, Google News RSS) |
 | Country data | Eurostat (nrg_ind_id, sdg_07_50, nrg_ind_ren, nrg_ind_ei), EEA, IEA |
@@ -69,17 +70,17 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 **Carbon benchmark.** KEUA, the original EUA ETF, was liquidated in March 2026. The app now tries `CARB.L` (WisdomTree Carbon ETC, USD line on the LSE), then `KRBN`, then `ICLN`, and labels the charts from whichever resolves. `CARB.L` tracks ICE EUA futures, but its quote is an ETC share price in USD, not €/tCO2, so its returns also carry EUR/USD moves, roll yield and fees. The Power page uses EEX auction prices in €/t instead.
 
-**VaR.** Historical simulation: the 5th percentile of daily returns is the 95% VaR. On the Risk page's position block, VaR and ES come from the last 250 days of the book's € P&L.
+**VaR.** Historical simulation: the 5th percentile of daily returns is the 95% VaR, and Expected Shortfall 97.5% is the average loss on the days beyond the 97.5% VaR. The headline figures use the last 250 trading days; the full-period figures (which include the 2022 crisis on the default range) are shown alongside. On the Risk page's position block, VaR and ES come from the last 250 days of the book's € P&L.
 
 **VaR backtest.** Hypothetical: today's positions are applied to past returns, and each day's VaR is estimated only from the 250 days before it (no look-ahead). Kupiec's test also rejects a model with too few exceptions (over-conservative).
 
-**GARCH(1,1).** α captures reaction to shocks, β persistence; α + β near 1 means volatility shocks fade slowly.
+**GARCH(1,1).** α captures reaction to shocks, β persistence; α + β near 1 means volatility shocks fade slowly. The forecast reverts to the long-run volatility √(ω / (1 − α − β)); the anomaly check compares the 10-day forecast with that level, so a return towards it is not flagged.
 
-**Regime detection.** K-Means on volatility and correlation plus per-commodity thresholds: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility since 2010 (the selected range if that history is too short). K-Means decides in a boundary zone from ⅔ of the lower threshold to ¾ of the upper one. The Risk page caption shows the thresholds used.
+**Regime detection.** Per-commodity thresholds only: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility since 2010 (the selected range if that history is too short), so a lower volatility never gets a higher regime. The Risk Signal uses the same classification. The Risk page caption shows the thresholds used.
 
 **Clean spark spread caveats.** Power is the day-ahead spot price, while TTF is the front-month future, so the tenors don't match; desks use contracts with the same delivery period. Efficiency is assumed at 50%. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
 
-**Country risk.** A composite structural score from six factors, multiplied by a volatility multiplier weighted by each country's dependency, so high-dependency countries feel the same market shock more.
+**Country risk.** A composite structural score from six factors, multiplied by a volatility multiplier weighted by each country's dependency, so high-dependency countries feel the same market shock more. Risk levels (High above 70, Medium above 50) are the same in the ranking table, the detail panel and the chart.
 
 ## Project Structure
 
@@ -104,7 +105,7 @@ streamlit run app.py
 
 Without keys the app still runs: sentiment falls back to FinVADER and the AI summary is hidden.
 
-- **FinBERT**: create a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) and set `HF_TOKEN`.
+- **FinBERT**: create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (a fine-grained token needs the "Make calls to Inference Providers" permission) and set `HF_TOKEN`. If FinBERT still is not used, the Market page shows the HTTP status and error returned.
 - **AI Risk Interpretation**: set `ANTHROPIC_API_KEY`.
 
 On Streamlit Cloud, add them under Settings → Secrets (never put tokens in code); locally, set them as environment variables.
