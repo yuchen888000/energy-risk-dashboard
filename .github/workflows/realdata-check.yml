@@ -1,0 +1,28 @@
+name: Real-data check
+on:
+  push:
+    branches: [claude/ecstatic-wozniak-12q6vu]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet -r requirements.txt
+      - run: python .github/scripts/realdata_check.py
+      - name: Save report to branch realdata-report
+        run: |
+          cp realdata_report.md /tmp/r.md
+          git config user.name "ci"; git config user.email "ci@users.noreply.github.com"
+          git checkout --orphan realdata-report
+          git rm -rfq .
+          cp /tmp/r.md realdata_report.md
+          git add realdata_report.md
+          git commit -qm "report ${GITHUB_SHA}"
+          git push -f origin realdata-report

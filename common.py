@@ -83,6 +83,7 @@ def build_commodities(carbon):
             "color": "steelblue",
             "keywords": ['gas', 'TTF', 'LNG', 'pipeline', 'natural gas', 'methane'],
             "rss_query": "natural+gas+Europe+price",
+            "news_term": "gas",   # one word for country and 30-day news queries
         },
         "WTI Crude Oil": {
             "ticker": "CL=F",
@@ -90,6 +91,7 @@ def build_commodities(carbon):
             "color": "saddlebrown",
             "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'barrel', 'refinery'],
             "rss_query": "crude+oil+Europe+price",
+            "news_term": "oil",   # one word for country and 30-day news queries
         },
         "Brent Crude Oil": {
             "ticker": "BZ=F",
@@ -97,6 +99,7 @@ def build_commodities(carbon):
             "color": "darkred",
             "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'barrel', 'North Sea'],
             "rss_query": "brent+oil+Europe+price",
+            "news_term": "oil",   # one word for country and 30-day news queries
         },
         carbon["name"]: {
             "ticker": carbon["ticker"],
@@ -104,6 +107,7 @@ def build_commodities(carbon):
             "color": "seagreen",
             "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
             "rss_query": "EU+carbon+ETS+emission+price",
+            "news_term": "carbon",   # one word for country and 30-day news queries
         },
     }
 
@@ -143,9 +147,15 @@ STALE_RUN = 5   # this many identical consecutive closes = a stale feed (suspens
 
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
 def _raw_close(ticker, start, end):
-    """Daily closing prices for one ticker exactly as downloaded (empty if unavailable)."""
+    """Daily closing prices for one ticker exactly as downloaded (empty if unavailable).
+
+    yfinance treats `end` as exclusive, so one day is added: the end date chosen in the
+    sidebar is included. On a trading day the last value is the latest price, not yet a
+    settlement.
+    """
     try:
-        data = yf.download(ticker, start=start, end=end, progress=False)
+        data = yf.download(ticker, start=start, end=pd.Timestamp(end) + pd.Timedelta(days=1),
+                           progress=False)
     except Exception:
         return pd.Series(dtype=float)
     if data is None or data.empty:
@@ -298,7 +308,7 @@ def fit_garch(returns_clean):
     _alpha_b  = result.params['alpha[1]']
     _beta_b   = result.params['beta[1]']
     _s2_init  = float(result.conditional_volatility.iloc[-1] ** 2)
-    _e2_init  = float(garch_returns.iloc[-1] ** 2)
+    _e2_init  = float(result.resid.iloc[-1] ** 2)   # last shock, net of the fitted mean
 
     _boot_vols = np.zeros((_N_BOOT, 10))
     _rng = np.random.default_rng(42)
@@ -316,20 +326,20 @@ def fit_garch(returns_clean):
     # Undefined when α + β ≥ 1, since shocks then never fade.
     persistence = _alpha_b + _beta_b
     garch_long_run = float(np.sqrt(_omega_b / (1 - persistence))) if persistence < 1 else None
-    # When α + β is close to 1 the formula divides by almost zero and gives absurd values
-    # (on real TTF data it returned millions of %). Fall back to the sample average of the
-    # 30-day rolling volatility as the reference level in that case.
+    # With α + β close to 1 (TTF, Brent and carbon all sit at 0.98 to 0.99) the formula divides
+    # by almost zero: small changes in the fit move it a lot, and it can flip between sensible
+    # and absurd from one day to the next. So the reference level for comparisons is always the
+    # sample average of the 30-day rolling volatility; the GARCH value is shown for information
+    # only, and only when it is stable (α + β < 0.98 and within 1.5x the sample average).
     sample_avg_vol = float((returns_clean.dropna().rolling(30).std() * 100).mean())
-    if (garch_long_run is None or persistence >= 0.99
-            or garch_long_run > 3 * sample_avg_vol):
-        long_run_vol, long_run_source = sample_avg_vol, 'sample'
-    else:
-        long_run_vol, long_run_source = garch_long_run, 'garch'
+    garch_long_run_ok = (garch_long_run is not None and persistence < 0.98
+                         and garch_long_run <= 1.5 * sample_avg_vol)
 
     return dict(
         params={k: float(result.params[k]) for k in ('omega', 'alpha[1]', 'beta[1]')},
-        long_run_vol=long_run_vol,
-        long_run_source=long_run_source,     # 'garch' or 'sample' (see fallback above)
+        long_run_vol=sample_avg_vol,         # reference level used in every comparison
+        garch_long_run=garch_long_run,       # √(ω / (1 − α − β)), information only
+        garch_long_run_ok=garch_long_run_ok,
         persistence=float(persistence),
         sample_avg_vol=sample_avg_vol,
         nu=float(result.params['nu']) if 'nu' in result.params else None,

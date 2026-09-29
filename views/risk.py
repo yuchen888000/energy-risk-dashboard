@@ -75,10 +75,15 @@ st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
             unsafe_allow_html=True)
 st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% against this commodity's "
            f"thresholds (Volatile above {regime_thr['calm']:.2f}%, Crisis above {regime_thr['crisis']:.2f}%).")
+_last_px = df_analysis['Price'].dropna().index.max()
+_last_cmp = df_analysis['Compare'].dropna().index.max() if df_analysis['Compare'].notna().any() else None
+st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
+           + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
+           + ". On a trading day the last value is the latest price, not yet a settlement.")
 
 mc1, mc2, mc3, mc4 = st.columns(4)
 mc1.metric("Current Volatility", f"{latest_vol:.2f}%")
-mc2.metric("Average Volatility", f"{avg_vol:.2f}%")
+mc2.metric("Average Volatility", f"{avg_vol:.2f}%", help="Average 30-day volatility over the selected period.")
 mc3.metric("Correlation", f"{overall_corr:.2f}")
 mc4.metric("VaR 95% (1-day)", f"{var_95:.2f}%", help=f"Historical, last {var_days} trading days.")
 
@@ -318,6 +323,12 @@ vc4.metric("Max daily loss", f"{returns_clean.tail(var_days).min() * 100:.2f}%",
 vc4.caption(f"{full_label}: **{returns_clean.min() * 100:.2f}%**")
 st.caption("Expected Shortfall (ES) 97.5% is the average loss on the days beyond the 97.5% VaR, i.e. the worst "
            "2.5% of days: how large losses are once VaR is breached.")
+if commodity['ticker'].endswith("=F"):
+    st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
+               "contract rolls to the next month, the series switches contract and that day's return is "
+               "not a real price move (for example Brent on 29 Sep 2026 showed −8.9% while each contract fell "
+               "about 1.9%). Roll days are not removed, so they can add to the tails, the VaR and the "
+               "backtest exceptions. Desks use a back-adjusted series built from individual contracts.")
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
@@ -414,14 +425,14 @@ if garch is not None:
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
         if garch.get('nu') is not None:
             st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} — lower means fatter tails")
-        if garch['long_run_source'] == 'garch':
-            st.write(f"**Long-run volatility √(ω / (1 − α − β)) = {garch['long_run_vol']:.2f}%** (daily) — "
-                     "the level the forecast reverts to")
+        st.write(f"**Reference level: sample average 30-day volatility = {garch['long_run_vol']:.2f}%** "
+                 "(daily). The anomaly check compares the 10-day forecast with this level.")
+        if garch['garch_long_run_ok']:
+            st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {garch['garch_long_run']:.2f}% "
+                     "(daily), the level the forecast reverts to.")
         else:
-            st.write(f"**Reference level: sample average 30-day volatility = {garch['long_run_vol']:.2f}%** "
-                     f"(daily). With α + β = {garch['persistence']:.4f}, the GARCH long-run formula "
-                     "√(ω / (1 − α − β)) divides by almost zero and is not meaningful, so the sample "
-                     "average is used instead.")
+            st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown: with "
+                     f"α + β = {garch['persistence']:.4f} the formula divides by almost zero and is unstable.")
         st.write(f"**Log-Likelihood:** {garch['loglikelihood']:.2f}")
         st.caption("Confidence band: bootstrap residual resampling — 500 draws of standardised "
                    "innovations propagated through the GARCH recursion; 5th–95th percentile shown.")
@@ -513,8 +524,6 @@ st.subheader("Portfolio Value at Risk")
 st.write("If you hold multiple energy commodities, what is the combined portfolio risk?")
 
 port_returns = common.returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
-if port_returns is not None:
-    port_returns = port_returns.dropna()
 
 if port_returns is not None and len(port_returns.columns) >= 2:
     st.write("**Set Portfolio Weights:**")
@@ -524,68 +533,66 @@ if port_returns is not None and len(port_returns.columns) >= 2:
     w_brent = pw3.number_input("Brent Oil %", min_value=0, max_value=100, value=20, step=5)
     w_carbon = pw4.number_input(f"{CARBON_SHORT} %", min_value=0, max_value=100, value=10, step=5)
 
-    total_weight = w_gas + w_wti + w_brent + w_carbon
+    raw_weights = {k: w for k, w in (('TTF Gas', w_gas), ('WTI Oil', w_wti), ('Brent Oil', w_brent),
+                                     (CARBON_SHORT, w_carbon))
+                   if k in port_returns.columns and w > 0}
+    total_weight = sum(raw_weights.values())
+    port_colors = {'TTF Gas': 'steelblue', 'WTI Oil': 'saddlebrown', 'Brent Oil': 'darkred',
+                   CARBON_SHORT: 'seagreen'}
+
+    # Same window as the headline VaR: the last VAR_WINDOW days on which every commodity
+    # with a non-zero weight has a return. A commodity with weight 0 does not shorten it.
+    available = list(raw_weights)
+    port_data = port_returns[available].dropna().tail(common.VAR_WINDOW) if available else None
 
     if total_weight == 0:
         st.warning("Please set at least one weight above 0%.")
+    elif port_data is None or len(port_data) < 60:
+        st.info("Not enough overlapping data for these commodities to compute Portfolio VaR.")
     else:
-        if total_weight != 100:
-            st.caption(f"Weights sum to {total_weight}% — auto-normalized to 100% for calculation.")
-
-        raw_weights = {}
-        if 'TTF Gas' in port_returns.columns:
-            raw_weights['TTF Gas'] = w_gas
-        if 'WTI Oil' in port_returns.columns:
-            raw_weights['WTI Oil'] = w_wti
-        if 'Brent Oil' in port_returns.columns:
-            raw_weights['Brent Oil'] = w_brent
-        if CARBON_SHORT in port_returns.columns:
-            raw_weights[CARBON_SHORT] = w_carbon
-
-        available = [k for k in raw_weights if k in port_returns.columns]
+        if w_gas + w_wti + w_brent + w_carbon != 100:
+            st.caption(f"Weights sum to {w_gas + w_wti + w_brent + w_carbon}% — "
+                       "auto-normalized to 100% for calculation.")
         w_array = np.array([raw_weights[k] for k in available], dtype=float)
-        if w_array.sum() > 0:
-            w_array = w_array / w_array.sum()  # normalized weights (sum to 1)
+        w_array = w_array / w_array.sum()  # normalized weights (sum to 1)
+        n_port = len(port_data)
 
         # Portfolio returns
-        port_ret = (port_returns[available] * w_array).sum(axis=1)
+        port_ret = (port_data * w_array).sum(axis=1)
 
         # Portfolio metrics
         port_vol = port_ret.rolling(30).std().dropna().iloc[-1] * 100
-        port_var_95 = np.percentile(port_ret.dropna(), 5) * 100
-        port_var_99 = np.percentile(port_ret.dropna(), 1) * 100
+        port_var_95 = np.percentile(port_ret, 5) * 100
+        port_var_99 = np.percentile(port_ret, 1) * 100
 
-        # Individual VaRs
-        individual_vars = {}
-        for col in available:
-            individual_vars[col] = np.percentile(port_returns[col].dropna(), 5) * 100
+        # Individual VaRs on the same days
+        individual_vars = {col: np.percentile(port_data[col], 5) * 100 for col in available}
 
-        # FIX: diversification benefit uses normalized w_array, not raw weights
         undiversified_var = sum(abs(individual_vars[k]) * w_array[i] for i, k in enumerate(available))
         diversification_benefit = undiversified_var - abs(port_var_95)
 
         pv1, pv2, pv3, pv4 = st.columns(4)
-        pv1.metric("Portfolio Volatility", f"{port_vol:.2f}%")
-        pv2.metric("Portfolio VaR 95%", f"{port_var_95:.2f}%")
-        pv3.metric("Portfolio VaR 99%", f"{port_var_99:.2f}%")
+        pv1.metric("Portfolio Volatility", f"{port_vol:.2f}%", help="30-day, daily.")
+        pv2.metric("Portfolio VaR 95%", f"{port_var_95:.2f}%", help=f"Last {n_port} trading days.")
+        pv3.metric("Portfolio VaR 99%", f"{port_var_99:.2f}%", help=f"Last {n_port} trading days.")
         pv4.metric("Diversification Benefit", f"{diversification_benefit:.2f}%",
-                   help="Risk reduction from holding multiple commodities vs single")
+                   help="Weighted sum of standalone VaR 95% minus portfolio VaR 95%, same days.")
 
         fig_pvar, (ax_pd, ax_pc) = plt.subplots(1, 2, figsize=(14, 4))
 
-        ax_pd.hist(port_ret.dropna() * 100, bins=60, color='navy', alpha=0.7, edgecolor='white')
+        ax_pd.hist(port_ret * 100, bins=40, color='navy', alpha=0.7, edgecolor='white')
         ax_pd.axvline(x=port_var_95, color='red', linewidth=2, linestyle='--',
                       label=f'95% VaR: {port_var_95:.2f}%')
         ax_pd.axvline(x=port_var_99, color='darkred', linewidth=2, linestyle=':',
                       label=f'99% VaR: {port_var_99:.2f}%')
         ax_pd.set_xlabel('Daily Portfolio Returns (%)')
         ax_pd.set_ylabel('Frequency')
-        ax_pd.set_title('Portfolio Return Distribution')
+        ax_pd.set_title(f'Portfolio Return Distribution (last {n_port} days)')
         ax_pd.legend(fontsize=8)
 
         compare_names = available + ['Portfolio']
         compare_vars = [individual_vars[k] for k in available] + [port_var_95]
-        compare_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)] + ['navy']
+        compare_colors = [port_colors[k] for k in available] + ['navy']
         ax_pc.barh(range(len(compare_names)), [abs(v) for v in compare_vars],
                    color=compare_colors, height=0.5)
         ax_pc.set_yticks(range(len(compare_names)))
@@ -601,16 +608,16 @@ if port_returns is not None and len(port_returns.columns) >= 2:
         pie_col, _ = st.columns([1, 2])
         fig_pie, ax_pie = plt.subplots(figsize=(3, 3))
         pie_labels = [f"{k}\n({w_array[i]*100:.0f}%)" for i, k in enumerate(available)]
-        pie_colors = ['steelblue', 'saddlebrown', 'darkred', 'seagreen'][:len(available)]
-        ax_pie.pie(w_array, labels=pie_labels, colors=pie_colors,
-                  autopct='', startangle=90, textprops={'fontsize': 7})
+        ax_pie.pie(w_array, labels=pie_labels, colors=[port_colors[k] for k in available],
+                   autopct='', startangle=90, textprops={'fontsize': 7})
         ax_pie.set_title('Portfolio Weight Allocation', fontsize=9)
         plt.tight_layout()
         pie_col.pyplot(fig_pie)
 
-        st.caption(f"Portfolio VaR accounts for cross-commodity correlations — "
-                   f"diversification reduces risk by {diversification_benefit:.2f}% compared to "
-                   f"holding each commodity independently. Weights are user-adjustable.")
+        st.caption(f"Historical simulation on the last {n_port} trading days on which every commodity "
+                   f"with a non-zero weight has a price, the same window as the headline VaR. "
+                   f"Diversification reduces VaR 95% by {diversification_benefit:.2f} percentage points "
+                   f"compared with the weighted sum of standalone VaRs. Weights are user-adjustable.")
 else:
     st.info("Not enough multi-commodity data to compute Portfolio VaR.")
 
@@ -663,7 +670,8 @@ else:
         pl1.metric("VaR 95% (1-day)", f"€{book_var95 / 1e6:,.2f}m")
         pl2.metric("VaR 99% (1-day)", f"€{book_var99 / 1e6:,.2f}m")
         pl3.metric("Expected Shortfall 97.5%", f"€{book_es975 / 1e6:,.2f}m",
-                   help="Average loss on the worst 2.5% of days — the Basel FRTB measure.")
+                   help="Average loss on the worst 2.5% of days, 1-day horizon. 97.5% is the confidence level "
+                        "Basel FRTB uses; FRTB also scales by liquidity horizon and a stress period, which this does not.")
         pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
                    help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
         st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span> — "

@@ -131,12 +131,12 @@ def fetch_eex_year(year):
     date_col = next(c for c in df.columns if c.lower() == "date")
     price_col = next(c for c in df.columns if "auction price" in c.lower())
 
-    # Keep general EUA auctions; aviation (EUAA) auctions clear at slightly different prices.
+    # Keep general EUA auctions (contract code T3PA). Aviation allowances (EUAA, code EAA3)
+    # are auctioned separately and clear at different prices, so they are dropped.
     contract_col = next((c for c in df.columns if c.lower() == "contract"), None)
     if contract_col is not None:
         contracts = df[contract_col].astype(str).str.strip().str.upper()
-        if (contracts == "EUA").any():
-            df = df[contracts == "EUA"]
+        df = df[~contracts.str.contains("EAA", regex=False)]
 
     dates = pd.to_datetime(df[date_col], format="mixed", dayfirst=True, errors="coerce")
     prices = pd.to_numeric(df[price_col], errors="coerce")
@@ -144,7 +144,7 @@ def fetch_eex_year(year):
     s = s[s.index.notna()]
     if s.empty:
         raise ValueError("no auction prices parsed")
-    # Several auctions can clear on the same day (EU, Germany, Poland): average them.
+    # Guard in case two general auctions ever clear on the same day: average them.
     return s.groupby(level=0).mean()
 
 

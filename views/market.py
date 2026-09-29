@@ -16,8 +16,8 @@ import requests as req
 import streamlit as st
 
 import common
-from country_data import (COUNTRIES, YEARS, EUROSTAT, ESTIMATE, load_country_data,
-                          dependency_key, mentions_country)
+from country_data import (COUNTRIES, YEARS, load_country_data, dependency_key,
+                          mentions_country)
 
 nltk.download('vader_lexicon', quiet=True)
 from nltk.sentiment.vader import SentimentIntensityAnalyzer  # noqa: E402
@@ -32,20 +32,23 @@ CARBON_TICKER = ctx.carbon["ticker"]
 with st.sidebar.expander("Methodology — Market page"):
     st.markdown("""
     - **Country Risk Scoring**: Illustrative composite index of import dependency,
-      carbon intensity and renewable share across 31 European countries
-      (EU-27 + CH, UK, NO, TR). Import dependency and renewable share come from the
-      Eurostat API (nrg_ind_id, nrg_ind_ren); anything Eurostat does not return, and all
-      carbon intensity figures, are hand-entered estimates and labelled as such. The
-      structural score is scaled by the commodity's latest daily volatility (refreshed hourly).
+      greenhouse-gas intensity of GDP and renewable share for EU-27, NO, CH, UK and TR.
+      All inputs come from the Eurostat API (nrg_ind_id, nrg_ind_ren, env_air_gge,
+      nama_10_gdp); a country missing any input for the year is listed as not scored.
+      The structural score is multiplied by a volatility factor: the commodity's 30-day
+      volatility divided by its average over the selected period (capped between 0.5 and 3),
+      weighted by each country's dependency. Dependency therefore enters twice on purpose:
+      as a structural weakness and as exposure to current volatility.
     - **FinBERT**: Main sentiment model. Transformer fine-tuned on financial
       text (ProsusAI/finbert via HuggingFace). Applied to live headlines.
     - **FinVADER**: Fallback model. VADER enhanced with SentiBigNomics + Henry
       financial lexicons — more accurate than standard VADER for financial text.
     - **30-Day Sentiment Trend**: Daily average sentiment via Google News RSS,
-      scored with FinVADER. Visualised as bar chart with trend line.
-    - **Anomaly Detection**: 5 automated signal checks — volatility z-score,
-      GARCH forecast vs long-run volatility, correlation regime shift, sentiment-volatility divergence,
-      recent tail event (loss > 2× VaR99 in past 252 days).
+      scored with FinVADER. Bar chart with a 30-day average line.
+    - **Anomaly Detection**: 5 automated checks: volatility z-score (spike, or unusual calm
+      below −1.5σ), GARCH 10-day forecast vs the sample average volatility, correlation shift,
+      sentiment-volatility divergence, and tail events (loss beyond 2× VaR99 in the past 252
+      days, otherwise beyond 3× VaR99 in the whole period).
     - **AI Risk Interpretation**: Quantitative signals (vol, VaR, GARCH,
       regime, sentiment, anomalies) fed to Claude Sonnet via Anthropic API.
       Generates a 3-sentence risk assessment. Refreshes every 30 min.
@@ -67,15 +70,14 @@ var_99_full = core['var_99_full']    # full period: the tail check looks back fu
 risk_level = core['risk_level']
 dep_key, dep_label = dependency_key(selected_commodity)
 dep_col = {'gas': 'Gas Dep. (%)', 'oil': 'Oil Dep. (%)', 'total': 'Total Energy Dep. (%)'}[dep_key]
-country_series, country_source = load_country_data()
+country_series, country_complete, country_failed = load_country_data()
 
 garch = common.fit_garch(returns_clean)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
 garch_long_run = garch['long_run_vol'] if garch is not None else None
-# 'garch' = √(ω / (1 − α − β)); 'sample' = sample average 30-day volatility, used when
-# α + β is so close to 1 that the GARCH formula is not meaningful.
-garch_ref_name = ("long-run GARCH volatility" if garch is not None and garch['long_run_source'] == 'garch'
-                  else "sample average 30-day volatility")
+# Reference level: the sample average 30-day volatility (see common.fit_garch for why the
+# GARCH long-run formula is not used).
+garch_ref_name = "sample average 30-day volatility"
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
 
@@ -101,12 +103,18 @@ def finbert_analyze(texts):
         # The router always answers 401 without a token, so don't call it.
         return None, None, False, "no HF_TOKEN set in Secrets"
     headers = {"Authorization": f"Bearer {hf_token}"}
-    no_token = ""
 
     def parse_results(results, n_texts):
         scores, labels = [], []
         if not isinstance(results, list):
             return None, None
+        # The router returns one of three shapes: a list per headline ([[{..}x3], ...]),
+        # one dict per headline ([{..}, ...]), or, for a batch, a single outer list that
+        # holds the top label of every headline ([[{top1}, {top1}, ...]]). Unwrap the last.
+        if (n_texts > 1 and len(results) == 1 and isinstance(results[0], list)
+                and len(results[0]) == n_texts
+                and all(isinstance(x, dict) for x in results[0])):
+            results = results[0]
         for item in results:
             if isinstance(item, list):
                 best = max(item, key=lambda x: x['score'])
@@ -158,7 +166,8 @@ def finbert_analyze(texts):
             sc, lb = parse_results(response.json(), len(texts))
             if sc is not None:
                 return sc, lb, True, ""
-            return None, None, False, f"{no_token}unexpected response format: {error_text(response)}"
+            shape = type(response.json()).__name__
+            return None, None, False, f"unexpected response format ({shape}, {len(texts)} headlines)"
         reason = f"HTTP {response.status_code}: {error_text(response)}"
         if response.status_code == 503:
             try:
@@ -171,7 +180,7 @@ def finbert_analyze(texts):
             time.sleep(5)
             continue
         break
-    return None, None, False, no_token + reason
+    return None, None, False, reason
 
 
 def finvader_score(text):
@@ -238,281 +247,288 @@ commodity_kw_re = _word_pattern(commodity['keywords'])
 # ─── Section 5b: European Country Energy Risk ───
 st.subheader("European Country Energy Risk Exposure")
 st.write("Which European countries are most vulnerable to energy price shocks?")
-st.caption("Coverage: EU-27 + Switzerland, UK, Norway, Turkey · Import dependency and renewable share: "
-           "Eurostat API (nrg_ind_id, nrg_ind_ren) where available · Carbon intensity and any value "
-           "Eurostat does not return: illustrative estimates based on Eurostat, EEA and IEA publications "
-           "(hand-entered, not a live download). Dependency is clipped to 0-100%: net exporters such as "
-           "Norway show 0%. Illustrative index, not an official risk rating.")
+st.caption("All inputs from the Eurostat API, cached for a day: import dependency (nrg_ind_id), renewable "
+           "share (nrg_ind_ren) and greenhouse-gas intensity of GDP (env_air_gge ÷ nama_10_gdp). No value "
+           "is typed in by hand. Dependency is clipped to 0-100%: net exporters such as Norway show 0%. "
+           "Illustrative index, not an official risk rating.")
 
-selected_year = st.slider("Select Year", min_value=2020, max_value=2024, value=2024, step=1)
+selected_year = st.slider("Select Year", min_value=YEARS[0], max_value=YEARS[-1], value=YEARS[-1], step=1)
 
+_scored = [c for c, ok in zip(COUNTRIES, country_complete[selected_year]) if ok]
+_unscored = [c for c, ok in zip(COUNTRIES, country_complete[selected_year]) if not ok]
+_idx = [COUNTRIES.index(c) for c in _scored]
 cr_df = pd.DataFrame({
-    'Country': COUNTRIES,
-    'Gas Dep. (%)': country_series['gas'][selected_year],
-    'Oil Dep. (%)': country_series['oil'][selected_year],
-    'Total Energy Dep. (%)': country_series['total'][selected_year],
-    'Renewable (%)': country_series['ren'][selected_year],
-    'Carbon Int. (tCO2/M€)': country_series['carbon'][selected_year],
-})
-# Where each figure of the selected year came from, per country.
-_src = {k: dict(zip(COUNTRIES, country_source[k][selected_year])) for k in country_source}
-cr_df['Data source'] = [
-    "Eurostat" if (_src[dep_key][c] == EUROSTAT and _src['total'][c] == EUROSTAT
-                   and _src['ren'][c] == EUROSTAT) else "partly estimate"
-    for c in COUNTRIES
-]
+    'Country': _scored,
+    'Gas Dep. (%)': [country_series['gas'][selected_year][i] for i in _idx],
+    'Oil Dep. (%)': [country_series['oil'][selected_year][i] for i in _idx],
+    'Total Energy Dep. (%)': [country_series['total'][selected_year][i] for i in _idx],
+    'Renewable (%)': [country_series['ren'][selected_year][i] for i in _idx],
+    'GHG Int. (tCO2e/M€)': [country_series['carbon'][selected_year][i] for i in _idx],
+}, columns=['Country', 'Gas Dep. (%)', 'Oil Dep. (%)', 'Total Energy Dep. (%)', 'Renewable (%)',
+            'GHG Int. (tCO2e/M€)'])
+if _unscored:
+    st.caption(f"Not scored for {selected_year} (Eurostat has no value for at least one input): "
+               + ", ".join(_unscored) + ".")
+if country_failed:
+    st.warning("Eurostat could not be reached for: " + ", ".join(country_failed)
+               + ". Countries without those inputs are not scored.")
 
 # Eurostat import dependency = net imports / gross available energy. A net exporter has a
 # negative value (Norway's gas was about -2600% in 2024), and stock changes can push an
 # importer slightly above 100%. Both are clipped to 0-100 for display and scoring.
 for _c in ('Gas Dep. (%)', 'Oil Dep. (%)', 'Total Energy Dep. (%)'):
-    cr_df[_c] = cr_df[_c].clip(lower=0, upper=100)
-cr_df['Dep Clipped'] = cr_df[dep_col]
-cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)']
-
-# Structural Score: each variable enters once (no level + rank of the same variable),
-# weights sum to 100%. No subjective "price sensitivity" score: it had no source.
-if commodity['ticker'] == CARBON_TICKER:
-    # Carbon mode: the relevant dependency IS total energy dependency, so it appears once.
-    SCORE_WEIGHTS = [(f"{dep_label}", 0.40), ("Carbon Intensity rank", 0.30),
-                     ("Inverse Renewable share", 0.30)]
-    cr_df['Structural Score'] = (
-        cr_df['Dep Clipped'] * 0.40 +
-        cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.30 +
-        (100 - cr_df['Renewable (%)']) * 0.30
-    ).round(1)
+    cr_df[_c] = cr_df[_c].astype(float).clip(lower=0, upper=100)
+if cr_df.empty:
+    st.warning("No country has complete Eurostat data for this year, so the country index is not shown.")
 else:
-    SCORE_WEIGHTS = [(f"{dep_label}", 0.35), ("Total Energy Dependency", 0.25),
-                     ("Carbon Intensity rank", 0.20), ("Inverse Renewable share", 0.20)]
-    cr_df['Structural Score'] = (
-        cr_df['Dep Clipped'] * 0.35 +
-        cr_df['Total Clipped'] * 0.25 +
-        cr_df['Carbon Int. (tCO2/M€)'].rank(pct=True) * 100 * 0.20 +
-        (100 - cr_df['Renewable (%)']) * 0.20
-    ).round(1)
+    cr_df['Dep Clipped'] = cr_df[dep_col]
+    cr_df['Total Clipped'] = cr_df['Total Energy Dep. (%)']
 
-vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
-vol_ratio_clamped = min(max(vol_ratio, 0.5), 3.0)
-
-cr_df['Country Vol Multiplier'] = (
-    0.5 + 0.5 * vol_ratio_clamped * (cr_df['Dep Clipped'] / 100)
-).round(2)
-
-cr_df['Risk Score'] = (cr_df['Structural Score'] * cr_df['Country Vol Multiplier']).round(1)
-cr_df = cr_df.sort_values('Risk Score', ascending=False)
-
-# One set of thresholds for the ranking table, the detail panel and the bar chart.
-RISK_HIGH, RISK_MEDIUM = 70, 50
-RISK_LEVEL_COLORS = {'🔴 High': 'red', '🟡 Medium': 'orange', '🟢 Low': 'green'}
-
-
-def risk_category(score):
-    if score > RISK_HIGH:
-        return '🔴 High'
-    elif score > RISK_MEDIUM:
-        return '🟡 Medium'
+    # Structural Score: each variable enters once (no level + rank of the same variable),
+    # weights sum to 100%. No subjective "price sensitivity" score: it had no source.
+    # The dynamic score below multiplies it by a volatility factor weighted by dependency, so in the
+    # final score dependency counts twice on purpose (structural weakness + exposure to volatility).
+    if commodity['ticker'] == CARBON_TICKER:
+        # Carbon mode: the relevant dependency IS total energy dependency, so it appears once.
+        SCORE_WEIGHTS = [(f"{dep_label}", 0.40), ("GHG intensity rank", 0.30),
+                         ("Inverse Renewable share", 0.30)]
+        cr_df['Structural Score'] = (
+            cr_df['Dep Clipped'] * 0.40 +
+            cr_df['GHG Int. (tCO2e/M€)'].rank(pct=True) * 100 * 0.30 +
+            (100 - cr_df['Renewable (%)']) * 0.30
+        ).round(1)
     else:
-        return '🟢 Low'
+        SCORE_WEIGHTS = [(f"{dep_label}", 0.35), ("Total Energy Dependency", 0.25),
+                         ("GHG intensity rank", 0.20), ("Inverse Renewable share", 0.20)]
+        cr_df['Structural Score'] = (
+            cr_df['Dep Clipped'] * 0.35 +
+            cr_df['Total Clipped'] * 0.25 +
+            cr_df['GHG Int. (tCO2e/M€)'].rank(pct=True) * 100 * 0.20 +
+            (100 - cr_df['Renewable (%)']) * 0.20
+        ).round(1)
 
-cr_df['Risk Level'] = cr_df['Risk Score'].apply(risk_category)
+    vol_ratio = latest_vol / avg_vol if avg_vol > 0 else 1.0
+    vol_ratio_clamped = min(max(vol_ratio, 0.5), 3.0)
 
-st.markdown(f"**Volatility adjustment (latest daily close, refreshed hourly):** Current {selected_commodity} volatility is **{latest_vol:.1f}%** "
-            f"vs average **{avg_vol:.1f}%** → base volatility ratio = **{vol_ratio_clamped:.2f}x**")
-st.caption("Each country's multiplier is weighted by its own dependency — high-dependency countries "
-           "feel the same market volatility much more than low-dependency ones.")
+    cr_df['Country Vol Multiplier'] = (
+        0.5 + 0.5 * vol_ratio_clamped * (cr_df['Dep Clipped'] / 100)
+    ).round(2)
 
-cr_col1, cr_col2 = st.columns([2, 1])
+    cr_df['Risk Score'] = (cr_df['Structural Score'] * cr_df['Country Vol Multiplier']).round(1)
+    cr_df = cr_df.sort_values('Risk Score', ascending=False)
 
-with cr_col1:
-    st.write(f"**Risk Ranking ({selected_year}) — by {dep_label}:**")
-    display_cols = ['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
-                    'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
-                    'Renewable (%)', 'Data source']
-    seen = set()
-    display_cols = [c for c in display_cols if not (c in seen or seen.add(c))]
-    display_df = cr_df[display_cols].reset_index(drop=True)
-    display_df.index = display_df.index + 1
-    # Tall enough to show every country without scrolling (35 px per row plus the header).
-    st.dataframe(display_df, width="stretch", height=(len(display_df) + 1) * 35 + 3)
+    # One set of thresholds for the ranking table, the detail panel and the bar chart.
+    RISK_HIGH, RISK_MEDIUM = 70, 50
+    RISK_LEVEL_COLORS = {'🔴 High': 'red', '🟡 Medium': 'orange', '🟢 Low': 'green'}
 
-with cr_col2:
-    selected_country = st.selectbox("Select Country for Detail", cr_df['Country'].tolist())
-    country_data = cr_df[cr_df['Country'] == selected_country].iloc[0]
 
-    country_dep_val = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
-    country_exposure_idx = latest_vol * country_dep_val
-
-    # Same score and thresholds as the Risk Level column of the ranking table.
-    c_risk_level = country_data['Risk Level']
-    c_risk_color = RISK_LEVEL_COLORS[c_risk_level]
-
-    st.markdown(f"### {selected_country} ({selected_year})")
-    st.markdown(f"<h3 style='color:{c_risk_color}; margin-top:0'>{c_risk_level.upper()} RISK</h3>",
-                unsafe_allow_html=True)
-    st.metric("Dynamic Risk Score", f"{country_data['Risk Score']:.1f}")
-    st.caption(f"High above {RISK_HIGH}, Medium above {RISK_MEDIUM}, the same thresholds as the ranking table.")
-
-    # A two-column table wraps inside the narrow panel, where side-by-side metrics overlap.
-    detail_rows = [
-        ("Structural Score", f"{country_data['Structural Score']:.1f}"),
-        ("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x"),
-        (f"{dep_label} ({_src[dep_key][selected_country]})", f"{country_data[dep_col]:.0f}%"),
-        (f"Total Energy Dep. ({_src['total'][selected_country]})",
-         f"{country_data['Total Energy Dep. (%)']:.0f}%"),
-        (f"Carbon Intensity ({ESTIMATE})", f"{country_data['Carbon Int. (tCO2/M€)']:.0f} tCO2/M€"),
-        (f"Renewable Share ({_src['ren'][selected_country]})", f"{country_data['Renewable (%)']:.0f}%"),
-        ("Exposure-weighted volatility index (illustrative)", f"{country_exposure_idx:.2f}"),
-    ]
-    st.markdown("| Indicator | Value |\n|---|---:|\n"
-                + "\n".join(f"| {k} | {v} |" for k, v in detail_rows))
-
-# Bar chart
-fig_cr, ax_cr = plt.subplots(figsize=(14, 6))
-top_n = cr_df.head(20)
-bar_colors_cr = [RISK_LEVEL_COLORS[risk_category(s)] for s in top_n['Risk Score']]
-ax_cr.barh(range(len(top_n)), top_n['Risk Score'], color=bar_colors_cr, height=0.6)
-ax_cr.set_yticks(range(len(top_n)))
-ax_cr.set_yticklabels(top_n['Country'], fontsize=9)
-ax_cr.set_xlabel('Composite Energy Risk Score')
-ax_cr.set_title(f'European Countries — Energy Risk Ranking ({selected_year}, by {dep_label})')
-ax_cr.axvline(x=RISK_HIGH, color='red', linewidth=1, linestyle='--', alpha=0.4, label='High risk')
-ax_cr.axvline(x=RISK_MEDIUM, color='orange', linewidth=1, linestyle='--', alpha=0.4, label='Medium risk')
-ax_cr.legend(fontsize=8)
-ax_cr.invert_yaxis()
-plt.tight_layout()
-st.pyplot(fig_cr)
-
-# Year-over-year trend for selected country
-st.write(f"**{selected_country} — Risk Trend 2020–2024:**")
-trend_data = []
-for yr in YEARS:
-    idx = COUNTRIES.index(selected_country)
-    dep_val = min(max(country_series[dep_key][yr][idx], 0), 100)
-    trend_data.append({
-        'Year': yr,
-        dep_label + ' (%)': dep_val,
-        'Renewable (%)': country_series['ren'][yr][idx],
-        'Carbon Intensity': country_series['carbon'][yr][idx],
-    })
-trend_cr = pd.DataFrame(trend_data)
-
-fig_tcr, (ax_t1, ax_t2) = plt.subplots(1, 2, figsize=(14, 3.5))
-ax_t1.plot(trend_cr['Year'], trend_cr[dep_label + ' (%)'], 'o-', color='red', label=dep_label)
-ax_t1.plot(trend_cr['Year'], trend_cr['Renewable (%)'], 's-', color='green', label='Renewable Share')
-ax_t1.set_ylabel('Percentage (%)')
-ax_t1.set_title(f'{selected_country} — Dependency vs Renewables')
-ax_t1.legend(fontsize=8)
-ax_t1.set_xticks([2020, 2021, 2022, 2023, 2024])
-
-ax_t2.bar(trend_cr['Year'], trend_cr['Carbon Intensity'], color='gray', alpha=0.7)
-ax_t2.set_ylabel('tCO2/M€ GDP')
-ax_t2.set_title(f'{selected_country} — Carbon Intensity (hand-entered estimate)')
-ax_t2.set_xticks([2020, 2021, 2022, 2023, 2024])
-
-plt.tight_layout()
-st.pyplot(fig_tcr)
-
-# Per-country exposure-weighted volatility index (illustrative, not a VaR or a volatility forecast)
-st.write(f"**{selected_country} — Exposure-Weighted Volatility Index (illustrative):**")
-country_dep_pct = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
-country_vol = df_analysis['Volatility'].dropna() * country_dep_pct
-
-fig_cvol, ax_cvol = plt.subplots(figsize=(14, 3.5))
-ax_cvol.plot(df_analysis['Volatility'].dropna().index, df_analysis['Volatility'].dropna(),
-             color='gray', linewidth=0.8, alpha=0.4, label=f'{selected_commodity} raw volatility')
-ax_cvol.plot(country_vol.index, country_vol,
-             color='red', linewidth=1.5, label=f'{selected_country} index ({country_data[dep_col]:.0f}% dep.)')
-ax_cvol.set_ylabel('Index (volatility % × dependency share)')
-ax_cvol.set_title(f'{selected_country} — Exposure-Weighted Volatility Index (illustrative)')
-ax_cvol.legend(fontsize=8)
-ax_cvol.fill_between(country_vol.index, country_vol, 0, alpha=0.1, color='red')
-plt.tight_layout()
-st.pyplot(fig_cvol)
-st.caption(f"Index = {selected_commodity} 30-day rolling volatility × {selected_country}'s "
-           f"{dep_label.lower()} ({country_data[dep_col]:.0f}%). Current: {country_vol.iloc[-1]:.2f}. "
-           "An illustrative exposure indicator: import dependency does not change the price "
-           "volatility itself, so this is not a VaR or a volatility estimate for the country.")
-
-# Per-country news sentiment
-# FIX: now uses FinBERT → FinVADER → VADER fallback chain (consistent with main sentiment section)
-st.write(f"**{selected_country} — Current Energy News Sentiment:**")
-_country_q = quote_plus(f"{selected_country} energy {commodity['rss_query'].split('+')[0]}")
-country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:7d&hl=en"
-country_headlines = []
-try:
-    country_feed = feedparser.parse(country_rss_url)
-    _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
-                                                        'fuel', 'electricity', 'pipeline', 'LNG',
-                                                        'emission', 'climate', 'price', 'supply',
-                                                        'tanker', 'refinery', 'fossil', 'renewable',
-                                                        'heating', 'Hormuz', 'sanction', 'ETS'])
-    for entry in country_feed.entries[:50]:
-        title = entry.title
-        # Google News appends " - Publisher"; match on the headline only, so an outlet
-        # name such as "Irish Times" does not count as a mention of the country.
-        headline = headline_text(title, entry.get('source', {}).get('title', ''))
-        energy_match = bool(_energy_re.search(headline))
-        if energy_match and mentions_country(headline, selected_country):
-            country_headlines.append(title)
-        if len(country_headlines) >= 5:
-            break
-except Exception:
-    pass
-
-if country_headlines:
-    # FinBERT → FinVADER → VADER
-    try:
-        c_scores_raw, c_labels_raw, c_ok, _ = finbert_analyze(tuple(country_headlines[:5]))
-        if c_ok:
-            country_scores = c_scores_raw
-            c_model = "FinBERT"
+    def risk_category(score):
+        if score > RISK_HIGH:
+            return '🔴 High'
+        elif score > RISK_MEDIUM:
+            return '🟡 Medium'
         else:
-            raise Exception("FinBERT unavailable")
+            return '🟢 Low'
+
+    cr_df['Risk Level'] = cr_df['Risk Score'].apply(risk_category)
+
+    st.markdown(f"**Volatility factor:** Current {selected_commodity} 30-day volatility is **{latest_vol:.1f}%** "
+                f"vs its average over the selected period **{avg_vol:.1f}%** → ratio = **{vol_ratio_clamped:.2f}x** "
+                f"(capped between 0.5 and 3)")
+    st.caption("Each country's multiplier is weighted by its own dependency: high-dependency countries "
+               "feel the same market volatility more. Dependency is therefore counted twice in the dynamic "
+               "score on purpose, once as a structural weakness and once as exposure to current volatility.")
+
+    cr_col1, cr_col2 = st.columns([2, 1])
+
+    with cr_col1:
+        st.write(f"**Risk Ranking ({selected_year}) — by {dep_label}:**")
+        display_cols = ['Country', 'Risk Score', 'Country Vol Multiplier', 'Risk Level', dep_col,
+                        'Total Energy Dep. (%)', 'GHG Int. (tCO2e/M€)',
+                        'Renewable (%)']
+        seen = set()
+        display_cols = [c for c in display_cols if not (c in seen or seen.add(c))]
+        display_df = cr_df[display_cols].reset_index(drop=True)
+        display_df.index = display_df.index + 1
+        # Tall enough to show every country without scrolling (35 px per row plus the header).
+        st.dataframe(display_df, width="stretch", height=(len(display_df) + 1) * 35 + 3)
+
+    with cr_col2:
+        selected_country = st.selectbox("Select Country for Detail", cr_df['Country'].tolist())
+        country_data = cr_df[cr_df['Country'] == selected_country].iloc[0]
+
+        country_dep_val = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
+        country_exposure_idx = latest_vol * country_dep_val
+
+        # Same score and thresholds as the Risk Level column of the ranking table.
+        c_risk_level = country_data['Risk Level']
+        c_risk_color = RISK_LEVEL_COLORS[c_risk_level]
+
+        st.markdown(f"### {selected_country} ({selected_year})")
+        st.markdown(f"<h3 style='color:{c_risk_color}; margin-top:0'>{c_risk_level.upper()} RISK</h3>",
+                    unsafe_allow_html=True)
+        st.metric("Dynamic Risk Score", f"{country_data['Risk Score']:.1f}")
+        st.caption(f"High above {RISK_HIGH}, Medium above {RISK_MEDIUM}, the same thresholds as the ranking table.")
+
+        # A two-column table wraps inside the narrow panel, where side-by-side metrics overlap.
+        detail_rows = [
+            ("Structural Score", f"{country_data['Structural Score']:.1f}"),
+            ("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x"),
+            (dep_label, f"{country_data[dep_col]:.0f}%"),
+            ("Total Energy Dep.", f"{country_data['Total Energy Dep. (%)']:.0f}%"),
+            ("GHG intensity", f"{country_data['GHG Int. (tCO2e/M€)']:.0f} tCO2e/M€"),
+            ("Renewable Share", f"{country_data['Renewable (%)']:.0f}%"),
+            ("Exposure-weighted volatility index (illustrative)", f"{country_exposure_idx:.2f}"),
+        ]
+        st.markdown("| Indicator | Value |\n|---|---:|\n"
+                    + "\n".join(f"| {k} | {v} |" for k, v in detail_rows))
+
+    # Bar chart
+    fig_cr, ax_cr = plt.subplots(figsize=(14, 6))
+    top_n = cr_df.head(20)
+    bar_colors_cr = [RISK_LEVEL_COLORS[risk_category(s)] for s in top_n['Risk Score']]
+    ax_cr.barh(range(len(top_n)), top_n['Risk Score'], color=bar_colors_cr, height=0.6)
+    ax_cr.set_yticks(range(len(top_n)))
+    ax_cr.set_yticklabels(top_n['Country'], fontsize=9)
+    ax_cr.set_xlabel('Composite Energy Risk Score')
+    ax_cr.set_title(f'European Countries — Energy Risk Ranking ({selected_year}, by {dep_label})')
+    ax_cr.axvline(x=RISK_HIGH, color='red', linewidth=1, linestyle='--', alpha=0.4, label='High risk')
+    ax_cr.axvline(x=RISK_MEDIUM, color='orange', linewidth=1, linestyle='--', alpha=0.4, label='Medium risk')
+    ax_cr.legend(fontsize=8)
+    ax_cr.invert_yaxis()
+    plt.tight_layout()
+    st.pyplot(fig_cr)
+
+    # Year-over-year trend for selected country
+    st.write(f"**{selected_country} — Risk Trend 2020–2024:**")
+    trend_data = []
+    for yr in YEARS:
+        idx = COUNTRIES.index(selected_country)
+        _d = country_series[dep_key][yr][idx]
+        dep_val = None if _d is None else min(max(_d, 0), 100)
+        trend_data.append({
+            'Year': yr,
+            dep_label + ' (%)': dep_val,
+            'Renewable (%)': country_series['ren'][yr][idx],
+            'GHG Intensity': country_series['carbon'][yr][idx],
+        })
+    trend_cr = pd.DataFrame(trend_data).astype(float)
+
+    fig_tcr, (ax_t1, ax_t2) = plt.subplots(1, 2, figsize=(14, 3.5))
+    ax_t1.plot(trend_cr['Year'], trend_cr[dep_label + ' (%)'], 'o-', color='red', label=dep_label)
+    ax_t1.plot(trend_cr['Year'], trend_cr['Renewable (%)'], 's-', color='green', label='Renewable Share')
+    ax_t1.set_ylabel('Percentage (%)')
+    ax_t1.set_title(f'{selected_country} — Dependency vs Renewables')
+    ax_t1.legend(fontsize=8)
+    ax_t1.set_xticks([2020, 2021, 2022, 2023, 2024])
+
+    ax_t2.bar(trend_cr['Year'], trend_cr['GHG Intensity'], color='gray', alpha=0.7)
+    ax_t2.set_ylabel('tCO2e per M€ GDP')
+    ax_t2.set_title(f'{selected_country} — Greenhouse-Gas Intensity of GDP (Eurostat)')
+    ax_t2.set_xticks([2020, 2021, 2022, 2023, 2024])
+
+    plt.tight_layout()
+    st.pyplot(fig_tcr)
+
+    # Per-country exposure-weighted volatility index (illustrative, not a VaR or a volatility forecast)
+    st.write(f"**{selected_country} — Exposure-Weighted Volatility Index (illustrative):**")
+    country_dep_pct = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
+    country_vol = df_analysis['Volatility'].dropna() * country_dep_pct
+
+    fig_cvol, ax_cvol = plt.subplots(figsize=(14, 3.5))
+    ax_cvol.plot(df_analysis['Volatility'].dropna().index, df_analysis['Volatility'].dropna(),
+                 color='gray', linewidth=0.8, alpha=0.4, label=f'{selected_commodity} raw volatility')
+    ax_cvol.plot(country_vol.index, country_vol,
+                 color='red', linewidth=1.5, label=f'{selected_country} index ({country_data[dep_col]:.0f}% dep.)')
+    ax_cvol.set_ylabel('Index (volatility % × dependency share)')
+    ax_cvol.set_title(f'{selected_country} — Exposure-Weighted Volatility Index (illustrative)')
+    ax_cvol.legend(fontsize=8)
+    ax_cvol.fill_between(country_vol.index, country_vol, 0, alpha=0.1, color='red')
+    plt.tight_layout()
+    st.pyplot(fig_cvol)
+    st.caption(f"Index = {selected_commodity} 30-day rolling volatility × {selected_country}'s "
+               f"{dep_label.lower()} ({country_data[dep_col]:.0f}%). Current: {country_vol.iloc[-1]:.2f}. "
+               "An illustrative exposure indicator: import dependency does not change the price "
+               "volatility itself, so this is not a VaR or a volatility estimate for the country.")
+
+    # Per-country news sentiment
+    # FIX: now uses FinBERT → FinVADER → VADER fallback chain (consistent with main sentiment section)
+    st.write(f"**{selected_country} — Current Energy News Sentiment:**")
+    _country_q = quote_plus(f"{selected_country} energy {commodity['news_term']}")
+    country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:7d&hl=en"
+    country_headlines = []
+    try:
+        country_feed = feedparser.parse(country_rss_url)
+        _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
+                                                            'fuel', 'electricity', 'pipeline', 'LNG',
+                                                            'emission', 'climate', 'price', 'supply',
+                                                            'tanker', 'refinery', 'fossil', 'renewable',
+                                                            'heating', 'Hormuz', 'sanction', 'ETS'])
+        for entry in country_feed.entries[:50]:
+            title = entry.title
+            # Google News appends " - Publisher"; match on the headline only, so an outlet
+            # name such as "Irish Times" does not count as a mention of the country.
+            headline = headline_text(title, entry.get('source', {}).get('title', ''))
+            energy_match = bool(_energy_re.search(headline))
+            if energy_match and mentions_country(headline, selected_country):
+                country_headlines.append(title)
+            if len(country_headlines) >= 5:
+                break
     except Exception:
+        pass
+
+    if country_headlines:
+        # FinBERT → FinVADER → VADER
         try:
-            from finvader import finvader as _fv
-            country_scores = [
-                float(_fv(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
-                for h in country_headlines
-            ]
-            c_model = "FinVADER"
+            c_scores_raw, c_labels_raw, c_ok, _ = finbert_analyze(tuple(country_headlines[:5]))
+            if c_ok:
+                country_scores = c_scores_raw
+                c_model = "FinBERT"
+            else:
+                raise Exception("FinBERT unavailable")
         except Exception:
-            sia_country = SentimentIntensityAnalyzer()
-            country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
-            c_model = "VADER"
+            try:
+                from finvader import finvader as _fv
+                country_scores = [
+                    float(_fv(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
+                    for h in country_headlines
+                ]
+                c_model = "FinVADER"
+            except Exception:
+                sia_country = SentimentIntensityAnalyzer()
+                country_scores = [sia_country.polarity_scores(h)['compound'] for h in country_headlines]
+                c_model = "VADER"
 
-    country_avg = np.mean(country_scores)
-    if country_avg > 0.05:
-        c_sent_label = "Positive"; c_sent_color = "green"
-    elif country_avg < -0.05:
-        c_sent_label = "Negative"; c_sent_color = "red"
+        country_avg = np.mean(country_scores)
+        if country_avg > 0.05:
+            c_sent_label = "Positive"; c_sent_color = "green"
+        elif country_avg < -0.05:
+            c_sent_label = "Negative"; c_sent_color = "red"
+        else:
+            c_sent_label = "Neutral"; c_sent_color = "orange"
+
+        st.markdown(
+            f"<span style='color:{c_sent_color}; font-weight:bold'>"
+            f"{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} headlines · {c_model}",
+            unsafe_allow_html=True
+        )
+        for i, h in enumerate(country_headlines):
+            sc = country_scores[i]
+            icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
+            st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
     else:
-        c_sent_label = "Neutral"; c_sent_color = "orange"
+        st.info(f"No energy headline from the last 7 days mentions {selected_country} by name or adjective.")
 
-    st.markdown(
-        f"<span style='color:{c_sent_color}; font-weight:bold'>"
-        f"{c_sent_label} ({country_avg:+.3f})</span> based on {len(country_headlines)} headlines · {c_model}",
-        unsafe_allow_html=True
+    # Must match the weights used for 'Structural Score' above, which differ in Carbon mode.
+    score_formula = " + ".join(f"{name} ({w:.0%})" for name, w in SCORE_WEIGHTS)
+    st.caption(
+        f"Structural Score = {score_formula}. "
+        f"Dynamic Risk = Structural × volatility multiplier, where the multiplier is weighted by dependency, "
+        f"so dependency counts twice in the dynamic score on purpose. "
+        f"Import dependency: Eurostat nrg_ind_id (natural gas G3000, oil O4000XBIO, total). "
+        f"Renewable share: Eurostat nrg_ind_ren (REN). GHG intensity: Eurostat env_air_gge (total "
+        f"excluding LULUCF) divided by nama_10_gdp (GDP at current prices)."
     )
-    for i, h in enumerate(country_headlines):
-        sc = country_scores[i]
-        icon = "🟢" if sc > 0.05 else "🔴" if sc < -0.05 else "🟡"
-        st.markdown(f"{icon} **[{sc:+.3f}]** {h}")
-else:
-    st.info(f"No energy headline from the last 7 days mentions {selected_country} by name or adjective.")
-
-# Must match the weights used for 'Structural Score' above, which differ in Carbon mode.
-score_formula = " + ".join(f"{name} ({w:.0%})" for name, w in SCORE_WEIGHTS)
-_n_est = sum(v == ESTIMATE for k in ('gas', 'oil', 'total', 'ren') for v in country_source[k][selected_year])
-st.caption(
-    f"Structural Score = {score_formula}. "
-    f"Dynamic Risk = Structural × country volatility multiplier (weighted by dependency). "
-    f"Import dependency: Eurostat nrg_ind_id (natural gas G3000, oil O4000XBIO, total). "
-    f"Renewable share: Eurostat nrg_ind_ren (REN). Carbon intensity: illustrative estimates based on "
-    f"Eurostat, EEA and IEA publications (hand-entered, not a live download). "
-    f"{_n_est} Eurostat values for {selected_year} were unavailable and fall back to hand-entered estimates "
-    f"(see the Data source column)."
-)
 
 st.write("Sentiment analysis of the latest headlines — FinBERT transformer with FinVADER lexicon fallback "
          "(the model actually used is stated below the chart)")
@@ -562,157 +578,153 @@ for source_name, url in rss_feeds.items():
         except Exception:
             continue
 
-is_live = True
-if not headlines:
-    is_live = False
-    headlines = [
-        "European gas prices surge amid supply concerns",
-        "EU carbon market faces regulatory uncertainty",
-        "Energy crisis pushes European inflation higher",
-        "Renewable energy investment hits record in Europe",
-        "Oil prices rise on Middle East tensions",
-    ]
-    headline_links = [''] * len(headlines)
-    headline_sources = ['Sample'] * len(headlines)
+# No placeholder headlines: if every feed fails, no sentiment is computed at all.
+is_live = bool(headlines)
 
 # Limit to 10 headlines
 headlines = headlines[:10]
 headline_links = headline_links[:10]
 headline_sources = headline_sources[:10]
 
-# FinBERT → FinVADER → VADER
-finbert_scores, finbert_labels, finbert_success, finbert_reason = finbert_analyze(tuple(headlines))
-
-if finbert_success:
-    n = min(len(finbert_scores), len(headlines))
-    nlp_model_name = "FinBERT (ProsusAI/finbert)"
-    sentiment_data = []
-    for i in range(n):
-        sentiment_data.append({
-            'Headline': headlines[i],
-            'Source': headline_sources[i],
-            'Link': headline_links[i],
-            'Score': finbert_scores[i],
-            'Label': finbert_labels[i],
-        })
+if not is_live:
+    finbert_success, finbert_reason = False, "no headlines"
+    nlp_model_name = "none"
+    sent_df = pd.DataFrame(columns=['Headline', 'Source', 'Link', 'Score', 'Label'])
+    avg_score = None
+    st.info("No relevant headline could be retrieved from the news feeds right now, so no sentiment "
+            "is shown. The page does not score placeholder text.")
 else:
-    # FIX: FinVADER fallback (consistent with README and country sentiment)
-    try:
-        from finvader import finvader as _fv_main
-        nlp_model_name = "FinVADER (fallback — FinBERT unavailable)"
+
+    # FinBERT → FinVADER → VADER
+    finbert_scores, finbert_labels, finbert_success, finbert_reason = finbert_analyze(tuple(headlines))
+
+    if finbert_success:
+        n = min(len(finbert_scores), len(headlines))
+        nlp_model_name = "FinBERT (ProsusAI/finbert)"
         sentiment_data = []
-        for i, h in enumerate(headlines):
-            score = float(_fv_main(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
-            if score > 0.05:
-                label = 'Positive'
-            elif score < -0.05:
-                label = 'Negative'
-            else:
-                label = 'Neutral'
+        for i in range(n):
             sentiment_data.append({
-                'Headline': h,
+                'Headline': headlines[i],
                 'Source': headline_sources[i],
                 'Link': headline_links[i],
-                'Score': score,
-                'Label': label,
+                'Score': finbert_scores[i],
+                'Label': finbert_labels[i],
             })
-    except Exception:
-        nlp_model_name = "VADER (fallback)"
-        sia = SentimentIntensityAnalyzer()
-        sentiment_data = []
-        for i, h in enumerate(headlines):
-            sc = sia.polarity_scores(h)
-            score = sc['compound']
-            if score > 0.05:
-                label = 'Positive'
-            elif score < -0.05:
-                label = 'Negative'
-            else:
-                label = 'Neutral'
-            sentiment_data.append({
-                'Headline': h,
-                'Source': headline_sources[i],
-                'Link': headline_links[i],
-                'Score': score,
-                'Label': label,
-            })
+    else:
+        # FIX: FinVADER fallback (consistent with README and country sentiment)
+        try:
+            from finvader import finvader as _fv_main
+            nlp_model_name = "FinVADER (fallback — FinBERT unavailable)"
+            sentiment_data = []
+            for i, h in enumerate(headlines):
+                score = float(_fv_main(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
+                if score > 0.05:
+                    label = 'Positive'
+                elif score < -0.05:
+                    label = 'Negative'
+                else:
+                    label = 'Neutral'
+                sentiment_data.append({
+                    'Headline': h,
+                    'Source': headline_sources[i],
+                    'Link': headline_links[i],
+                    'Score': score,
+                    'Label': label,
+                })
+        except Exception:
+            nlp_model_name = "VADER (fallback)"
+            sia = SentimentIntensityAnalyzer()
+            sentiment_data = []
+            for i, h in enumerate(headlines):
+                sc = sia.polarity_scores(h)
+                score = sc['compound']
+                if score > 0.05:
+                    label = 'Positive'
+                elif score < -0.05:
+                    label = 'Negative'
+                else:
+                    label = 'Neutral'
+                sentiment_data.append({
+                    'Headline': h,
+                    'Source': headline_sources[i],
+                    'Link': headline_links[i],
+                    'Score': score,
+                    'Label': label,
+                })
 
-sent_df = pd.DataFrame(sentiment_data)
-avg_score = sent_df['Score'].mean()
-n_pos = (sent_df['Label'] == 'Positive').sum()
-n_neg = (sent_df['Label'] == 'Negative').sum()
-n_neut = (sent_df['Label'] == 'Neutral').sum()
+    sent_df = pd.DataFrame(sentiment_data)
+    avg_score = sent_df['Score'].mean()
+    n_pos = (sent_df['Label'] == 'Positive').sum()
+    n_neg = (sent_df['Label'] == 'Negative').sum()
+    n_neut = (sent_df['Label'] == 'Neutral').sum()
 
-if avg_score > 0.05:
-    sentiment_label = "Positive"
-    sentiment_color = "green"
-elif avg_score < -0.05:
-    sentiment_label = "Negative"
-    sentiment_color = "red"
-else:
-    sentiment_label = "Neutral"
-    sentiment_color = "orange"
+    if avg_score > 0.05:
+        sentiment_label = "Positive"
+        sentiment_color = "green"
+    elif avg_score < -0.05:
+        sentiment_label = "Negative"
+        sentiment_color = "red"
+    else:
+        sentiment_label = "Neutral"
+        sentiment_color = "orange"
 
-st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
-            unsafe_allow_html=True)
-st.caption("The score measures the tone of the headlines (positive or negative wording), not whether "
-           "the news is bullish or bearish for prices: \"gas prices surge\" can score negative although "
-           "it describes a price rise.")
+    st.markdown(f"<h3 style='color:{sentiment_color}'>Market Sentiment: {sentiment_label}</h3>",
+                unsafe_allow_html=True)
+    st.caption("The score measures the tone of the headlines (positive or negative wording), not whether "
+               "the news is bullish or bearish for prices: \"gas prices surge\" can score negative although "
+               "it describes a price rise.")
 
-sc1, sc2, sc3, sc4 = st.columns(4)
-sc1.metric(f"Avg Sentiment ({nlp_model_name.split(' (')[0]})", f"{avg_score:.3f}")
-sc2.metric("Positive", f"{n_pos}")
-sc3.metric("Negative", f"{n_neg}")
-sc4.metric("Neutral", f"{n_neut}")
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric(f"Avg Sentiment ({nlp_model_name.split(' (')[0]})", f"{avg_score:.3f}")
+    sc2.metric("Positive", f"{n_pos}")
+    sc3.metric("Negative", f"{n_neg}")
+    sc4.metric("Neutral", f"{n_neut}")
 
-if is_live:
     st.caption(f"Analyzing {len(sent_df)} live headlines from {len(set(headline_sources))} sources · Model: {nlp_model_name}")
-else:
-    st.caption(f"Live feeds unavailable — showing sample headlines · Model: {nlp_model_name}")
-if not finbert_success:
-    st.caption(f"FinBERT not used: {finbert_reason}")
+    if not finbert_success:
+        st.caption(f"FinBERT not used: {finbert_reason}")
 
-# Sentiment chart
-fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
-bar_colors = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
-              for s in sent_df['Score']]
-ax4.barh(range(len(sent_df)), sent_df['Score'], color=bar_colors, height=0.6)
-ax4.set_yticks(range(len(sent_df)))
-ax4.set_yticklabels([h[:55] + '...' if len(h) > 55 else h for h in sent_df['Headline']],
-                    fontsize=7)
-ax4.axvline(x=0, color='black', linewidth=0.5)
-ax4.axvline(x=0.05, color='green', linewidth=0.5, linestyle='--', alpha=0.4)
-ax4.axvline(x=-0.05, color='red', linewidth=0.5, linestyle='--', alpha=0.4)
-ax4.set_xlabel(f'Sentiment Score ({nlp_model_name.split(" (")[0]})')
-ax4.set_title('Per-Headline Sentiment Distribution')
-ax4.invert_yaxis()
-plt.tight_layout()
-st.pyplot(fig3)
+    # Sentiment chart
+    fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
+    bar_colors = ['green' if s > 0.05 else 'red' if s < -0.05 else 'gray'
+                  for s in sent_df['Score']]
+    ax4.barh(range(len(sent_df)), sent_df['Score'], color=bar_colors, height=0.6)
+    ax4.set_yticks(range(len(sent_df)))
+    ax4.set_yticklabels([h[:55] + '...' if len(h) > 55 else h for h in sent_df['Headline']],
+                        fontsize=7)
+    ax4.axvline(x=0, color='black', linewidth=0.5)
+    ax4.axvline(x=0.05, color='green', linewidth=0.5, linestyle='--', alpha=0.4)
+    ax4.axvline(x=-0.05, color='red', linewidth=0.5, linestyle='--', alpha=0.4)
+    ax4.set_xlabel(f'Sentiment Score ({nlp_model_name.split(" (")[0]})')
+    ax4.set_title('Per-Headline Sentiment Distribution')
+    ax4.invert_yaxis()
+    plt.tight_layout()
+    st.pyplot(fig3)
 
-# Top positive & negative headlines
-top_pos = sent_df[sent_df['Score'] > 0.05].nlargest(3, 'Score')
-top_neg = sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score')
+    # Top positive & negative headlines
+    top_pos = sent_df[sent_df['Score'] > 0.05].nlargest(3, 'Score')
+    top_neg = sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score')
 
-if not top_pos.empty:
-    st.write("**Most Positive Headlines:**")
-    for _, row in top_pos.iterrows():
-        score_str = f"{row['Score']:+.3f}"
-        if row['Link']:
-            st.markdown(f"🟢 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
-        else:
-            st.markdown(f"🟢 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
+    if not top_pos.empty:
+        st.write("**Most Positive Headlines:**")
+        for _, row in top_pos.iterrows():
+            score_str = f"{row['Score']:+.3f}"
+            if row['Link']:
+                st.markdown(f"🟢 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
+            else:
+                st.markdown(f"🟢 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
-if not top_neg.empty:
-    st.write("**Most Negative Headlines:**")
-    for _, row in top_neg.iterrows():
-        score_str = f"{row['Score']:+.3f}"
-        if row['Link']:
-            st.markdown(f"🔴 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
-        else:
-            st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
+    if not top_neg.empty:
+        st.write("**Most Negative Headlines:**")
+        for _, row in top_neg.iterrows():
+            score_str = f"{row['Score']:+.3f}"
+            if row['Link']:
+                st.markdown(f"🔴 **[{score_str}]** [{row['Headline']}]({row['Link']}) — *{row['Source']}*")
+            else:
+                st.markdown(f"🔴 **[{score_str}]** {row['Headline']} — *{row['Source']}*")
 
-if top_pos.empty and top_neg.empty:
-    st.info("All current headlines are neutral — no strong positive or negative signal detected.")
+    if top_pos.empty and top_neg.empty:
+        st.info("All current headlines are neutral — no strong positive or negative signal detected.")
 
 # ─── Section 6b: Sentiment Trend (30-day) ───
 st.subheader("Sentiment Trend (30 Days)")
@@ -720,7 +732,7 @@ st.write(f"Daily average sentiment for {selected_commodity}-related European ene
 
 # FIX: use FinVADER (not basic VADER) for 30-day trend, consistent with fallback strategy
 @st.cache_data(ttl=7200, show_spinner="Fetching 30-day news history...")
-def get_sentiment_trend(rss_query, keywords):
+def get_sentiment_trend(rss_query, news_term, keywords):
     """Fetch past 30 days of news via Google News RSS and compute daily FinVADER sentiment."""
     from datetime import datetime
 
@@ -737,7 +749,7 @@ def get_sentiment_trend(rss_query, keywords):
 
     for trend_url in [
         f"https://news.google.com/rss/search?q={rss_query}+when:30d&hl=en",
-        f"https://news.google.com/rss/search?q=European+energy+{rss_query.split('+')[0]}+when:30d&hl=en",
+        f"https://news.google.com/rss/search?q=European+energy+{news_term}+when:30d&hl=en",
     ]:
         try:
             feed = feedparser.parse(trend_url)
@@ -768,7 +780,7 @@ def get_sentiment_trend(rss_query, keywords):
     trend_df = trend_df.sort_values('Date')
     return trend_df
 
-trend_df = get_sentiment_trend(commodity['rss_query'], tuple(commodity['keywords']))
+trend_df = get_sentiment_trend(commodity['rss_query'], commodity['news_term'], tuple(commodity['keywords']))
 avg_30d = None  # initialized here; set inside conditional below
 
 if trend_df is not None and len(trend_df) > 3:
@@ -805,7 +817,7 @@ else:
 
 # ─── Section 6c: Anomaly Detection ───
 st.subheader("🔍 Anomaly Detection")
-st.write("Automated signal monitoring — flags statistical outliers and structural divergences (latest daily close, refreshed hourly).")
+st.write("Automated signal monitoring — flags statistical outliers and structural divergences (daily prices up to the latest available, refreshed hourly).")
 
 vol_series = df_analysis['Volatility'].dropna()
 vol_std = vol_series.std()
@@ -844,15 +856,15 @@ if vol_std > 0:
         })
 
 # ── 2. GARCH forward signal ──
-# The forecast is compared with the long-run GARCH volatility (the level it reverts to), not
-# with current rolling volatility: a forecast rising from a quiet spell back towards the
-# long-run level is normal mean reversion, not a warning.
+# The forecast is compared with the sample average 30-day volatility, not with current rolling
+# volatility: a forecast rising from a quiet spell back towards the average is normal mean
+# reversion, not a warning.
 if garch_forecast_10d is not None and garch_long_run:
     garch_ratio = garch_forecast_10d / garch_long_run
     if garch_ratio > 1.30:
         anomalies.append({
             'level': '🟡 WARNING',
-            'type': 'GARCH Forecast Above Long-Run Level',
+            'type': 'GARCH Forecast Above Average Level',
             'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.2f}%) is {(garch_ratio-1)*100:.0f}% above '
                        f'the {garch_ref_name} ({garch_long_run:.2f}%). The model expects volatility '
                        f'to stay elevated over the next 10 days.'),
@@ -860,7 +872,7 @@ if garch_forecast_10d is not None and garch_long_run:
     elif garch_ratio < 0.70:
         anomalies.append({
             'level': '🟢 INFO',
-            'type': 'GARCH Forecast Below Long-Run Level',
+            'type': 'GARCH Forecast Below Average Level',
             'detail': (f'GARCH 10-day forecast ({garch_forecast_10d:.2f}%) is {(1-garch_ratio)*100:.0f}% below '
                        f'the {garch_ref_name} ({garch_long_run:.2f}%): quieter than usual.'),
         })
@@ -956,7 +968,11 @@ else:
         unsafe_allow_html=True
     )
 
-st.caption("Thresholds: Volatility z-score > 1.8σ · GARCH 10-day forecast more than 30% above or below the long-run GARCH volatility (or the sample average 30-day volatility when α + β ≥ 0.99) · Correlation shift > 0.25 · Sentiment-regime divergence · Recent tail: any loss in last 252 days > 2× full-period VaR99")
+st.caption("Thresholds: volatility z-score above 2.5σ (critical), above 1.8σ (warning) or below −1.5σ "
+           "(unusual calm) · GARCH 10-day forecast more than 30% above or below the sample average 30-day "
+           "volatility · correlation shift above 0.25 (drift) or 0.4 (regime shift) · sentiment-regime "
+           "divergence · tail: any loss in the last 252 days beyond 2× the full-period VaR99, otherwise "
+           "any loss in the whole period beyond 3× VaR99")
 
 # ─── Section 6d: AI Risk Narrative (LLM) ───
 st.subheader("🤖 AI Risk Interpretation")
@@ -985,7 +1001,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vo
     headline_line = top_neg_str if top_neg_str else "None retrieved"
     sentiment_30d_line = (f"{_avg_30d:+.3f}" if _avg_30d is not None else "N/A")
     sentiment_now_line = (f"{_avg_score:+.3f} ({_score_model})" if _avg_score is not None
-                          else "N/A (live feeds unreachable; placeholder headlines not used)")
+                          else "N/A (news feeds unreachable, no sentiment computed)")
 
     prompt = f"""You are a senior risk analyst on a European energy trading desk, writing the short risk comment on {commodity_name} for the date shown below.
 
@@ -994,12 +1010,12 @@ HOW TO READ THE INPUTS
 Volatility
 - All volatility figures are DAILY standard deviation of returns, in percent. Not annualised.
 - The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
-- The GARCH anomaly flag compares the forecast with a long-run reference level (the long-run GARCH volatility, or the sample average volatility when the GARCH formula is not meaningful), not with current volatility. A forecast moving back towards the long-run level is normalisation, not a build-up of risk, and should be described that way. Also check the forecast against the {regime_calm:.2f}% Volatile boundary.
+- The GARCH anomaly flag compares the forecast with the sample average 30-day volatility, not with current volatility. A forecast moving back towards that average is normalisation, not a build-up of risk, and should be described that way. Also check the forecast against the {regime_calm:.2f}% Volatile boundary.
 
 Risk signal and regime - one classification
 - "Regime" compares current 30-day volatility with FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
 - "Risk signal" is the same classification under another name: Calm = LOW, Volatile = MEDIUM, Crisis = HIGH RISK. Do not present them as two separate pieces of evidence.
-- The long-run average volatility is context only; it does not set the risk signal.
+- The selected-period average volatility is context only; it does not set the risk signal.
 
 VaR
 - VaR 95% is the 5th percentile of daily returns over the last 250 trading days: a loss threshold, given as a negative number.
@@ -1015,7 +1031,7 @@ Anomalies and headlines
 
 MARKET DATA AS OF {date_str}
 - Risk signal: {risk_level_str}
-- 30-day rolling volatility: {_latest_vol:.2f}% (long-run average {_avg_vol:.2f}%)
+- 30-day rolling volatility: {_latest_vol:.2f}% (average over the selected period {_avg_vol:.2f}%)
 - VaR 95%, 1-day (historical, last 250 trading days): {_var_95:.2f}%
 - {garch_line}
 - Regime: {_current_regime}
@@ -1069,10 +1085,7 @@ Output only the 3 sentences."""
 anomaly_types_for_llm = "; ".join([a['type'] for a in anomalies]) if anomalies else ""
 
 if not is_live:
-    top_neg_for_llm = (
-        "FEEDS UNREACHABLE - the headlines behind the sentiment scores are "
-        "hardcoded placeholder text, not real news."
-    )
+    top_neg_for_llm = "none (news feeds unreachable, no sentiment computed)"
 else:
     top_neg_for_llm = "; ".join([
         row['Headline'][:80] for _, row in
@@ -1139,33 +1152,35 @@ st.download_button(
     mime="text/csv"
 )
 
-sent_csv = sent_df.to_csv(index=False)
-st.download_button(
-    label="Download Sentiment Data (CSV)",
-    data=sent_csv,
-    file_name="sentiment_data.csv",
-    mime="text/csv"
-)
+if is_live:
+    sent_csv = sent_df.to_csv(index=False)
+    st.download_button(
+        label="Download Sentiment Data (CSV)",
+        data=sent_csv,
+        file_name="sentiment_data.csv",
+        mime="text/csv"
+    )
 
-export_cols = ['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
-                'Risk Level', dep_col,
-                'Total Energy Dep. (%)', 'Carbon Int. (tCO2/M€)',
-                'Renewable (%)', 'Data source']
-seen_e = set()
-export_cols = [c for c in export_cols if not (c in seen_e or seen_e.add(c))]
-cr_export = cr_df[export_cols].copy()
-rename_map = {'Country': 'Country', 'Risk Score': 'Dynamic Risk Score',
-              'Structural Score': 'Structural Score', 'Country Vol Multiplier': 'Vol Multiplier',
-              'Risk Level': 'Risk Level', dep_col: dep_label,
-              'Total Energy Dep. (%)': 'Total Energy Dependency (%)',
-              'Carbon Int. (tCO2/M€)': 'Carbon Intensity (tCO2/M€ GDP)',
-              'Renewable (%)': 'Renewable Share (%)'}
-cr_export = cr_export.rename(columns=rename_map)
-cr_csv = cr_export.to_csv(index=False)
-st.download_button(
-    label=f"Download Country Risk Data ({selected_year}, CSV)",
-    data=cr_csv,
-    file_name=f"country_risk_{selected_year}.csv",
-    mime="text/csv"
-)
+if not cr_df.empty:
+    export_cols = ['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
+                    'Risk Level', dep_col,
+                    'Total Energy Dep. (%)', 'GHG Int. (tCO2e/M€)',
+                    'Renewable (%)', 'Data source']
+    seen_e = set()
+    export_cols = [c for c in export_cols if not (c in seen_e or seen_e.add(c))]
+    cr_export = cr_df[export_cols].copy()
+    rename_map = {'Country': 'Country', 'Risk Score': 'Dynamic Risk Score',
+                  'Structural Score': 'Structural Score', 'Country Vol Multiplier': 'Vol Multiplier',
+                  'Risk Level': 'Risk Level', dep_col: dep_label,
+                  'Total Energy Dep. (%)': 'Total Energy Dependency (%)',
+                  'GHG Int. (tCO2e/M€)': 'GHG intensity (tCO2e per M€ GDP)',
+                  'Renewable (%)': 'Renewable Share (%)'}
+    cr_export = cr_export.rename(columns=rename_map)
+    cr_csv = cr_export.to_csv(index=False)
+    st.download_button(
+        label=f"Download Country Risk Data ({selected_year}, CSV)",
+        data=cr_csv,
+        file_name=f"country_risk_{selected_year}.csv",
+        mime="text/csv"
+    )
 

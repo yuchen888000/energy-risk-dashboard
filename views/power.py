@@ -216,7 +216,7 @@ else:
     bill_lo, bill_hi = gas_mwh_week * lo, gas_mwh_week * hi
 
     w1, w2, w3 = st.columns(3)
-    w1.metric(f"TTF today ({wait['date']:%d %b %Y})", f"{wait['price_now']:.2f} €/MWh")
+    w1.metric(f"TTF latest ({wait['date']:%d %b %Y})", f"{wait['price_now']:.2f} €/MWh")
     w2.metric(f"TTF in {_WAIT_DAYS} business days — 90% range (€/MWh)", f"{lo:.2f} – {hi:.2f}")
     w3.metric(f"{_WAIT_DAYS}-day volatility", f"{wait['horizon_vol']:.1f}%",
               help="Standard deviation of the simulated 5-day log return.")
