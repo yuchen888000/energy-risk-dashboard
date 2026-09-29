@@ -11,6 +11,7 @@ APP_URL = os.environ.get(
 
 WAKE_BUTTON = "get this app back up"
 DWELL_MS = 120_000
+PAGE_DWELL_MS = 180_000   # the Power page fetches several years of prices on a cold start
 FAILURE_SCREENSHOT = "keepalive-failure.png"
 
 
@@ -46,6 +47,16 @@ def main():
 
         print("Holding the session open to let the app boot...", flush=True)
         page.wait_for_timeout(DWELL_MS)
+
+        # Open the other two pages too, so their data (power prices, EEX auctions,
+        # Eurostat, news) is already cached when a visitor arrives by a direct link.
+        for path in ("power", "market"):
+            try:
+                page.goto(APP_URL.rstrip("/") + "/" + path, wait_until="domcontentloaded", timeout=90_000)
+                print("Opened /" + path + ", waiting for it to load...", flush=True)
+                page.wait_for_timeout(PAGE_DWELL_MS)
+            except PlaywrightTimeout:
+                print("Could not open /" + path + " (not fatal).", flush=True)
 
         print("Done.", flush=True)
         browser.close()
