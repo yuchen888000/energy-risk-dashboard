@@ -337,7 +337,7 @@ def fit_garch(returns_clean):
 
     return dict(
         params={k: float(result.params[k]) for k in ('omega', 'alpha[1]', 'beta[1]')},
-        long_run_vol=sample_avg_vol,         # reference level used in every comparison
+        long_run_vol=sample_avg_vol,         # pages display core['avg_vol'] as the reference
         garch_long_run=garch_long_run,       # √(ω / (1 − α − β)), information only
         garch_long_run_ok=garch_long_run_ok,
         persistence=float(persistence),

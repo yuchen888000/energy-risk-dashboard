@@ -326,9 +326,9 @@ st.caption("Expected Shortfall (ES) 97.5% is the average loss on the days beyond
 if commodity['ticker'].endswith("=F"):
     st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
                "contract rolls to the next month, the series switches contract and that day's return is "
-               "not a real price move (for example on 29 Sep 2026 Brent switched from the November to the "
-               "December contract, which trades about 7 dollars a barrel lower). Roll days are not removed, so they can add to the tails, the VaR and the "
-               "backtest exceptions. Desks use a back-adjusted series built from individual contracts.")
+               "not a real price move: when the next contract trades several dollars below the expiring one, "
+               "the series shows a drop that no contract actually had. Roll days are not removed, so they can "
+               "add to the tails, the VaR and the backtest exceptions. Desks use a back-adjusted series built from individual contracts.")
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
@@ -425,7 +425,7 @@ if garch is not None:
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
         if garch.get('nu') is not None:
             st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} — lower means fatter tails")
-        st.write(f"**Reference level: sample average 30-day volatility = {garch['long_run_vol']:.2f}%** "
+        st.write(f"**Reference level: sample average 30-day volatility = {avg_vol:.2f}%** "
                  "(daily). The anomaly check compares the 10-day forecast with this level.")
         if garch['garch_long_run_ok']:
             st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {garch['garch_long_run']:.2f}% "

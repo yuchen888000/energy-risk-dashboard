@@ -74,7 +74,8 @@ country_series, country_complete, country_failed = load_country_data()
 
 garch = common.fit_garch(returns_clean)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
-garch_long_run = garch['long_run_vol'] if garch is not None else None
+# Same average as the 'Average Volatility' figure on the Risk page (30-day volatility over the selected period).
+garch_long_run = avg_vol if garch is not None else None
 # Reference level: the sample average 30-day volatility (see common.fit_garch for why the
 # GARCH long-run formula is not used).
 garch_ref_name = "sample average 30-day volatility"
@@ -898,7 +899,7 @@ if corr_full_val is not None and corr_30d_val is not None:
         })
 
 # ── 4. Sentiment–volatility divergence ──
-# Placeholder headlines (feeds unreachable) are not news, so they never trigger a signal.
+# When no feed returned a headline there is no current reading, so this check is skipped.
 # The current reading and the 30-day trend may come from different models, so each is
 # only compared with its own threshold, never with the other.
 live_avg_score = avg_score if is_live else None
