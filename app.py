@@ -25,20 +25,6 @@ st.html("""<style>
 carbon = common.resolve_carbon_benchmark()
 commodities = common.build_commodities(carbon)
 
-with st.sidebar:
-    st.title("Settings")
-    st.selectbox("Select Commodity", list(commodities.keys()), key="commodity",
-                 help="Used by the Risk and Market pages. The Power page always shows German power, TTF and EUA.")
-    st.date_input("Start Date", value=common.DEFAULT_START, key="start_date")
-    st.date_input("End Date", value=dt.date.today(), key="end_date")
-    st.caption(f"Carbon benchmark: **{carbon['label']}** — resolved at runtime from a cascade "
-               "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"
-                   "Python · Streamlit · yfinance · arch (GARCH) · FinBERT · FinVADER · "
-                   "Anthropic Claude API · Energy-Charts")
-
 risk_page = st.Page("views/risk.py", title="Risk", icon="📉", url_path="risk")
 power_page = st.Page("views/power.py", title="Power", icon="⚡", url_path="power")
 market_page = st.Page("views/market.py", title="Market", icon="📰", url_path="market")
@@ -54,5 +40,24 @@ pg = st.navigation([
     st.Page(_open_risk, title="Home", default=True, visibility="hidden"),
     risk_page, power_page, market_page,
 ])
+
+# The Power page always uses TTF, EUA and German power, so the selector is greyed out there.
+_on_power = pg.title == "Power"
+
+with st.sidebar:
+    st.title("Settings")
+    st.selectbox("Select Commodity", list(commodities.keys()), key="commodity", disabled=_on_power,
+                 help="Used by the Risk and Market pages. The Power page always shows German power, TTF and EUA.")
+    if _on_power:
+        st.caption("Not used on this page: it always shows German power, TTF and EUA.")
+    st.date_input("Start Date", value=common.DEFAULT_START, key="start_date")
+    st.date_input("End Date", value=dt.date.today(), key="end_date")
+    st.caption(f"Carbon benchmark: **{carbon['label']}** — resolved at runtime from a cascade "
+               "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"
+                   "Python · Streamlit · yfinance · arch (GARCH) · FinBERT · FinVADER · "
+                   "Anthropic Claude API · Energy-Charts")
 
 pg.run()
