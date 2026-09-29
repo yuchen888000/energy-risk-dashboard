@@ -34,7 +34,7 @@ try:
         w(f"- VaR95 {core['var_95']:.2f}%, VaR99 {core['var_99']:.2f}%, ES97.5 {core['es_975']:.2f}% (days {core['var_days']}); full {core['var_95_full']:.2f}/{core['var_99_full']:.2f}/{core['es_975_full']:.2f}")
         g = common.fit_garch(r)
         if g:
-            w(f"- GARCH params {g['params']}, persistence {g['persistence']:.4f}, nu {g['nu']}, long-run {g['long_run_vol']:.2f}% ({g['long_run_source']}), sample avg {g['sample_avg_vol']:.2f}%")
+            w(f"- GARCH params {g['params']}, persistence {g['persistence']:.4f}, nu {g['nu']}, reference {g['long_run_vol']:.2f}%, garch long-run {g['garch_long_run']} ok={g['garch_long_run_ok']}, 10d forecast {g['forecast_10d']:.2f}%")
         else:
             w("- GARCH fit failed")
         bt = common.var_backtest(r, window=core['var_days'], test_days=250)

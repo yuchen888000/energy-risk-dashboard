@@ -1165,7 +1165,7 @@ if not cr_df.empty:
     export_cols = ['Country', 'Risk Score', 'Structural Score', 'Country Vol Multiplier',
                     'Risk Level', dep_col,
                     'Total Energy Dep. (%)', 'GHG Int. (tCO2e/M€)',
-                    'Renewable (%)', 'Data source']
+                    'Renewable (%)']
     seen_e = set()
     export_cols = [c for c in export_cols if not (c in seen_e or seen_e.add(c))]
     cr_export = cr_df[export_cols].copy()

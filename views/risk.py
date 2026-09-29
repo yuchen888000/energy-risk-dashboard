@@ -326,8 +326,8 @@ st.caption("Expected Shortfall (ES) 97.5% is the average loss on the days beyond
 if commodity['ticker'].endswith("=F"):
     st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
                "contract rolls to the next month, the series switches contract and that day's return is "
-               "not a real price move (for example Brent on 29 Sep 2026 showed −8.9% while each contract fell "
-               "about 1.9%). Roll days are not removed, so they can add to the tails, the VaR and the "
+               "not a real price move (for example on 29 Sep 2026 Brent switched from the November to the "
+               "December contract, which trades about 7 dollars a barrel lower). Roll days are not removed, so they can add to the tails, the VaR and the "
                "backtest exceptions. Desks use a back-adjusted series built from individual contracts.")
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
