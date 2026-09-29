@@ -1,11 +1,12 @@
-streamlit
+streamlit>=1.50
 yfinance
 pandas
 numpy
 matplotlib
-scikit-learn
 nltk
 feedparser
 arch
 requests
 finvader
+scipy
+openpyxl
