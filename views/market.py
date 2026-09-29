@@ -972,7 +972,8 @@ st.caption("Thresholds: volatility z-score above 2.5σ (critical), above 1.8σ (
            "(unusual calm) · GARCH 10-day forecast more than 30% above or below the sample average 30-day "
            "volatility · correlation shift above 0.25 (drift) or 0.4 (regime shift) · sentiment-regime "
            "divergence · tail: any loss in the last 252 days beyond 2× the full-period VaR99, otherwise "
-           "any loss in the whole period beyond 3× VaR99")
+           "any loss in the whole period beyond 3× VaR99. For TTF, WTI and Brent the series is the continuous "
+           "front-month future, so a contract roll can trigger a volatility or GARCH signal on its own.")
 
 # ─── Section 6d: AI Risk Narrative (LLM) ───
 st.subheader("🤖 AI Risk Interpretation")
