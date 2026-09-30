@@ -202,6 +202,20 @@ def load_close(ticker, start, end):
     return close.mask(_stale_mask(close))
 
 
+def break_gaps(series, max_gap_days=7):
+    """For line charts: insert a NaN wherever two observations are more than `max_gap_days`
+    apart, so the chart shows the gap (e.g. CARB.L's stale 2020-21 period) instead of a
+    straight line drawn across it. Weekends and single holidays are left joined."""
+    s = series.dropna()
+    if len(s) < 2:
+        return s
+    gaps = s.index.to_series().diff() > pd.Timedelta(days=max_gap_days)
+    if not gaps.any():
+        return s
+    breaks = pd.Series(np.nan, index=s.index[gaps.values] - pd.Timedelta(days=1))
+    return pd.concat([s, breaks]).sort_index()
+
+
 def simple_returns(close):
     """Daily simple returns on the series' own trading days; NaN after a gap or a
     non-positive price (WTI settled negative on 2020-04-20)."""
