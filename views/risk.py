@@ -104,10 +104,13 @@ macro_events = {
 
 st.subheader("Price Trends with Key EU Policy Events")
 fig, ax = plt.subplots(figsize=(14, 5))
-ax.plot(df_analysis.index, df_analysis['Price'], color=commodity['color'],
+# Each series is drawn from its own prices, with gaps (stale periods) left blank.
+_px_line = common.break_gaps(df_analysis['Price'])
+_cmp_line = common.break_gaps(common.load_close(ctx.compare_ticker, start_date, end_date))
+ax.plot(_px_line.index, _px_line, color=commodity['color'],
         label=f'{selected_commodity} ({commodity["unit"]})', linewidth=1.5)
 ax2 = ax.twinx()
-ax2.plot(df_analysis.index, df_analysis['Compare'], color='gray',
+ax2.plot(_cmp_line.index, _cmp_line, color='gray',
          label=compare_label, linewidth=1.2, alpha=0.6)
 
 for date_str, label in macro_events.items():
@@ -235,10 +238,26 @@ else:
 vcol1, vcol2 = st.columns(2)
 with vcol1:
     st.subheader("30-Day Rolling Volatility")
-    st.line_chart(df_analysis['Volatility'].dropna())
+    _vol_line = common.break_gaps(df_analysis['Volatility'])
+    fig_v, ax_v = plt.subplots(figsize=(7, 3.5))
+    ax_v.plot(_vol_line.index, _vol_line, color=commodity['color'], linewidth=1)
+    ax_v.set_ylabel('Daily volatility (%)')
+    ax_v.set_title(f'{selected_commodity}: 30-day rolling volatility')
+    plt.tight_layout()
+    st.pyplot(fig_v)
 with vcol2:
     st.subheader("30-Day Rolling Correlation")
-    st.line_chart(df_analysis['Rolling Correlation'].dropna())
+    _corr_line = common.break_gaps(df_analysis['Rolling Correlation'])
+    fig_c, ax_c = plt.subplots(figsize=(7, 3.5))
+    ax_c.plot(_corr_line.index, _corr_line, color='gray', linewidth=1)
+    ax_c.axhline(0, color='black', linewidth=0.5)
+    ax_c.set_ylim(-1, 1)
+    ax_c.set_ylabel('Correlation of daily returns')
+    ax_c.set_title(f'{selected_commodity} vs {compare_label}: 30-day rolling correlation', fontsize=9)
+    plt.tight_layout()
+    st.pyplot(fig_c)
+st.caption("Gaps in the lines are periods without usable prices (for example the stale carbon quote), "
+           "left blank rather than joined by a straight line.")
 
 
 # ─── Section 3b: Cross-Commodity Correlation Matrix ───
@@ -344,7 +363,7 @@ ax_hist.set_ylabel('Frequency')
 ax_hist.set_title(f'{selected_commodity} Daily Returns — last {var_days} trading days')
 ax_hist.legend(fontsize=8)
 
-rolling_var = returns_clean.rolling(60).quantile(0.05) * 100
+rolling_var = common.break_gaps(returns_clean.rolling(60).quantile(0.05) * 100)
 ax_ts.plot(rolling_var.index, rolling_var, color='red', linewidth=1, alpha=0.8)
 ax_ts.fill_between(rolling_var.index, rolling_var, 0, alpha=0.15, color='red')
 ax_ts.set_ylabel('VaR (95%, daily %)')
@@ -395,7 +414,7 @@ if garch is not None:
 
     fig_garch, (ax_cv, ax_fc) = plt.subplots(1, 2, figsize=(14, 4))
 
-    cond_vol = garch['conditional_volatility']
+    cond_vol = common.break_gaps(garch['conditional_volatility'])
     ax_cv.plot(cond_vol.index, cond_vol, color='purple', linewidth=0.8, alpha=0.8)
     ax_cv.set_ylabel('Conditional Volatility (daily %)')
     ax_cv.set_title('GARCH(1,1) Conditional Volatility')

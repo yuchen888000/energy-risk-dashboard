@@ -376,7 +376,9 @@ else:
             ("Structural Score", f"{country_data['Structural Score']:.1f}"),
             ("Vol Multiplier (live)", f"{country_data['Country Vol Multiplier']:.2f}x"),
             (dep_label, f"{country_data[dep_col]:.0f}%"),
+        ] + ([] if dep_key == 'total' else [
             ("Total Energy Dep.", f"{country_data['Total Energy Dep. (%)']:.0f}%"),
+        ]) + [
             ("GHG intensity", f"{country_data['GHG Int. (tCO2e/M€)']:.0f} tCO2e/M€"),
             ("Renewable Share", f"{country_data['Renewable (%)']:.0f}%"),
             ("Exposure-weighted volatility index (illustrative)", f"{country_exposure_idx:.2f}"),
@@ -434,10 +436,11 @@ else:
     # Per-country exposure-weighted volatility index (illustrative, not a VaR or a volatility forecast)
     st.write(f"**{selected_country} — Exposure-Weighted Volatility Index (illustrative):**")
     country_dep_pct = country_data[dep_col] / 100 if country_data[dep_col] > 0 else 0
-    country_vol = df_analysis['Volatility'].dropna() * country_dep_pct
+    _raw_vol_line = common.break_gaps(df_analysis['Volatility'])
+    country_vol = _raw_vol_line * country_dep_pct
 
     fig_cvol, ax_cvol = plt.subplots(figsize=(14, 3.5))
-    ax_cvol.plot(df_analysis['Volatility'].dropna().index, df_analysis['Volatility'].dropna(),
+    ax_cvol.plot(_raw_vol_line.index, _raw_vol_line,
                  color='gray', linewidth=0.8, alpha=0.4, label=f'{selected_commodity} raw volatility')
     ax_cvol.plot(country_vol.index, country_vol,
                  color='red', linewidth=1.5, label=f'{selected_country} index ({country_data[dep_col]:.0f}% dep.)')
@@ -448,7 +451,7 @@ else:
     plt.tight_layout()
     st.pyplot(fig_cvol)
     st.caption(f"Index = {selected_commodity} 30-day rolling volatility × {selected_country}'s "
-               f"{dep_label.lower()} ({country_data[dep_col]:.0f}%). Current: {country_vol.iloc[-1]:.2f}. "
+               f"{dep_label.lower()} ({country_data[dep_col]:.0f}%). Current: {country_vol.dropna().iloc[-1]:.2f}. "
                "An illustrative exposure indicator: import dependency does not change the price "
                "volatility itself, so this is not a VaR or a volatility estimate for the country.")
 
@@ -823,11 +826,12 @@ st.write("Automated signal monitoring — flags statistical outliers and structu
 vol_series = df_analysis['Volatility'].dropna()
 vol_std = vol_series.std()
 
-# Correlation values for the selected commodity vs comparison
-# Use the rolling corr series: full period mean vs last 30 days mean
-corr_series = df_analysis['Rolling Correlation'].dropna()
-corr_full_val = corr_series.mean() if len(corr_series) > 0 else None
-corr_30d_val = corr_series.tail(30).mean() if len(corr_series) >= 30 else None
+# Correlation with the comparison asset, defined as on the Risk page: the correlation of daily
+# returns over the whole selected period, and over the last 30 days with both returns present.
+_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
+corr_full_val = core['overall_corr'] if len(_pairs) > 30 else None
+corr_30d_val = (_pairs.tail(30)['Returns'].corr(_pairs.tail(30)['Compare_Returns'])
+                if len(_pairs) >= 30 else None)
 
 anomalies = []
 
@@ -886,16 +890,17 @@ if corr_full_val is not None and corr_30d_val is not None:
         anomalies.append({
             'level': '🟡 WARNING',
             'type': 'Correlation Regime Shift',
-            'detail': (f'30-day correlation ({corr_30d_val:.2f}) has {direction} {corr_shift:.2f} '
-                       f'from historical baseline ({corr_full_val:.2f}). '
+            'detail': (f'Correlation with {compare_label} over the last 30 days ({corr_30d_val:.2f}) has '
+                       f'{direction} {corr_shift:.2f} from the full-period value ({corr_full_val:.2f}). '
                        f'Cross-commodity dynamics are changing.'),
         })
     elif corr_shift > 0.25:
         anomalies.append({
             'level': '🔵 WATCH',
             'type': 'Correlation Drift',
-            'detail': (f'30-day correlation ({corr_30d_val:.2f}) drifting from baseline '
-                       f'({corr_full_val:.2f}). Diversification assumptions may be shifting.'),
+            'detail': (f'Correlation with {compare_label} over the last 30 days ({corr_30d_val:.2f}) is '
+                       f'drifting from the full-period value ({corr_full_val:.2f}). '
+                       f'Diversification assumptions may be shifting.'),
         })
 
 # ── 4. Sentiment–volatility divergence ──
@@ -982,7 +987,7 @@ st.write(f"Synthesizes today's quantitative signals into a plain-language risk a
 
 @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
 def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vol,
-                            _var_95, _current_regime, _garch_10d, _garch_long_run, _garch_ref_name,
+                            _var_95, _current_regime, _garch_now, _garch_10d, _garch_long_run, _garch_ref_name,
                             _avg_score, _score_model, _avg_30d, anomaly_types_str,
                             top_neg_str, date_str, regime_calm, regime_crisis):
     api_key = None
@@ -995,8 +1000,15 @@ def generate_risk_narrative(commodity_name, risk_level_str, _latest_vol, _avg_vo
     if not api_key:
         return None, "no_key"
 
-    garch_line = (f"GARCH forecast of daily volatility on day 10 ahead: {_garch_10d:.2f}%"
-                  if _garch_10d else "GARCH forecast: unavailable")
+    if _garch_10d and _garch_now:
+        _dir = ("rising" if _garch_10d > _garch_now * 1.02 else
+                "falling" if _garch_10d < _garch_now * 0.98 else "roughly flat")
+        garch_line = (f"GARCH daily volatility now {_garch_now:.2f}%, forecast for day 10 ahead "
+                      f"{_garch_10d:.2f}% ({_dir})")
+    elif _garch_10d:
+        garch_line = f"GARCH forecast of daily volatility on day 10 ahead: {_garch_10d:.2f}%"
+    else:
+        garch_line = "GARCH forecast: unavailable"
     if _garch_10d and _garch_long_run:
         garch_line += f" ({_garch_ref_name} {_garch_long_run:.2f}%)"
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
@@ -1103,6 +1115,7 @@ narrative, error = generate_risk_narrative(
     _avg_vol=avg_vol,
     _var_95=var_95,
     _current_regime=current_regime,
+    _garch_now=garch['current_cond_vol'] if garch is not None else None,
     _garch_10d=garch_forecast_10d,
     _garch_long_run=garch_long_run,
     _garch_ref_name=garch_ref_name,
