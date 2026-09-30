@@ -52,12 +52,16 @@ with st.sidebar:
         st.caption("Not used on this page: it always shows German power, TTF and EUA.")
     st.date_input("Start Date", value=common.DEFAULT_START, key="start_date")
     st.date_input("End Date", value=dt.date.today(), key="end_date")
-    st.caption(f"Carbon benchmark: **{carbon['label']}** — resolved at runtime from a cascade "
-               "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")
+    if _on_power:
+        # The Power page prices carbon from EEX auctions in €/t, not from the ETC used elsewhere.
+        st.caption("Carbon on this page: EUA primary-auction prices from EEX, €/tCO2.")
+    else:
+        st.caption(f"Carbon benchmark: **{carbon['label']}**. Resolved at runtime from a cascade "
+                   "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"
                    "Python · Streamlit · yfinance · arch (GARCH) · FinBERT · FinVADER · "
-                   "Anthropic Claude API · Energy-Charts")
+                   "Anthropic Claude API · Energy-Charts · EEX · Eurostat")
 
 pg.run()
