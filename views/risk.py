@@ -325,10 +325,8 @@ st.write(f"Historical simulation, 1-day horizon — worst-case daily losses on {
          f"Headline figures use the last {var_days} trading days.")
 
 _first, _last = returns_clean.index.min(), returns_clean.index.max()
-if _first <= pd.Timestamp("2022-12-31") and _last >= pd.Timestamp("2022-01-01"):
-    full_label = "full period (includes 2022 crisis)"
-else:
-    full_label = f"full period ({_first:%b %Y} – {_last:%b %Y})"
+# The dates, not a named event: the worst days differ by commodity (Brent's is in 2020).
+full_label = f"full period ({_first:%b %Y} – {_last:%b %Y})"
 
 vc1, vc2, vc3, vc4 = st.columns(4)
 for _col, _name, _recent, _full in (

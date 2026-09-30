@@ -1,0 +1,25 @@
+name: Real-data check 0930
+on:
+  push:
+    branches: [claude/check-0930]
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install --quiet -r requirements.txt playwright
+          playwright install --with-deps chromium
+      - run: python .github/scripts/check_0930.py
+      - name: Commit results to this branch
+        run: |
+          git config user.name "ci"; git config user.email "ci@users.noreply.github.com"
+          git add check_out
+          git commit -qm "check results [skip ci]"
+          git push origin HEAD:claude/check-0930

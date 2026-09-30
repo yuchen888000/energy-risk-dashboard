@@ -262,9 +262,12 @@ def compute_core(ticker, compare_ticker, start, end):
 
     df_analysis['Volatility'] = df_analysis['Returns'].rolling(30, min_periods=20).std() * 100
 
-    # Rolling correlation on returns (not price levels) to avoid spurious correlation
+    # Rolling correlation on returns (not price levels) to avoid spurious correlation.
+    # min_periods=20, as for volatility: without it one missing day in either series (e.g. a
+    # London holiday for the carbon ETC) blanks the next 30 days of the line. pandas uses the
+    # days on which both returns exist.
     df_analysis['Rolling Correlation'] = (
-        df_analysis['Returns'].rolling(30).corr(df_analysis['Compare_Returns'])
+        df_analysis['Returns'].rolling(30, min_periods=20).corr(df_analysis['Compare_Returns'])
     )
 
     latest_vol = df_analysis['Volatility'].dropna().iloc[-1]
