@@ -28,10 +28,11 @@ with st.sidebar.expander("Methodology — Risk page"):
       from the last 250 trading days, with the full-period figures alongside.
     - **GARCH(1,1) Forecast**: Predicts future volatility from recent
       shocks (α) and persistence (β).
-    - **Regime Detection**: per-commodity volatility thresholds only — Volatile above the
+    - **Regime Detection**: per-commodity volatility thresholds only. Volatile above the
       50th and Crisis above the 90th percentile of the commodity's own 30-day volatility
-      history. The Risk Signal is the same classification (Calm = low, Volatile = medium,
-      Crisis = high risk), so a lower volatility can never get a higher regime.
+      over the last 3 years (750 trading days), so the 2021-22 crisis does not set today's
+      "normal". The headline signal is the same classification, and a lower volatility can
+      never get a higher regime.
     - **Stress Test**: illustrative heuristic, not a calibrated model. Absolute price
       moves are scaled by 1 + |shock| / 50 and divided by the new price level, so a crash
       raises percentage volatility more than a spike of the same size.
@@ -70,11 +71,13 @@ risk_level, risk_color = core['risk_level'], core['risk_color']
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
 
 # ─── Section 1: Risk Signal ───
-st.subheader(f"Current Risk Signal — {selected_commodity}")
+st.subheader(f"Volatility Regime: {selected_commodity}")
 st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
             unsafe_allow_html=True)
-st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% against this commodity's "
-           f"thresholds (Volatile above {regime_thr['calm']:.2f}%, Crisis above {regime_thr['crisis']:.2f}%).")
+st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% (daily) against this commodity's "
+           f"thresholds from its last 3 years (Volatile above {regime_thr['calm']:.2f}%, Crisis above "
+           f"{regime_thr['crisis']:.2f}%). This compares volatility with the commodity's own recent past. "
+           "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size.")
 _last_px = df_analysis['Price'].dropna().index.max()
 _last_cmp = df_analysis['Compare'].dropna().index.max() if df_analysis['Compare'].notna().any() else None
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"

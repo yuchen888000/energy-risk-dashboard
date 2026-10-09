@@ -836,27 +836,30 @@ corr_30d_val = (_pairs.tail(30)['Returns'].corr(_pairs.tail(30)['Compare_Returns
 anomalies = []
 
 # ── 1. Volatility spike / complacency ──
-if vol_std > 0:
-    z = (latest_vol - avg_vol) / vol_std
+# Mean and spread of the same recent window as the regime thresholds (last 3 years), so a
+# crisis years ago does not make today look unusually calm.
+_ref_mean, _ref_std = regime_thr.get('mean', avg_vol), regime_thr.get('std', vol_std)
+if _ref_std > 0:
+    z = (latest_vol - _ref_mean) / _ref_std
     if z > 2.5:
         anomalies.append({
             'level': '🔴 CRITICAL',
             'type': 'Extreme Volatility Spike',
             'detail': (f'Current vol {latest_vol:.1f}% is **{z:.1f}σ** above historical mean '
-                       f'({avg_vol:.1f}%). Tail-risk elevated — review VaR limits.'),
+                       f'({_ref_mean:.1f}%, last 3 years). Tail-risk elevated — review VaR limits.'),
         })
     elif z > 1.8:
         anomalies.append({
             'level': '🟡 WARNING',
             'type': 'Elevated Volatility',
-            'detail': (f'Current vol {latest_vol:.1f}% is {z:.1f}σ above mean. '
+            'detail': (f'Current vol {latest_vol:.1f}% is {z:.1f}σ above its 3-year mean. '
                        f'Approaching stress territory — monitor closely.'),
         })
     elif z < -1.5:
         anomalies.append({
             'level': '🔵 WATCH',
             'type': 'Unusual Calm (Complacency Risk)',
-            'detail': (f'Current vol {latest_vol:.1f}% is {abs(z):.1f}σ below mean. '
+            'detail': (f'Current vol {latest_vol:.1f}% is {abs(z):.1f}σ below its 3-year mean. '
                        f'Low-vol regimes can precede sharp reversals.'),
         })
 
@@ -1027,8 +1030,9 @@ Volatility
 - The GARCH anomaly flag compares the forecast with the sample average 30-day volatility, not with current volatility. A forecast moving back towards that average is normalisation, not a build-up of risk, and should be described that way. Also check the forecast against the {regime_calm:.2f}% Volatile boundary.
 
 Risk signal and regime - one classification
-- "Regime" compares current 30-day volatility with FIXED thresholds for this commodity, taken from its full volatility history (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
-- "Risk signal" is the same classification under another name: Calm = LOW, Volatile = MEDIUM, Crisis = HIGH RISK. Do not present them as two separate pieces of evidence.
+- "Regime" compares current 30-day volatility with thresholds for this commodity taken from its last 3 years of volatility (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
+- "Risk signal" is the same classification under another name. Do not present them as two separate pieces of evidence.
+- The regime measures volatility relative to the commodity's own recent past, not overall risk. Never call the market "low risk" because the regime is Calm: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
 - The selected-period average volatility is context only; it does not set the risk signal.
 
 VaR
