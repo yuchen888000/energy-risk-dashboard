@@ -373,33 +373,43 @@ def fit_garch(returns_clean):
 
 
 # ─── Regime Detection (per-commodity volatility thresholds) ───
-REGIME_HISTORY_START = dt.date(2010, 1, 1)
+# Thresholds come from the last REGIME_WINDOW trading days only (about 3 years). The full
+# history since 2010 includes the 2021-22 energy crisis, when TTF's daily volatility was
+# several times its normal level; percentiles taken over it set the "normal" line so high
+# that a market under real stress (e.g. 2026, with Qatari LNG disrupted) was still labelled
+# Calm. A recent window compares today with the market as it has recently been.
+REGIME_WINDOW = 750               # trading days, about 3 years
 CALM_PCT, CRISIS_PCT = 50, 90     # percentiles of the commodity's own 30-day volatility
 _MIN_HISTORY = 250
 REGIME_COLORS = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
-# The Risk Signal headline is the regime under another name, so the two cannot disagree.
-RISK_SIGNAL = {'Calm': ("🟢 LOW RISK", "green"),
-               'Volatile': ("🟡 MEDIUM RISK", "orange"),
-               'Crisis': ("🔴 HIGH RISK", "red")}
+# The headline signal is the regime under another name, so the two cannot disagree. It
+# describes volatility relative to the commodity's own recent past, not overall risk: low
+# volatility says nothing about supply, storage or the size of a position.
+RISK_SIGNAL = {'Calm': ("🟢 CALM: volatility below its 3-year median", "green"),
+               'Volatile': ("🟡 VOLATILE: volatility above its 3-year median", "orange"),
+               'Crisis': ("🔴 CRISIS-LEVEL: volatility in its top 10% of the last 3 years", "red")}
 
 
 @st.cache_data(ttl=86400, show_spinner="Computing regime thresholds...")
 def regime_thresholds(ticker, fallback_vol):
-    """Volatile / Crisis thresholds from the commodity's own 30-day volatility history.
+    """Volatile / Crisis thresholds from the commodity's own recent 30-day volatility.
 
     Volatile starts at the CALM_PCT-th percentile and Crisis at the CRISIS_PCT-th, both
-    taken over the ticker's full history since REGIME_HISTORY_START (so they do not move
-    with the selected date range). If that history is too short, `fallback_vol` (the
-    30-day volatility of the selected range) is used instead.
+    taken over the last REGIME_WINDOW trading days up to today (so they do not move with
+    the selected date range). If that history is too short, `fallback_vol` (the 30-day
+    volatility of the selected range) is used instead. The mean and standard deviation
+    of the same window are returned for the volatility anomaly check.
     """
-    close = load_close(ticker, REGIME_HISTORY_START, dt.date.today())
-    vol = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
-    source = "full history"
+    start = dt.date.today() - dt.timedelta(days=int(REGIME_WINDOW * 365 / 250) + 90)
+    close = load_close(ticker, start, dt.date.today())
+    vol = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna().tail(REGIME_WINDOW)
+    source = f"last {len(vol):,} trading days"
     if len(vol) < _MIN_HISTORY:
-        vol, source = fallback_vol.dropna(), "selected date range only; full history unavailable"
+        vol, source = fallback_vol.dropna(), "selected date range only; recent history unavailable"
     calm, crisis = np.percentile(vol, [CALM_PCT, CRISIS_PCT])
     return dict(calm=float(calm), crisis=float(crisis), source=source,
-                start=vol.index[0], end=vol.index[-1], n=len(vol))
+                start=vol.index[0], end=vol.index[-1], n=len(vol),
+                mean=float(vol.mean()), std=float(vol.std()))
 
 
 def regime_label(vol, thr):
@@ -417,8 +427,9 @@ def regime_caption(thr):
     return (f"Thresholds for this commodity: Calm < {thr['calm']:.2f}% · "
             f"Volatile {thr['calm']:.2f}–{thr['crisis']:.2f}% · Crisis > {thr['crisis']:.2f}% "
             f"(the {CALM_PCT}th and {CRISIS_PCT}th percentiles of its own 30-day rolling volatility, "
-            f"{period}, {thr['n']:,} days — {thr['source']}). The Risk Signal at the top of the page "
-            "is the same classification: Calm = low, Volatile = medium, Crisis = high risk.")
+            f"{period}, {thr['source']}). The signal at the top of the page is the same "
+            "classification. It compares volatility with the commodity's own recent past; it is not "
+            "a measure of overall risk.")
 
 
 def compute_regimes(features, thr):

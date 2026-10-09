@@ -15,7 +15,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 ## Risk page
 
 **Market risk of the selected commodity**
-- **Risk Signal** — the current regime under another name: Calm = Low, Volatile = Medium, Crisis = High risk.
+- **Volatility Regime** — current 30-day volatility against the commodity's own last 3 years: Calm, Volatile or Crisis-level. It measures volatility, not overall risk.
 - **Price Trends** — dual-axis chart with EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
 - **Forward Curve** — monthly NYMEX contracts settled within the last 5 trading days. Oil curves are labelled contango or backwardation; TTF is shown as a seasonal curve comparing the next winter (Oct–Mar) with the following summer (Apr–Sep).
 - **Volatility & Correlation** — 30-day rolling volatility and rolling correlation of returns.
@@ -47,7 +47,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 - **Country Risk** — EU-27, Norway, Switzerland, UK and Turkey, 2020–2024, all inputs from Eurostat; a country without a Eurostat value for any input in the selected year is listed as not scored (the UK and Switzerland, which Eurostat does not cover for these series, and Turkey, which has no renewable share). An illustrative structural score (import dependency, greenhouse-gas intensity of GDP, renewable share) is multiplied by a volatility factor: the commodity's 30-day volatility divided by its average over the selected period, capped between 0.5 and 3, weighted by each country's dependency. Includes per-country trend, an exposure-weighted volatility index (illustrative) and country news sentiment (only headlines that name the country or use its adjective).
 - **News Sentiment** — FinBERT (ProsusAI/finbert via HuggingFace) on live headlines from BBC Business, OilPrice and Google News; FinVADER as fallback, with the reason FinBERT was not used shown on the page. If no feed returns a relevant headline, no sentiment is computed (the page never scores placeholder text). Every feed keeps only headlines containing one of the selected commodity's keywords (whole words), and drops US-domestic stories with no link to Europe (US LNG export news is kept). The score measures headline tone, not whether the news is bullish or bearish for prices.
 - **30-Day Sentiment Trend** — daily average sentiment, scored with FinVADER.
-- **Anomaly Detection** — volatility z-score (spike, or unusual calm below −1.5σ), GARCH 10-day forecast vs the sample average 30-day volatility, correlation shift, sentiment–regime divergence, tail events (beyond 2× VaR99 in the past year, otherwise beyond 3× VaR99 in the whole period).
+- **Anomaly Detection** — volatility z-score against the last 3 years (spike, or unusual calm below −1.5σ), GARCH 10-day forecast vs the sample average 30-day volatility, correlation shift, sentiment–regime divergence, tail events (beyond 2× VaR99 in the past year, otherwise beyond 3× VaR99 in the whole period).
 - **AI Risk Interpretation** — the signals above summarised in three sentences by Claude via the Anthropic API (optional).
 - **Data Export** — CSV downloads of commodity risk data, sentiment and country risk.
 
@@ -82,7 +82,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 **Stress test.** Illustrative heuristic: stressed volatility and VaR = current values × (1 + |shock| / 50) / (1 + shock / 100). Absolute moves grow with the shock and are measured against the new price level, so a crash raises percentage risk more than a spike. VaR is capped at −100%.
 
-**Regime detection.** Per-commodity thresholds only: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility since 2010 (the selected range if that history is too short), so a lower volatility never gets a higher regime. The Risk Signal uses the same classification. The Risk page caption shows the thresholds used.
+**Regime detection.** Per-commodity thresholds only: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility over the last 3 years, 750 trading days (the selected range if that history is too short). A longer history would include the 2021-22 crisis and set the "normal" line too high. A lower volatility never gets a higher regime. The Risk Signal uses the same classification. The Risk page caption shows the thresholds used.
 
 **Clean spark spread caveats.** Power is the day-ahead spot price, while TTF is the front-month future, so the tenors don't match; desks use contracts with the same delivery period. Efficiency is assumed at 50%. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
 
