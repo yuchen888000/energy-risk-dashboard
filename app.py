@@ -54,7 +54,8 @@ with st.sidebar:
     st.date_input("End Date", value=dt.date.today(), key="end_date")
     if _on_power:
         # The Power page prices carbon from EEX auctions in €/t, not from the ETC used elsewhere.
-        st.caption("Carbon on this page: EUA primary-auction prices from EEX, €/tCO2.")
+        st.caption("Carbon on this page: EUA primary-auction prices from EEX, €/tCO2. If EEX "
+                   "cannot be reached, the page says so and asks for a price.")
     else:
         st.caption(f"Carbon benchmark: **{carbon['label']}**. Resolved at runtime from a cascade "
                    "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")

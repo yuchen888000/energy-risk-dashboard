@@ -1,6 +1,8 @@
 """Power and EUA data for the Power page.
 
-- German/Luxembourg day-ahead prices from the Energy-Charts API (Fraunhofer ISE).
+- German/Luxembourg day-ahead prices from the Energy-Charts API (Fraunhofer ISE), kept at
+  their original resolution (hourly, 15-minute since 1 Oct 2025) so the page can compute
+  baseload, peak and hour-by-hour spreads.
 - EUA prices in €/t from EEX's yearly primary-auction reports.
 
 Energy-Charts rate-limits (HTTP 429), so power requests are spaced out and retried
@@ -52,12 +54,12 @@ def _get_power(params):
 
 
 def _fetch_power_year(year, bzn):
-    """Daily baseload price (€/MWh) for one calendar year, as (Series, licence text).
+    """Day-ahead prices (€/MWh) for one calendar year, as (Series, licence text).
 
+    The Series is indexed by the start of each delivery period in Berlin time: hourly,
+    or 15-minute since the day-ahead market moved to 15-minute products on 1 Oct 2025.
     The request brackets the year by one day on each side, then keeps the Berlin
-    calendar days of `year`, so no hour is lost to UTC/CET boundaries. The daily
-    value is the plain mean of all delivery periods (hourly, or 15-minute since
-    the day-ahead market moved to 15-minute products on 1 Oct 2025).
+    calendar days of `year`, so no period is lost to UTC/CET boundaries.
     """
     params = {"bzn": bzn, "start": f"{year - 1}-12-31", "end": f"{year + 1}-01-01"}
     js = _get_power(params)
@@ -66,31 +68,37 @@ def _fetch_power_year(year, bzn):
         raise ValueError(f"unexpected response fields: {sorted(js)}")
     s = pd.Series(pd.to_numeric(pd.Series(prices), errors="coerce").values,
                   index=pd.to_datetime(js["unix_seconds"], unit="s", utc=True).tz_convert("Europe/Berlin"))
-    s = s[s.index.year == year]
-    daily = s.groupby(s.index.date).mean().dropna()
-    daily.index = pd.to_datetime(daily.index)
-    return daily, js.get("license_info", "")
+    s = s[s.index.year == year].dropna()
+    s = s[~s.index.duplicated()].sort_index()
+    if s.empty:
+        raise ValueError("no prices returned")
+    return s, js.get("license_info", "")
 
 
 # Errors are not cached, so a year that failed is retried on the next run.
+# `version` is part of the cache key: bump it when the returned data changes shape, so
+# an old cached result (daily averages before version 2) is never reused.
+_CACHE_VERSION = 2
+
+
 @st.cache_data(ttl=dt.timedelta(days=30), show_spinner=False)
-def _fetch_past_year(year, bzn):
+def _fetch_past_year(year, bzn, version):
     return _fetch_power_year(year, bzn)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_current_year(year, bzn):
+def _fetch_current_year(year, bzn, version):
     return _fetch_power_year(year, bzn)
 
 
 def fetch_power_year(year, bzn="DE-LU"):
-    """One year of daily prices: long cache for completed years, hourly for the current one."""
+    """One year of day-ahead prices: long cache for completed years, hourly for the current one."""
     this_year = pd.Timestamp.now(tz="Europe/Berlin").year
-    return (_fetch_past_year if year < this_year else _fetch_current_year)(year, bzn)
+    return (_fetch_past_year if year < this_year else _fetch_current_year)(year, bzn, _CACHE_VERSION)
 
 
 def load_power(start, end):
-    """Daily DE-LU day-ahead baseload between start and end, fetched year by year.
+    """DE-LU day-ahead prices per delivery period between start and end (Berlin dates).
 
     A year that still fails after retries is reported in the error list; the years
     that loaded are returned.
@@ -98,15 +106,71 @@ def load_power(start, end):
     parts, errors, licence = [], [], ""
     for year in range(max(start.year, FIRST_YEAR), end.year + 1):
         try:
-            daily, licence = fetch_power_year(year)
-            parts.append(daily)
+            prices, licence = fetch_power_year(year)
+            parts.append(prices)
         except Exception as e:
             errors.append(f"{year}: {e}")
     if not parts:
         return pd.Series(dtype=float), licence, errors
     s = pd.concat(parts).sort_index()
     s = s[~s.index.duplicated()]
-    return s[(s.index >= pd.Timestamp(start)) & (s.index <= pd.Timestamp(end))], licence, errors
+    days = s.index.tz_localize(None).normalize()   # Berlin calendar day
+    return s[(days >= pd.Timestamp(start)) & (days <= pd.Timestamp(end))], licence, errors
+
+
+PEAK_START, PEAK_END = 8, 20   # peak block: Monday to Friday, 08:00 to 20:00 Berlin time
+
+
+def period_hours(prices):
+    """Length of each delivery period in hours (1 before 1 Oct 2025, 0.25 after)."""
+    idx = prices.index.to_series()
+    step = (idx.shift(-1) - idx).dt.total_seconds() / 3600
+    # The last period of each gap (end of data, missing hours) takes the previous length.
+    step = step.where((step > 0) & (step <= 1)).ffill().bfill()
+    return step.fillna(1.0)
+
+
+def is_peak(index):
+    """True for delivery periods in the peak block (weekdays, 08:00 to 20:00)."""
+    return (index.dayofweek < 5) & (index.hour >= PEAK_START) & (index.hour < PEAK_END)
+
+
+def daily_base_peak(prices):
+    """Per Berlin calendar day: baseload (all periods) and peak (weekday 08:00 to 20:00) averages.
+
+    Both are time-weighted, so hourly and 15-minute days are treated alike. Peak is
+    missing on weekends.
+    """
+    h = period_hours(prices)
+    day = prices.index.tz_localize(None).normalize()   # Berlin calendar day
+    w = prices * h
+    base = w.groupby(day).sum() / h.groupby(day).sum()
+    pk = is_peak(prices.index)
+    peak = w[pk].groupby(day[pk]).sum() / h[pk].groupby(day[pk]).sum()
+    out = pd.DataFrame({"Base": base, "Peak": peak})
+    out.index = pd.to_datetime(out.index)
+    return out
+
+
+def flexible_run(prices, cost_per_day):
+    """A plant that runs only in the periods where the power price is above its cost.
+
+    `cost_per_day` is the fuel plus carbon cost in €/MWh of power for each day (index:
+    dates). Returns, per day, the hours it would run and its average clean spark spread
+    over those hours (€/MWh). Days with no profitable period get 0 hours and no spread.
+    """
+    day = prices.index.tz_localize(None).normalize()   # Berlin calendar day
+    cost = pd.Series(cost_per_day.reindex(day).values, index=prices.index)
+    keep = cost.notna()
+    prices, cost, day = prices[keep], cost[keep], day[keep.values]
+    h = period_hours(prices)
+    spread = prices - cost
+    run = spread > 0
+    hours = h.where(run, 0.0).groupby(day).sum()
+    margin = (spread * h).where(run, 0.0).groupby(day).sum()   # €/MW for the day
+    out = pd.DataFrame({"Run hours": hours, "Run spread": margin / hours.where(hours > 0)})
+    out.index = pd.to_datetime(out.index)
+    return out
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
