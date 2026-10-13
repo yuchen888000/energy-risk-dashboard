@@ -7,7 +7,7 @@ A multi-page risk analytics app for European energy markets, built with Python a
 | Page | Link | Designed with … in mind | Question it answers |
 |------|------|-------------------------|---------------------|
 | **Risk** | [/risk](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/risk) | a trading-house middle office (risk control) | How much can we lose, are we within limits, and does the VaR model hold up? |
-| **Power** | [/power](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/power) | power trading desks and utilities | Does a German gas plant make money running today, and how much can that margin move? |
+| **Power** | [/power](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/power) | power trading desks and utilities | How much does a German gas plant earn over its fuel and carbon costs in the hours it runs, and how much can that margin move? |
 | **Market** | [/market](https://energy-risk-dashboard-zj3n46fw8txggaj3su3br6.streamlit.app/market) | data and analytics firms | Which countries are exposed, what is the news mood, and is anything unusual? |
 
 The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or EU Carbon; date range), and the selection carries across pages.
@@ -16,7 +16,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 **Market risk of the selected commodity**
 - **Volatility Regime** — current 30-day volatility against the commodity's own last 3 years: Calm, Volatile or Crisis-level. It measures volatility, not overall risk.
-- **Price Trends** — dual-axis chart with EU policy events (Fit for 55, Nord Stream, EU ETS 2, CBAM).
+- **Price Trends** — dual-axis chart with EU policy and market events (Fit for 55, Russia's invasion of Ukraine and the oil embargo, Nord Stream, ETS extension to shipping, ETS 2, CBAM, the 2026 strikes on Iran).
 - **Forward Curve** — monthly NYMEX contracts settled within the last 5 trading days. Oil curves are labelled contango or backwardation; TTF is shown as a seasonal curve comparing the next winter (Oct–Mar) with the following summer (Apr–Sep).
 - **Volatility & Correlation** — 30-day rolling volatility and rolling correlation of returns.
 - **Cross-Commodity Correlation Matrix** — TTF, WTI, Brent and carbon, full period vs last 30 days.
@@ -34,13 +34,13 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 ## Power page
 
-- **German day-ahead power** (bidding zone DE-LU) from the Energy-Charts API, averaged per Berlin calendar day (baseload). Requests are spaced out and retried with backoff on HTTP 429; completed years are cached for 30 days and the current year for an hour, and years that still fail are skipped with a warning.
-- **Clean spark spread** = power − TTF / 0.5 − (0.202 / 0.5) × EUA, where 0.5 is the gas plant efficiency and 0.202 tCO2/MWh the natural gas emission factor.
-- Headline: current spread, green when running a gas plant is profitable and red when it isn't.
-- Charts: the spread over time, and its decomposition into power price, fuel cost and carbon cost.
-- **Spread risk** in €/MWh (not %, since power prices and the spread can be negative): 30-day volatility and 95% historical VaR of daily changes, plus the daily € VaR for a **400 MW unit running 16 hours a day**.
-- **EUA price** from EEX primary-auction results (€/t). Only general EUA auctions (contract T3PA) are used; aviation allowance auctions (EUAA, EAA3) are excluded. If EEX cannot be reached, `CARB.L` (the carbon ETC that tracks EUA futures, used here whatever benchmark the sidebar resolved) is rescaled to a user-entered EUA price and labelled as an approximation; if `CARB.L` is also unavailable, a flat EUA price equal to that input is used and labelled as an assumption.
-- **Download CSV** — date, DE power price, TTF, EUA price and its source, fuel cost, carbon cost and clean spark spread per business day.
+- **German day-ahead power** (bidding zone DE-LU) from the Energy-Charts API, kept per hour (per 15 minutes since 1 Oct 2025). **Peak** is the time-weighted average over weekdays 08:00 to 20:00 (Berlin time), **baseload** over all 24 hours. Requests are spaced out and retried with backoff on HTTP 429; completed years are cached for 30 days and the current year for an hour, and years that still fail are skipped with a warning.
+- **Clean spark spread** = power − TTF / 0.5 − (0.202 / 0.5) × EUA, where 0.5 is the gas plant efficiency and 0.202 tCO2/MWh the natural gas emission factor. It is a gross margin per MWh, before start-up, other variable and fixed costs.
+- Headline: the latest peak spread, with the baseload spread and a **flexible plant** that, on business days, runs only in the hours where the price is above its fuel and carbon cost (hours run and average spread in those hours). The page states the numbers and does not call the plant profitable or loss-making. The share of days with a positive peak spread is shown for the last 12 months, with the whole range in the tooltip.
+- Charts: the peak and baseload spreads over time, and their decomposition into power price, fuel cost and carbon cost.
+- **Spread risk** in €/MWh (not %, since power prices and the spread can be negative): 30-day volatility and 95% historical VaR of daily changes in the peak spread, plus the daily € VaR for a **400 MW unit running the 12 peak hours** (4,800 MWh). It measures how much the spread moves from day to day, not the VaR of a hedged position.
+- **EUA price** from EEX primary-auction results (€/t, spot allowances). Rows whose contract code contains "EAA" (aviation allowances) are dropped; if two auctions fall on the same day their prices are averaged. If EEX cannot be reached, the page asks for the current EUA price (there is no built-in default) and rescales `CARB.L` (the carbon ETC that tracks EUA futures, used here whatever benchmark the sidebar resolved) to it, labelled as an approximation; if `CARB.L` is also unavailable, a flat EUA price equal to that input is used and labelled as an assumption.
+- **Download CSV**: date, DE peak and baseload power, TTF, EUA price and its source, fuel cost, carbon cost, peak and baseload clean spark spreads, and the flexible plant's hours run and average spread, per business day.
 
 ## Market page
 
@@ -84,7 +84,7 @@ The sidebar holds the shared settings (commodity: TTF Natural Gas, WTI, Brent or
 
 **Regime detection.** Per-commodity thresholds only: Volatile starts at the 50th and Crisis at the 90th percentile of the commodity's own 30-day volatility over the last 3 years, 750 trading days (the selected range if that history is too short). A longer history would include the 2021-22 crisis and set the "normal" line too high. A lower volatility never gets a higher regime. The Risk Signal uses the same classification. The Risk page caption shows the thresholds used.
 
-**Clean spark spread caveats.** Power is the day-ahead spot price, while TTF is the front-month future, so the tenors don't match; desks use contracts with the same delivery period. Efficiency is assumed at 50%. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
+**Clean spark spread caveats.** Power is the day-ahead price, while TTF is the front-month future, so the tenors don't match; S&P Platts computes its German day-ahead spreads with the TTF day-ahead price. Efficiency is assumed at 50%; Platts publishes German spreads at 45%, 50% and 60%. Fuel cost excludes gas transport and other variable costs. `TTF=F` is a continuous front-month series that jumps at each monthly roll, which inflates the spread's volatility and VaR. Only business days are used.
 
 **Country risk.** An illustrative index, not an official rating. Structural score: for gas and oil, commodity import dependency 35%, total energy dependency 25%, greenhouse-gas intensity rank 20%, inverse renewable share 20%; for carbon, total energy dependency 40%, greenhouse-gas intensity rank 30%, inverse renewable share 30%. Each variable enters the structural score once. The dynamic score multiplies it by a volatility multiplier weighted by each country's dependency, so dependency counts twice in the dynamic score on purpose: once as a structural weakness, once as exposure to current volatility. All inputs come from Eurostat and are cached for a day: import dependency (nrg_ind_id), renewable share (nrg_ind_ren), and greenhouse-gas intensity = total GHG emissions excluding LULUCF (env_air_gge) ÷ GDP at current prices (nama_10_gdp), in tCO2e per million euro. Countries missing any input for the selected year are listed as not scored. Dependency is clipped to 0-100%, so a net exporter such as Norway shows 0%. Risk levels (High above 70, Medium above 50) are the same in the ranking table, the detail panel and the chart.
 

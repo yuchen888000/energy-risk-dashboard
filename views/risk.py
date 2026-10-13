@@ -95,13 +95,14 @@ mc4.metric("VaR 95% (1-day)", f"{var_95:.2f}%", help=f"Historical, last {var_day
 macro_events = {
     "2021-07-14": "EU Fit for 55",
     "2022-02-24": "Russia invades Ukraine",
-    "2022-06-01": "EU bans Russian oil",
+    "2022-06-03": "EU adopts Russian oil embargo",
     "2022-09-26": "Nord Stream sabotage",
+    "2022-12-05": "EU ban on Russian seaborne crude applies",
     "2023-02-15": "EU gas price cap in force",
     "2023-04-18": "EU ETS 2 passed",
-    "2024-01-01": "EU ETS reform",
-    "2025-12-31": "CBAM transition ends",
-    "2026-01-01": "CBAM full enforcement",
+    "2024-01-01": "EU ETS extended to shipping",
+    "2026-01-01": "CBAM definitive period starts",
+    "2026-02-28": "US-Israel strikes on Iran; Hormuz LNG halted",
     "2028-01-01": "EU ETS 2 starts (postponed)",
 }
 
