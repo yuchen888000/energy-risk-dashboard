@@ -27,18 +27,28 @@ FIRST_YEAR = 2020
 
 _MIN_GAP = 1.5           # seconds between Energy-Charts requests
 _RETRIES = 4             # retries after a 429, waiting 2, 4, 8, 16 s (or Retry-After)
+_TIMEOUT_RETRIES = 2     # retries after a timeout or dropped connection
 _MAX_WAIT = 30
 _last_request = 0.0
 
 
 def _get_power(params):
-    """GET the Energy-Charts price endpoint, spacing requests and backing off on 429."""
+    """GET the Energy-Charts price endpoint, spacing requests and backing off on 429 and timeouts."""
     global _last_request
     for attempt in range(_RETRIES + 1):
         gap = _MIN_GAP - (time.monotonic() - _last_request)
         if gap > 0:
             time.sleep(gap)
-        r = requests.get(POWER_URL, params=params, headers=_HEADERS, timeout=60)
+        try:
+            r = requests.get(POWER_URL, params=params, headers=_HEADERS, timeout=60)
+        except (requests.Timeout, requests.ConnectionError):
+            # A slow or dropped response is retried up to twice (so a page load waits at most a
+            # few minutes), then the year is reported as missing, as before.
+            _last_request = time.monotonic()
+            if attempt >= _TIMEOUT_RETRIES:
+                raise
+            time.sleep(min(2 ** (attempt + 1), _MAX_WAIT))
+            continue
         _last_request = time.monotonic()
         if r.status_code != 429 or attempt == _RETRIES:
             break
