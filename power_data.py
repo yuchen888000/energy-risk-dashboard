@@ -196,11 +196,12 @@ def fetch_eex_year(year):
     price_col = next(c for c in df.columns if "auction price" in c.lower())
 
     # Keep general EUA auctions (contract code T3PA). Aviation allowances (EUAA, code EAA3)
-    # are auctioned separately and clear at different prices, so they are dropped.
+    # are auctioned separately and clear at different prices, so they are dropped, whichever
+    # of the two names the file uses.
     contract_col = next((c for c in df.columns if c.lower() == "contract"), None)
     if contract_col is not None:
         contracts = df[contract_col].astype(str).str.strip().str.upper()
-        df = df[~contracts.str.contains("EAA", regex=False)]
+        df = df[~(contracts.str.contains("EAA", regex=False) | contracts.str.contains("EUAA", regex=False))]
 
     dates = pd.to_datetime(df[date_col], format="mixed", dayfirst=True, errors="coerce")
     prices = pd.to_numeric(df[price_col], errors="coerce")

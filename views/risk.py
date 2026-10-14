@@ -102,7 +102,7 @@ macro_events = {
     "2023-04-18": "EU ETS 2 passed",
     "2024-01-01": "EU ETS extended to shipping",
     "2026-01-01": "CBAM definitive period starts",
-    "2026-02-28": "US-Israel strikes on Iran; Hormuz LNG halted",
+    "2026-02-28": "US-Israel strikes on Iran; Iran closes Hormuz",
     "2028-01-01": "EU ETS 2 starts (postponed)",
 }
 
