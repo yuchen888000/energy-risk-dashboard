@@ -32,15 +32,18 @@ with st.sidebar.expander("Methodology: Power page"):
       note under the charts).
     - **Clean spark spread** = power − gas / {EFFICIENCY} − ({GAS_EF} / {EFFICIENCY}) × EUA:
       the gross margin per MWh before start-up, other variable and fixed costs.
-    - **Flexible plant**: on business days, runs only in the hours where the power price is
-      above its fuel and carbon cost.
+    - **Flexible plant**: on business days, runs in any period of the day (all 24 hours, not
+      only the peak block) where the day-ahead price is above its fuel and carbon cost.
+      Day-ahead prices are known the day before delivery; start-up costs, minimum run times
+      and part-load operation are ignored.
     - **Risk**: day-on-day change in the peak spread, in €/MWh, not %, because power
-      prices and the spread can be negative.
+      prices and the spread can be negative, and in the flexible plant's daily margin (€).
+      Changes across data gaps of more than a week are left out.
     """)
 
 st.title("Power & Clean Spark Spread")
-st.markdown("How much does a gas-fired plant in Germany earn over its fuel and carbon costs in the "
-            "hours it runs, and how much can that margin move?")
+st.markdown("Does a gas-fired plant in Germany cover its fuel and carbon costs over the peak block, "
+            "and in the hours it would choose to run? How much can that margin move?")
 
 # ─── Data ───
 with st.spinner("Fetching German day-ahead power prices (Energy-Charts)..."):
@@ -68,7 +71,7 @@ if not eua_auctions.empty:
     eua_row_source = None   # per day, set below: auction day or carried forward
     eua_source = (f"EUA: EEX primary-auction clearing prices, €/tCO2 "
                   f"({eua.index.min():%d %b %Y} to {eua.index.max():%d %b %Y}); "
-                  "carried forward on business days without an auction. The auction is for spot "
+                  "carried forward for up to 10 business days without an auction. The auction is for spot "
                   "allowances, so it can differ from the December future that the market quotes.")
 else:
     # Fallback: rescale the carbon ETC so its latest price equals a user-entered EUA price.
@@ -115,8 +118,14 @@ df["CSS base"] = df["Power base"] - cost
 flex = power_data.flexible_run(prices, cost)
 df["Run hours"] = flex["Run hours"].reindex(df.index)
 df["Run spread"] = flex["Run spread"].reindex(df.index)
-df["dCSS"] = df["CSS peak"].diff()
-df["dCSS vol"] = df["dCSS"].rolling(30).std()
+# Day-on-day changes; a change across a data gap of more than a week (no EUA price within 10
+# business days, e.g. early January) is not a one-day move, so it is left out.
+_gap = df.index.to_series().diff() > pd.Timedelta(days=7)
+df["dCSS"] = df["CSS peak"].diff().mask(_gap)
+df["dCSS vol"] = df["dCSS"].rolling(30, min_periods=20).std()
+# Daily gross margin of the flexible plant, € (0 on days it stays off), and its daily change.
+df["Flex margin"] = (df["Run hours"] * df["Run spread"]).fillna(0.0) * PLANT_MW
+df["dFlex"] = df["Flex margin"].diff().mask(_gap)
 
 # Where each day's EUA price comes from, for the headline and the CSV export.
 if eua_row_source is None:
@@ -132,24 +141,38 @@ else:
 latest = df.iloc[-1]
 day = df.index[-1]
 peak_now = latest["CSS peak"]
-color = "green" if peak_now > 0 else "red"
 if latest["Run hours"] > 0:
-    flex_text = (f"A flexible plant, running only in the hours where the price covers its fuel and "
-                 f"carbon cost, would have run {latest['Run hours']:.1f} h at an average spread of "
-                 f"{latest['Run spread']:+.2f} €/MWh.")
+    flex_value = f"{latest['Run hours']:.2f} h at {latest['Run spread']:+.2f} €/MWh"
+    flex_help = ("Hours of the day (any of the 24) where the day-ahead price covered the fuel and carbon "
+                 "cost, and the average spread in those hours.")
 else:
-    flex_text = ("No hour of the day covered the fuel and carbon cost, so a flexible plant would have "
-                 "stayed off.")
-st.markdown(f"<h2 style='color:{color}'>Peak clean spark spread: {peak_now:+.2f} €/MWh</h2>"
-            f"<p style='margin-top:-10px'><b>{day:%a %d %b %Y}</b>, average over {_PEAK}. "
-            f"Baseload (24 h): {latest['CSS base']:+.2f} €/MWh. {flex_text}</p>",
-            unsafe_allow_html=True)
+    flex_value = "Stays off"
+    flex_help = "No period of the day covered the fuel and carbon cost."
+st.markdown(f"**Clean spark spread, {day:%a %d %b %Y}** (gas plant at {EFFICIENCY:.0%} efficiency)")
+h1, h2, h3 = st.columns(3)
+h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00)",
+          f"{peak_now:+.2f} €/MWh",
+          help=f"Average spread over the {power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00 "
+               "delivery periods of this day: what a plant "
+               "running the whole peak block earns per MWh.")
+h2.metric("Baseload (all 24 h)", f"{latest['CSS base']:+.2f} €/MWh")
+h3.metric("Flexible plant", flex_value, help=flex_help)
 st.caption(f"Gross margin per MWh at {EFFICIENCY:.0%} efficiency, before start-up, other variable and "
            f"fixed costs. EUA price: {latest['EUA source']}.")
 
 last_year = df[df.index > day - pd.DateOffset(years=1)]
-share_label = ("Days with positive peak spread, last 12 months"
-               if df.index[0] <= day - pd.DateOffset(years=1) else "Days with positive peak spread, selected range")
+share_label = (f"Days with positive peak spread at {EFFICIENCY:.0%} efficiency, last 12 months"
+               if df.index[0] <= day - pd.DateOffset(years=1)
+               else f"Days with positive peak spread at {EFFICIENCY:.0%} efficiency, selected range")
+
+
+def _share_at(eff, frame):
+    """Share of days with a positive peak spread if the plant had efficiency `eff`."""
+    spread = frame["Power peak"] - frame["TTF"] / eff - GAS_EF / eff * frame["EUA"]
+    return (spread > 0).mean()
+
+
+_sens = ", ".join(f"{_share_at(e, last_year):.0%} of days at {e:.0%}" for e in (0.45, 0.55, 0.60))
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Power (DE-LU peak)", f"{latest['Power peak']:.2f} €/MWh",
           help=f"Average over {_PEAK}. Baseload (24 h): {latest['Power base']:.2f} €/MWh.")
@@ -158,17 +181,21 @@ k3.metric(f"Carbon cost ({CARBON_PER_MWH:.3f} × EUA)", f"{latest['Carbon cost']
 k4.metric(share_label, f"{(last_year['CSS peak'] > 0).mean():.0%}",
           help=f"Share of business days with a positive peak spread, {last_year.index[0]:%d %b %Y} to "
                f"{day:%d %b %Y}. Over the whole selected range ({df.index[0]:%d %b %Y} to {day:%d %b %Y}): "
-               f"{(df['CSS peak'] > 0).mean():.0%}.")
+               f"{(df['CSS peak'] > 0).mean():.0%}. The share depends strongly on the assumed efficiency; "
+               f"same period at other efficiencies: {_sens}.")
 
 # ─── Chart 1: spread over time ───
 st.subheader("Clean Spark Spread")
 fig1, ax1 = plt.subplots(figsize=(14, 4))
-ax1.plot(df.index, df["CSS peak"], color="black", linewidth=0.8, label=f"Peak ({_PEAK})")
-ax1.fill_between(df.index, df["CSS peak"], 0, where=df["CSS peak"] > 0, color="green", alpha=0.25,
+# Lines break where the data has gaps longer than a week, instead of joining across them.
+_pk = common.break_gaps(df["CSS peak"])
+_bs = common.break_gaps(df["CSS base"])
+ax1.plot(_pk.index, _pk.values, color="black", linewidth=0.8, label=f"Peak ({_PEAK})")
+ax1.fill_between(_pk.index, _pk.values, 0, where=(_pk > 0).values, color="green", alpha=0.25,
                  interpolate=True)
-ax1.fill_between(df.index, df["CSS peak"], 0, where=df["CSS peak"] <= 0, color="red", alpha=0.25,
+ax1.fill_between(_pk.index, _pk.values, 0, where=(_pk <= 0).values, color="red", alpha=0.25,
                  interpolate=True)
-ax1.plot(df.index, df["CSS base"], color="gray", linewidth=0.6, alpha=0.8, label="Baseload (24 h)")
+ax1.plot(_bs.index, _bs.values, color="gray", linewidth=0.6, alpha=0.8, label="Baseload (24 h)")
 ax1.axhline(0, color="black", linewidth=1)
 ax1.set_ylabel("€/MWh")
 ax1.set_title("Clean spark spread, DE-LU: peak (green above zero, red below) and baseload")
@@ -179,12 +206,13 @@ st.pyplot(fig1)
 # ─── Chart 2: decomposition ───
 st.subheader("What Drives the Spread")
 fig2, ax2 = plt.subplots(figsize=(14, 4))
-ax2.plot(df.index, df["Power peak"], color="goldenrod", linewidth=1, label="Power price, peak")
-ax2.plot(df.index, df["Power base"], color="goldenrod", linewidth=0.6, alpha=0.5,
-         label="Power price, baseload")
-ax2.plot(df.index, df["Fuel cost"], color="steelblue", linewidth=1, label=f"Fuel cost (TTF / {EFFICIENCY})")
-ax2.plot(df.index, df["Carbon cost"], color="seagreen", linewidth=1,
-         label=f"Carbon cost ({CARBON_PER_MWH:.3f} × EUA)")
+for _col, _kw in [("Power peak", dict(color="goldenrod", linewidth=1, label="Power price, peak")),
+                  ("Power base", dict(color="goldenrod", linewidth=0.6, alpha=0.5, label="Power price, baseload")),
+                  ("Fuel cost", dict(color="steelblue", linewidth=1, label=f"Fuel cost (TTF / {EFFICIENCY})")),
+                  ("Carbon cost", dict(color="seagreen", linewidth=1,
+                                       label=f"Carbon cost ({CARBON_PER_MWH:.3f} × EUA)"))]:
+    _s = common.break_gaps(df[_col])
+    ax2.plot(_s.index, _s.values, **_kw)
 ax2.set_ylabel("€/MWh")
 ax2.set_title("Spread = power price − fuel cost − carbon cost")
 ax2.legend(fontsize=8, loc="upper left")
@@ -218,18 +246,26 @@ recent = df["dCSS"].dropna().tail(_LOOKBACK)
 css_vol_now = df["dCSS vol"].dropna().iloc[-1]
 css_var95 = -np.percentile(recent, 5)          # adverse daily move, €/MWh (positive number)
 plant_var95 = css_var95 * PLANT_MWH
+flex_recent = df["dFlex"].dropna().tail(_LOOKBACK)
+flex_var95 = max(0.0, -np.percentile(flex_recent, 5))
 
-r1, r2, r3 = st.columns(3)
+r1, r2, r3, r4 = st.columns(4)
 r1.metric("30-day volatility of the daily change in peak spread", f"{css_vol_now:.2f} €/MWh")
 r2.metric("VaR 95%, 1-day change in peak spread", f"{css_var95:.2f} €/MWh",
           help=f"5th percentile of day-on-day changes in the peak spread over the last {len(recent)} "
-               "business days, shown as a positive number.")
-r3.metric(f"VaR 95%: {PLANT_MW} MW unit, {PLANT_HOURS} peak hours", f"€{plant_var95:,.0f}",
+               "available business days, shown as a positive number. Changes across data gaps of more "
+               "than a week are left out.")
+r3.metric(f"VaR 95%: {PLANT_MW} MW unit running all {PLANT_HOURS} peak hours", f"€{plant_var95:,.0f}",
           help=f"Spread VaR × {PLANT_MWH:,} MWh ({PLANT_MW} MW × {PLANT_HOURS} h, {_PEAK}).")
+r4.metric(f"VaR 95%: {PLANT_MW} MW flexible plant", f"€{flex_var95:,.0f}",
+          help=f"5th percentile of day-on-day changes in the flexible plant's daily gross margin "
+               f"({PLANT_MW} MW × hours run × average spread when running) over the last "
+               f"{len(flex_recent)} available business days.")
 
 fig3, ax3 = plt.subplots(figsize=(14, 3.5))
-ax3.plot(df.index, df["dCSS vol"], color="purple", linewidth=1)
-ax3.fill_between(df.index, df["dCSS vol"], 0, color="purple", alpha=0.1)
+_vol = common.break_gaps(df["dCSS vol"])
+ax3.plot(_vol.index, _vol.values, color="purple", linewidth=1)
+ax3.fill_between(_vol.index, _vol.values, 0, color="purple", alpha=0.1)
 ax3.set_ylabel("€/MWh")
 ax3.set_title("30-day volatility of the daily change in the peak clean spark spread")
 plt.tight_layout()
@@ -238,19 +274,21 @@ st.pyplot(fig3)
 st.caption(
     f"For a {PLANT_MW} MW gas unit running the {PLANT_HOURS} peak hours ({PLANT_MWH:,} MWh a day), a "
     f"1-in-20 adverse day-on-day move in the peak spread cuts that day's gross margin by at least "
-    f"€{plant_var95:,.0f}. It assumes the unit runs all peak hours whatever the spread; a flexible unit "
-    "switches off in hours with a negative spread, so its daily margin cannot fall below zero. This "
-    "measures how much the "
-    "spread moves from one day to the next, not the VaR of a hedged position."
+    f"€{plant_var95:,.0f}. That unit runs all peak hours whatever the spread. The flexible plant "
+    "switches off in periods with a negative spread, so its daily margin cannot fall below zero; its "
+    f"1-in-20 daily fall is €{flex_var95:,.0f}. Both measure how much the margin moves from one day to "
+    "the next, not the VaR of a hedged position."
 )
 st.caption(
     "**Caveats.** Power is the day-ahead price, while TTF is the front-month future, so the tenors "
-    "don't match; S&P Platts computes its German day-ahead spreads with the TTF day-ahead price. "
-    f"Efficiency is assumed at {EFFICIENCY:.0%}; Platts publishes German spreads at 45%, 50% and 60%. "
-    "Fuel cost excludes gas transport and other variable costs. `TTF=F` is a continuous front-month "
-    "series from Yahoo Finance, so it jumps when the contract rolls each month; those jumps show up as "
-    "day-on-day spread moves and inflate the volatility and VaR above. Only business days (TTF trading "
-    "days) are used."
+    "don't match; S&P Platts computes its German spreads from its own TTF assessments, including "
+    f"day-ahead. Efficiency is assumed at {EFFICIENCY:.0%}; Platts publishes German spreads at 45%, 50% "
+    "and 60%. Fuel cost excludes gas transport and other variable costs. The peak block includes "
+    "public holidays, as exchange peak products do. `TTF=F` is a continuous front-month series from "
+    "Yahoo Finance: it jumps when the contract rolls each month, and it follows the NYMEX (US) trading "
+    "calendar, so US holidays are missing. Days are aligned on its trading days, and an EUA price is "
+    "carried forward for at most 10 business days, so the series has gaps (for example in early "
+    "January); charts break at gaps longer than a week."
 )
 # ─── Wait a week? Risk of delaying the gas purchase ───
 _WAIT_DAYS = 5
@@ -302,7 +340,7 @@ else:
         "whether TTF goes up or down: its mean return is set to zero, so the range is centred on "
         "today's price (slightly wider on the upside, because prices move in percentage terms). "
         "Method: GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
-        f"{fit_start:%d %b %Y} to {wait['date']:%d %b %Y} (the dates in the sidebar), 10,000 "
+        f"{fit_start:%d %b %Y} to {wait['date']:%d %b %Y} (the first and last TTF price used), 10,000 "
         f"simulated {_WAIT_DAYS}-day paths, 5th to 95th percentile. Monthly roll jumps in `TTF=F` feed "
         "into the fitted volatility, and a real purchase would be priced on a specific contract."
     )
