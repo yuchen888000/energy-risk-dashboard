@@ -51,7 +51,7 @@ with st.sidebar.expander("Methodology: Risk page"):
       over the last 3 years (750 trading days), so the 2021-22 crisis does not set today's
       "normal". This 3-year label sits under a neutral heading that also gives the multiple of
       the pre-war level (median of Oct to Dec 2025) and the percentiles over 1 year, 3 years and
-      since 2017; a lower volatility can never get a higher label.
+      since the start of the data (2017 or 2018); a lower volatility can never get a higher label.
     - **Historical scenarios**: today's positions replayed through three past windows
       (Russia's invasion of Ukraine, the August 2022 gas peak, the 2026 Iran war). It shows
       what happened, not a forecast.
@@ -92,8 +92,9 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 # ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
 st.subheader("Volatility")
 _vol_asof = df_analysis['Volatility'].dropna().index[-1]
+_past_end = end_date < pd.Timestamp.today().date()
 _vs = common.vol_summary(commodity['ticker'], _vol_asof, float(latest_vol), name=selected_commodity,
-                         window_returns=df_analysis['Returns'].loc[:_vol_asof].tail(30))
+                         window_returns=df_analysis['Returns'].loc[:_vol_asof].tail(30), past_end=_past_end)
 # Neutral heading: no traffic-light colour, so one window cannot decide the reading on its own.
 st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
             f"<div style='font-size:1.25rem; font-weight:500; opacity:0.85; margin:0.2rem 0 0.6rem'>"
@@ -103,14 +104,13 @@ if _vs['roll']:
 st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
 st.caption(_vs['label'] + " It compares volatility with the commodity's own past; it is not a measure of overall "
            "risk: low volatility says nothing about supply, storage or position size."
-           + (f" The end date is in the past, but the 3-year thresholds are always the last 3 years to today "
-              f"({regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so this label is applied with hindsight."
-              if end_date < pd.Timestamp.today().date() else ""))
+           + (" With an end date in the past the label is applied with hindsight." if _past_end else ""))
 _last_px = df_analysis['Price'].dropna().index.max()
 _last_cmp = df_analysis['Compare'].dropna().index.max() if df_analysis['Compare'].notna().any() else None
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
-           + ". On a trading day the last value is the latest price, not yet a settlement.")
+           + ". The last value can be a price from the current or the evening electronic session, not the settlement, "
+           "so it can change within the hour. Volatility, percentiles, thresholds and VaR all use the same download.")
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -135,7 +135,7 @@ if len(_corr_pairs):
     mc3.caption(_corr_note)
 else:
     mc3.metric(f"Correlation vs {_partner}", "n/a", help="No common days with returns in the selected range.")
-mc4.metric("VaR 95% (1-day)", f"{var_95:.2f}%",
+mc4.metric("VaR 95% (1-day, per unit)", f"{var_95:.2f}%",
            help=f"Historical, last {var_days} trading days: the daily loss exceeded on 5% of days, shown as a "
                 "negative return. The € figures in Positions & Limits are shown as positive losses.")
 
@@ -296,7 +296,19 @@ else:
             fc1, fc2, fc3 = st.columns(3)
             fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
                          unsafe_allow_html=True)
-            fc2.metric(f"Front month ({front['Delivery']:%b %y})", f"{front['Price']:.2f} {curve_unit}")
+            _expiry = common.contract_expiry(curve_root, front['Delivery'])
+            _left = (int(np.busday_count((front['Last trade'] + pd.Timedelta(days=1)).date(),
+                                         (_expiry + pd.Timedelta(days=1)).date()))
+                     if _expiry is not None else None)
+            _soon = _left is not None and _left < 3
+            fc2.metric(f"Front month ({front['Delivery']:%b %y}" + (f", expires {_expiry:%d %b}" if _soon else "") + ")",
+                       f"{front['Price']:.2f} {curve_unit}",
+                       help=(f"Last trading day {_expiry:%d %b %Y} ({common.EXPIRY_RULES[curve_root]}; exchange "
+                             "holidays not modelled)." if _expiry is not None else None))
+            if _soon:
+                fc2.caption(f"{_left} business day{'s' if _left != 1 else ''} to expiry after the {front['Last trade']:%d %b} "
+                            f"close. Close to expiry the front month can be squeezed, and `{commodity['ticker']}` "
+                            "may already follow the next contract.")
             _mixed = front['Last trade'].normalize() != back['Last trade'].normalize()
             fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
                        help=(f"Front month close of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} close of "
@@ -654,10 +666,10 @@ with rcol1:
     fig2, ax3 = plt.subplots(figsize=(12, 4))
     for regime, group in features.groupby('Regime'):
         ax3.scatter(group.index, group['Volatility'] * ANNUAL,
-                   c=common.REGIME_COLORS[regime], label=regime, alpha=0.5, s=10)
-    ax3.axhline(y=regime_thr['elevated'] * ANNUAL, color='orange', linewidth=1, linestyle='--', alpha=0.5,
+                   c=common.REGIME_COLORS[regime], label=regime, alpha=0.8, s=10)
+    ax3.axhline(y=regime_thr['elevated'] * ANNUAL, color=common.REGIME_COLORS['Elevated'], linewidth=1, linestyle='--',
                 label=f"Elevated threshold ({common.fmt_vol(regime_thr['elevated'])}, p{common.ELEVATED_PCT})")
-    ax3.axhline(y=regime_thr['extreme'] * ANNUAL, color='red', linewidth=1, linestyle='--', alpha=0.5,
+    ax3.axhline(y=regime_thr['extreme'] * ANNUAL, color=common.REGIME_COLORS['Extreme'], linewidth=1, linestyle='--',
                 label=f"Extreme threshold ({common.fmt_vol(regime_thr['extreme'])}, p{common.EXTREME_PCT})")
     ax3.set_ylabel('30-day volatility, annualised (%)')
     ax3.set_title(f'{selected_commodity}: 3-year volatility labels, annualised')
@@ -720,9 +732,9 @@ else:
 
         _n_tail_book = int((recent <= np.percentile(recent, 2.5)).sum())
         pl1, pl2, pl3, pl4 = st.columns(4)
-        pl1.metric("VaR 95% (1-day)", f"€{book_var95 / 1e6:,.2f}m",
+        pl1.metric("Book VaR 95% (1-day)", f"€{book_var95 / 1e6:,.2f}m",
                    help="Daily book loss exceeded on 5% of the last 250 days.")
-        pl2.metric("VaR 99% (1-day)", f"€{book_var99 / 1e6:,.2f}m",
+        pl2.metric("Book VaR 99% (1-day)", f"€{book_var99 / 1e6:,.2f}m",
                    help="Daily book loss exceeded on 1% of the last 250 days.")
         pl3.metric("Expected Shortfall 97.5%", f"€{book_es975 / 1e6:,.2f}m",
                    help=f"Average loss on the {_n_tail_book} days (of {len(recent)}) at or below the 2.5% quantile, "

@@ -145,17 +145,20 @@ def context():
 STALE_RUN = 5   # this many identical consecutive closes = a stale feed (suspension, no trading)
 
 
-@st.cache_data(ttl=3600, show_spinner="Fetching market data...")
-def _raw_close(ticker, start, end):
-    """Daily closing prices for one ticker exactly as downloaded (empty if unavailable).
+_DATA_START = dt.date(2017, 1, 1)   # every price series is downloaded once from here and sliced
 
-    yfinance treats `end` as exclusive, so one day is added: the end date chosen in the
-    sidebar is included. On a trading day the last value is the latest price, not yet a
-    settlement.
+
+@st.cache_data(ttl=3600, show_spinner="Fetching market data...")
+def _download_close(ticker, first, today):
+    """Daily closing prices for one ticker from `first` to `today` exactly as downloaded (empty if unavailable).
+
+    One download per ticker is shared by every calculation (volatility, percentiles, thresholds, VaR), so they
+    all use the same last price: during and after the trading session the latest row keeps changing (after
+    the settlement it can be a price from the evening electronic session), and two separate downloads a
+    minute apart could disagree. yfinance treats `end` as exclusive, so one day is added.
     """
     try:
-        data = yf.download(ticker, start=start, end=pd.Timestamp(end) + pd.Timedelta(days=1),
-                           progress=False)
+        data = yf.download(ticker, start=first, end=pd.Timestamp(today) + pd.Timedelta(days=1), progress=False)
     except Exception:
         return pd.Series(dtype=float)
     if data is None or data.empty:
@@ -167,6 +170,13 @@ def _raw_close(ticker, start, end):
     # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
     close = close[close.index.dayofweek < 5]
     return close.astype(float)
+
+
+def _raw_close(ticker, start, end):
+    """Daily closes from `start` to `end` (both included), cut from the one shared download."""
+    first = min(pd.Timestamp(start).date(), _DATA_START)
+    close = _download_close(ticker, first, dt.date.today())
+    return close[(close.index >= pd.Timestamp(start)) & (close.index <= pd.Timestamp(end))]
 
 
 def _stale_mask(close):
@@ -394,7 +404,8 @@ REGIME_WINDOW = 750               # trading days, about 3 years
 # (its percentile), which the page shows next to the label.
 ELEVATED_PCT, EXTREME_PCT = 75, 90
 _MIN_HISTORY = 250
-REGIME_COLORS = {'Normal': 'green', 'Elevated': 'orange', 'Extreme': 'red'}
+# One hue, light to dark: the label is a single-window percentile, not a traffic-light signal.
+REGIME_COLORS = {'Normal': '#c6dbef', 'Elevated': '#4292c6', 'Extreme': '#08306b'}
 ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
 
 
@@ -430,7 +441,8 @@ _CONTEXT_START = dt.date(2017, 1, 1)
 @st.cache_data(ttl=3600, show_spinner=False)
 def vol_context(ticker, as_of, vol_now):
     """Where `vol_now` (30-day volatility of daily returns, %) sits against the commodity's own history
-    up to `as_of`: percentile rank over the last 250 and 750 trading days and since 2017, and the ratio
+    up to `as_of`: percentile rank over the last 250 and 750 trading days and since the start of the data (Jan 2017, or later where
+    the series starts later), and the ratio
     to the median 30-day volatility of the pre-war quarter (Oct to Dec 2025). Same volatility definition
     as the page (simple returns, 30-day window, stale repeats excluded)."""
     close = load_close(ticker, _CONTEXT_START, dt.date.today())
@@ -440,8 +452,11 @@ def vol_context(ticker, as_of, vol_now):
         return None
 
     def rank(window):
-        h = np.sort(window.values)
-        return 100.0 * np.searchsorted(h, vol_now, side='left') / len(h)
+        # Share of the window strictly below vol_now. Both sides are rounded to 10 decimals first: today's
+        # volatility is computed on two paths (compute_core and here) that can differ by ~1e-14, which would
+        # otherwise count today itself as "below today" on some days and not on others.
+        h = np.sort(np.round(window.values, 10))
+        return 100.0 * np.searchsorted(h, round(float(vol_now), 10), side='left') / len(h)
 
     prewar = vol[(vol.index >= PREWAR_START) & (vol.index <= PREWAR_END)]
     pre_med = float(prewar.median()) if len(prewar) >= 20 else None
@@ -576,13 +591,15 @@ def roll_sentence(ticker, window_returns):
     return " ".join(parts)
 
 
-def vol_summary(ticker, as_of, vol_now, name=None, window_returns=None):
+def vol_summary(ticker, as_of, vol_now, name=None, window_returns=None, past_end=False):
     """The single source of every volatility statement on the Risk and Market pages and in the AI input.
 
     Returns dict(headline, headline2, roll, detail, label, tile, regime, ...): `headline` and `headline2` are
     the two lines of the large neutral heading, `roll` the line on contract roll days in the 30-day window
     (only when `window_returns`, the returns behind `vol_now`, are given), `detail` the paragraph under it,
-    `label` the small grey line with the 3-year label, `tile` the value for a metric tile."""
+    `label` the small grey line with the 3-year label, `tile` the value for a metric tile. With `past_end` (the
+    end date chosen is before today) the label says that it uses today's 3-year thresholds, not the 3 years to
+    `as_of` behind the percentiles."""
     ctx = vol_context(ticker, as_of, vol_now)
     close = load_close(ticker, _CONTEXT_START, dt.date.today())
     hist = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
@@ -592,8 +609,11 @@ def vol_summary(ticker, as_of, vol_now, name=None, window_returns=None):
                roll=roll_sentence(ticker, window_returns) if window_returns is not None else "",
                headline=f"{name + ' ' if name else ''}30-day volatility: {vol_now * ANNUAL:.0f}% annualised "
                         f"({vol_now:.2f}% daily)",
-               label=(f"3-year label: {regime} (Elevated above the {ELEVATED_PCT}th percentile, "
-                      f"{fmt_vol(thr['elevated'])}; Extreme above the {EXTREME_PCT}th, {fmt_vol(thr['extreme'])})."))
+               label=(f"3-year label: {regime}"
+                      + (f", against today's 3-year thresholds ({thr['start']:%b %Y} to {thr['end']:%b %Y}), not the "
+                         f"3 years to {pd.Timestamp(as_of):%d %b %Y} behind the percentiles above" if past_end else "")
+                      + f" (Elevated above the {ELEVATED_PCT}th percentile, {fmt_vol(thr['elevated'])}; Extreme above "
+                        f"the {EXTREME_PCT}th, {fmt_vol(thr['extreme'])})."))
     if ctx is None:
         out.update(headline2="", detail="")
         return out
@@ -614,7 +634,7 @@ def vol_summary(ticker, as_of, vol_now, name=None, window_returns=None):
                    "28 Feb 2026. ")
     detail += (f"Percentiles: {_ordinal(ctx['p1y'])} over the last year, {_ordinal(ctx['p3y'])} over 3 years, "
                f"{_ordinal(ctx['p_all'])} since {ctx['all_start']:%b %Y}.")
-    if ctx['start_3y'] <= _WAR_START:
+    if ctx['start_3y'] <= _WAR_START <= pd.Timestamp(as_of):   # only if the war falls inside that 3-year window
         detail += " The 3-year window includes the volatility after the war began in March 2026."
     out['detail'] = detail
     return out
@@ -631,7 +651,7 @@ def regime_label(vol, thr):
 
 def vol_percentile(vol, thr):
     """Share of the threshold window's 30-day volatilities below `vol`, in % (its percentile rank)."""
-    return 100.0 * np.searchsorted(thr['hist'], vol, side='left') / len(thr['hist'])
+    return 100.0 * np.searchsorted(np.round(thr['hist'], 10), round(float(vol), 10), side='left') / len(thr['hist'])
 
 
 def regime_caption(thr):
@@ -893,6 +913,34 @@ def forward_curve(root, n=12, today=None):
     cutoff = trading_days[-min(CURVE_FRESH_DAYS, len(trading_days))]
     df = df[df['Last trade'] >= cutoff]
     return df.sort_values('Delivery').head(n).reset_index(drop=True)
+
+
+EXPIRY_RULES = {
+    "CL": "NYMEX WTI: 3 business days before the 25th of the month before delivery, 4 if the 25th is not a "
+          "business day",
+    "BZ": "Brent: last business day of the second month before delivery, one business day earlier in December",
+}
+
+
+def contract_expiry(root, delivery):
+    """Last trading day of a WTI (CL) or Brent (BZ) monthly contract, weekdays only (holidays not modelled).
+
+    WTI (CME rule 200102.F): trading ends 3 business days before the 25th calendar day of the month before
+    the delivery month; if the 25th is not a business day, 4 business days before it. Brent (ICE rule, which
+    NYMEX BZ follows): the last business day of the second month before delivery, moved one business day
+    earlier when that month is December. None for other roots (TTF has its own rule in ttf_expiry_days)."""
+    d = pd.Timestamp(delivery)
+    if root == "CL":
+        d25 = (d - pd.DateOffset(months=1)).replace(day=25)
+        if d25.dayofweek < 5:
+            return pd.Timestamp(np.busday_offset(d25.date(), -3))
+        # 25th on a weekend: the business day before it, then 3 more back (= 4 business days before the 25th).
+        return pd.Timestamp(np.busday_offset(np.busday_offset(d25.date(), 0, roll='backward'), -3))
+    if root == "BZ":
+        m2 = d - pd.DateOffset(months=2)
+        last = pd.Timestamp(np.busday_offset((m2 + pd.offsets.MonthEnd(0)).date(), 0, roll='backward'))
+        return pd.Timestamp(np.busday_offset(last.date(), -1)) if m2.month == 12 else last
+    return None
 
 
 def gas_season(delivery):
