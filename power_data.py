@@ -273,8 +273,12 @@ def flexible_run(prices, cost_per_day):
     run = spread > 0
     hours = h.where(run, 0.0).groupby(day).sum()
     margin = (spread * h).where(run, 0.0).groupby(day).sum()   # €/MW for the day
-    # A start is a period where the plant runs and was off in the period before (same day).
-    was_on = run.groupby(day).shift(1, fill_value=False).astype(bool)
+    # A start is a period where the plant runs and was off in the period before. The period
+    # before 00:00 is the last one of the previous day if that day is in the data (contiguous);
+    # after a gap (e.g. Monday after a weekend left out) the plant counts as off.
+    idx = prices.index.to_series()
+    contiguous = (idx - idx.shift(1)) <= pd.Timedelta(hours=1)
+    was_on = (run.shift(1, fill_value=False).astype(bool) & contiguous.values)
     starts = (run & ~was_on).groupby(day).sum()
     out = pd.DataFrame({"Run hours": hours, "Run spread": margin / hours.where(hours > 0),
                         "Starts": starts})
@@ -337,7 +341,7 @@ def load_eua_auctions(start, end):
     return s[(s.index >= pd.Timestamp(start)) & (s.index <= pd.Timestamp(end))], errors
 
 
-# ─── Actual gas-fired generation (Energy-Charts public_power, from SMARD) ───
+# ─── Actual gas-fired generation (Energy-Charts public_power, public net generation) ───
 def _fetch_gas_generation_year(year):
     """German fossil-gas generation (MW, net public generation) per period for one Berlin year."""
     params = {"country": "de", "start": f"{year - 1}-12-31", "end": f"{year + 1}-01-01"}
@@ -385,7 +389,8 @@ def load_gas_generation(start, end):
 def gas_weighted_price(prices, gas_mw):
     """Per Berlin day, the day-ahead price weighted by German gas-fired output.
 
-    This is the average price at which gas plants as a whole sold their output that day.
+    This is the gas-output-weighted day-ahead price (a capture price) of public-supply gas
+    plants; it is not what plants actually sold at, since most output is hedged ahead.
     Generation is reported per 15 minutes; before 1 Oct 2025 the price is hourly, so each
     hourly price applies to its four quarter-hours.
     """
