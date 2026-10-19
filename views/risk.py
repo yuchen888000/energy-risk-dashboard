@@ -24,7 +24,7 @@ CARBON_TICKER = ctx.carbon["ticker"]
 CARBON_LABEL = ctx.carbon["label"]
 CARBON_SHORT = ctx.carbon["short"]
 CARBON_NOTE = ctx.carbon["note"]
-ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
+ANNUAL = common.ANNUAL
 # The carbon ETC tracks EUR-denominated EUA futures but is quoted in USD, so its returns
 # contain the EUR/USD move. Other fallbacks (KRBN, ICLN) are USD funds.
 if CARBON_TICKER == "CARB.L":
@@ -36,7 +36,7 @@ else:
 with st.sidebar.expander("Methodology: Risk page"):
     st.markdown("""
     - **30-Day Rolling Volatility**: equal-weighted standard deviation of simple daily returns
-      over 30 trading days, shown as a daily figure (annualised = daily x √252). This is a
+      over 30 trading days, shown annualised (daily x √252) with the daily figure in brackets. This is a
       simplification: RiskMetrics uses exponentially weighted (EWMA) log returns.
     - **Rolling Correlation**: Pearson correlation of daily returns with the comparison asset over 30 days.
     - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs last 30 common trading days).
@@ -49,8 +49,9 @@ with st.sidebar.expander("Methodology: Risk page"):
     - **Regime Detection**: per-commodity volatility thresholds only. Elevated above the
       75th and Extreme above the 90th percentile of the commodity's own 30-day volatility
       over the last 3 years (750 trading days), so the 2021-22 crisis does not set today's
-      "normal". The headline signal is the same classification, and a lower volatility can
-      never get a higher regime.
+      "normal". This 3-year label sits under a neutral heading that also gives the multiple of
+      the pre-war level (median of Oct to Dec 2025) and the percentiles over 1 year, 3 years and
+      since 2017; a lower volatility can never get a higher label.
     - **Historical scenarios**: today's positions replayed through three past windows
       (Russia's invasion of Ukraine, the August 2022 gas peak, the 2026 Iran war). It shows
       what happened, not a forecast.
@@ -86,22 +87,20 @@ returns_clean = core['returns_clean']
 var_95, var_99, es_975 = core['var_95'], core['var_99'], core['es_975']
 var_days = core['var_days']
 overall_corr = core['overall_corr']
-risk_level, risk_color = core['risk_level'], core['risk_color']
 regime_thr, current_regime = core['regime_thr'], core['current_regime']
 
-# ─── Section 1: Risk Signal ───
-st.subheader(f"Volatility Regime: {selected_commodity}")
-st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
-            unsafe_allow_html=True)
-_vctx = common.vol_context(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol))
-st.markdown(f"**30-day volatility {latest_vol:.2f}% daily, {latest_vol * ANNUAL:.0f}% annualised.** "
-            + common.vol_context_text(_vctx, ANNUAL))
-st.caption(f"The label ({current_regime}) uses the last 3 years only: Elevated above {regime_thr['elevated']:.2f}% "
-           f"(the 75th percentile), Extreme above {regime_thr['extreme']:.2f}% (the 90th). Read it with the line above: "
-           "a market can be ordinary for its last 3 years and still well above where it was before the war. "
-           "This compares volatility with the commodity's own past. "
-           "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size."
-           + (f" The end date is in the past, but the thresholds are always the last 3 years to today "
+# ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
+st.subheader("Volatility")
+_vs = common.vol_summary(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol),
+                         name=selected_commodity)
+# Neutral heading: no traffic-light colour, so one window cannot decide the reading on its own.
+st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
+            f"<div style='font-size:1.25rem; font-weight:500; opacity:0.85; margin:0.2rem 0 0.6rem'>"
+            f"{_vs['headline2']}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
+st.caption(_vs['label'] + " It compares volatility with the commodity's own past; it is not a measure of overall "
+           "risk: low volatility says nothing about supply, storage or position size."
+           + (f" The end date is in the past, but the 3-year thresholds are always the last 3 years to today "
               f"({regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so this label is applied with hindsight."
               if end_date < pd.Timestamp.today().date() else ""))
 _last_px = df_analysis['Price'].dropna().index.max()
@@ -116,12 +115,11 @@ _corr_30 = df_analysis['Rolling Correlation'].dropna()
 _partner = ctx.compare_ticker
 
 mc1, mc2, mc3, mc4 = st.columns(4)
-mc1.metric("Current Volatility (daily)", f"{latest_vol:.2f}%",
-           help=f"Standard deviation of the last 30 daily returns. Annualised: {latest_vol * ANNUAL:.1f}% "
-                "(daily x √252).")
-mc2.metric("Average Volatility (daily)", f"{avg_vol:.2f}%",
+mc1.metric("Current Volatility (30-day)", common.fmt_vol(latest_vol),
+           help="Standard deviation of the last 30 daily returns; annualised = daily x √252.")
+mc2.metric("Average Volatility (30-day)", common.fmt_vol(avg_vol),
            help=f"Average 30-day volatility over the selected period ({_vol_series.index.min():%d %b %Y} to "
-                f"{_vol_series.index.max():%d %b %Y}). Annualised: {avg_vol * ANNUAL:.1f}%. The regime "
+                f"{_vol_series.index.max():%d %b %Y}). The regime "
                 "thresholds use a different period (the last 3 years), so a value below this average can "
                 "still be Elevated.")
 if len(_corr_pairs):
@@ -340,9 +338,9 @@ with vcol1:
     st.subheader("30-Day Rolling Volatility")
     _vol_line = common.break_gaps(df_analysis['Volatility'])
     fig_v, ax_v = plt.subplots(figsize=(7, 3.5))
-    ax_v.plot(_vol_line.index, _vol_line, color=commodity['color'], linewidth=1)
-    ax_v.set_ylabel('Daily volatility (%)')
-    ax_v.set_title(f'{selected_commodity}: 30-day rolling volatility (daily; x √252 to annualise)', fontsize=9)
+    ax_v.plot(_vol_line.index, _vol_line * ANNUAL, color=commodity['color'], linewidth=1)
+    ax_v.set_ylabel('Volatility, annualised (%)')
+    ax_v.set_title(f'{selected_commodity}: 30-day rolling volatility, annualised (daily x √252)', fontsize=9)
     plt.tight_layout()
     st.pyplot(fig_v)
 with vcol2:
@@ -568,33 +566,33 @@ if garch is not None:
     cum_10d = garch['forecast_cum_10d']
 
     gc1, gc2, gc3, gc4 = st.columns(4)
-    gc1.metric("Current GARCH Vol (daily)", f"{current_cond_vol:.2f}%",
-               help=f"Fitted conditional volatility on the last day. Annualised: {current_cond_vol * ANNUAL:.1f}%.")
-    gc2.metric("Daily vol forecast, day 5", f"{forecast_vol.iloc[4]:.2f}%",
+    gc1.metric("Current GARCH Vol", common.fmt_vol(current_cond_vol),
+               help="Fitted conditional volatility on the last day.")
+    gc2.metric("Daily vol forecast, day 5", common.fmt_vol(forecast_vol.iloc[4]),
                help="Forecast volatility of the single daily return 5 trading days ahead, not of a 5-day period.")
-    gc3.metric("Daily vol forecast, day 10", f"{forecast_vol.iloc[9]:.2f}%",
+    gc3.metric("Daily vol forecast, day 10", common.fmt_vol(forecast_vol.iloc[9]),
                help="Forecast volatility of the single daily return 10 trading days ahead, not of a 10-day period.")
-    gc4.metric("10-day holding-period vol", f"{cum_10d:.2f}%",
+    gc4.metric("10-day holding-period vol", f"{cum_10d * np.sqrt(252 / 10):.0f}% ann. ({cum_10d:.2f}% over 10 days)",
                help="Volatility of the cumulative return over the next 10 trading days: square root of the sum "
-                    "of the 10 daily forecast variances.")
+                    "of the 10 daily forecast variances; annualised x √(252/10).")
 
     fig_garch, (ax_cv, ax_fc) = plt.subplots(1, 2, figsize=(14, 4))
 
     cond_vol = common.break_gaps(garch['conditional_volatility'])
-    ax_cv.plot(cond_vol.index, cond_vol, color='purple', linewidth=0.8, alpha=0.8)
-    ax_cv.set_ylabel('Conditional Volatility (daily %)')
-    ax_cv.set_title('GARCH(1,1) Conditional Volatility')
-    ax_cv.fill_between(cond_vol.index, cond_vol, 0, alpha=0.1, color='purple')
+    ax_cv.plot(cond_vol.index, cond_vol * ANNUAL, color='purple', linewidth=0.8, alpha=0.8)
+    ax_cv.set_ylabel('Conditional volatility, annualised (%)')
+    ax_cv.set_title('GARCH(1,1) conditional volatility, annualised')
+    ax_cv.fill_between(cond_vol.index, cond_vol * ANNUAL, 0, alpha=0.1, color='purple')
 
     _ci_lo, _ci_hi = garch['ci_lo'], garch['ci_hi']
 
     forecast_days = list(range(1, 11))
-    ax_fc.plot(forecast_days, forecast_vol.values, color='purple', linewidth=2, marker='o', markersize=5)
-    ax_fc.fill_between(forecast_days, _ci_lo, _ci_hi,
+    ax_fc.plot(forecast_days, forecast_vol.values * ANNUAL, color='purple', linewidth=2, marker='o', markersize=5)
+    ax_fc.fill_between(forecast_days, np.asarray(_ci_lo) * ANNUAL, np.asarray(_ci_hi) * ANNUAL,
                        alpha=0.18, color='purple', label='Simulated 90% range of future volatility (parameters fixed)')
     ax_fc.set_xlabel('Days Ahead')
-    ax_fc.set_ylabel('Forecast Volatility (daily %)')
-    ax_fc.set_title('Daily volatility forecast, days 1 to 10')
+    ax_fc.set_ylabel('Forecast volatility, annualised (%)')
+    ax_fc.set_title('Daily volatility forecast, days 1 to 10, annualised')
     ax_fc.set_xticks(forecast_days)
     ax_fc.legend(fontsize=8)
 
@@ -612,11 +610,11 @@ if garch is not None:
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
         if garch.get('nu') is not None:
             st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} (lower means fatter tails)")
-        st.write(f"**Reference level: sample average 30-day volatility = {avg_vol:.2f}%** "
-                 "(daily), over the selected range. (The Market page's GARCH check uses the 3-year average instead.)")
+        st.write(f"**Reference level: sample average 30-day volatility = {common.fmt_vol(avg_vol)}**, "
+                 "over the selected range. (The Market page's GARCH check uses the 3-year average instead.)")
         if garch['garch_long_run_ok']:
-            st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {garch['garch_long_run']:.2f}% "
-                     "(daily), the level the forecast reverts to.")
+            st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {common.fmt_vol(garch['garch_long_run'])}, "
+                     "the level the forecast reverts to.")
         else:
             st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown: with "
                      f"α + β = {garch['persistence']:.4f} the formula divides by almost zero and is unstable.")
@@ -635,30 +633,30 @@ st.subheader("Market Regime")
 st.write("Each day is labelled by its 30-day volatility against this commodity's own thresholds")
 
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
-regime_color = common.REGIME_COLORS[current_regime]
-st.markdown(f"<h3 style='color:{regime_color}'>Current Market Regime: {current_regime}</h3>",
-            unsafe_allow_html=True)
+st.markdown(f"**3-year label today: {current_regime}**")
 st.caption(common.regime_caption(regime_thr))
 
 regime_stats = features.groupby('Regime').agg(
     Days=('Volatility', 'count'),
-    Avg_Volatility=('Volatility', 'mean'),
+    Avg_Volatility=('Volatility', lambda v: v.mean() * ANNUAL),
+    Avg_Daily=('Volatility', 'mean'),
     Avg_Correlation=('Rolling Correlation', 'mean')
 ).round(2)
-regime_stats.columns = ['Trading Days', 'Avg daily volatility (%)', f'Avg correlation vs {_partner}']
+regime_stats.columns = ['Trading Days', 'Avg volatility, annualised (%)', 'Avg volatility, daily (%)',
+                        f'Avg correlation vs {_partner}']
 
 rcol1, rcol2 = st.columns([2, 1])
 with rcol1:
     fig2, ax3 = plt.subplots(figsize=(12, 4))
     for regime, group in features.groupby('Regime'):
-        ax3.scatter(group.index, group['Volatility'],
+        ax3.scatter(group.index, group['Volatility'] * ANNUAL,
                    c=common.REGIME_COLORS[regime], label=regime, alpha=0.5, s=10)
-    ax3.axhline(y=regime_thr['elevated'], color='orange', linewidth=1, linestyle='--', alpha=0.5,
-                label=f"Elevated threshold ({regime_thr['elevated']:.2f}%, p{common.ELEVATED_PCT})")
-    ax3.axhline(y=regime_thr['extreme'], color='red', linewidth=1, linestyle='--', alpha=0.5,
-                label=f"Extreme threshold ({regime_thr['extreme']:.2f}%, p{common.EXTREME_PCT})")
-    ax3.set_ylabel('30-day volatility (daily %)')
-    ax3.set_title(f'{selected_commodity}: Market Regime Detection')
+    ax3.axhline(y=regime_thr['elevated'] * ANNUAL, color='orange', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Elevated threshold ({common.fmt_vol(regime_thr['elevated'])}, p{common.ELEVATED_PCT})")
+    ax3.axhline(y=regime_thr['extreme'] * ANNUAL, color='red', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Extreme threshold ({common.fmt_vol(regime_thr['extreme'])}, p{common.EXTREME_PCT})")
+    ax3.set_ylabel('30-day volatility, annualised (%)')
+    ax3.set_title(f'{selected_commodity}: 3-year volatility labels, annualised')
     ax3.legend(fontsize=7)
     plt.tight_layout()
     st.pyplot(fig2)

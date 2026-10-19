@@ -291,7 +291,6 @@ def compute_core(ticker, compare_ticker, start, end):
 
     regime_thr = regime_thresholds(ticker, df_analysis['Volatility'])
     current_regime = regime_label(latest_vol, regime_thr)
-    risk_level, risk_color = RISK_SIGNAL[current_regime]
 
     return dict(
         df_analysis=df_analysis, has_compare=has_compare,
@@ -299,7 +298,7 @@ def compute_core(ticker, compare_ticker, start, end):
         returns_clean=returns_clean, var_95=var_95, var_99=var_99, es_975=es_975,
         var_days=len(var_returns), var_95_full=var_95_full, var_99_full=var_99_full,
         es_975_full=es_975_full,
-        overall_corr=overall_corr, risk_level=risk_level, risk_color=risk_color,
+        overall_corr=overall_corr,
         regime_thr=regime_thr, current_regime=current_regime,
     )
 
@@ -396,12 +395,7 @@ REGIME_WINDOW = 750               # trading days, about 3 years
 ELEVATED_PCT, EXTREME_PCT = 75, 90
 _MIN_HISTORY = 250
 REGIME_COLORS = {'Normal': 'green', 'Elevated': 'orange', 'Extreme': 'red'}
-# The headline signal is the regime under another name, so the two cannot disagree. It
-# describes volatility relative to the commodity's own recent past, not overall risk: low
-# volatility says nothing about supply, storage or the size of a position.
-RISK_SIGNAL = {'Normal': ("🟢 NORMAL FOR ITS LAST 3 YEARS: volatility outside their top 25%", "green"),
-               'Elevated': ("🟡 ELEVATED: volatility in the top 25% of its last 3 years", "orange"),
-               'Extreme': ("🔴 EXTREME: volatility in the top 10% of its last 3 years", "red")}
+ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
 
 
 @st.cache_data(ttl=86400, show_spinner="Computing regime thresholds...")
@@ -452,23 +446,63 @@ def vol_context(ticker, as_of, vol_now):
     prewar = vol[(vol.index >= PREWAR_START) & (vol.index <= PREWAR_END)]
     pre_med = float(prewar.median()) if len(prewar) >= 20 else None
     return dict(p1y=rank(vol.tail(250)), p3y=rank(vol.tail(750)), p_all=rank(vol), all_start=vol.index[0],
+                start_3y=vol.tail(750).index[0],
                 prewar_median=pre_med, prewar_ratio=(vol_now / pre_med) if pre_med else None)
 
 
-def vol_context_text(ctx, annual):
-    """One sentence for page captions from vol_context()."""
+def fmt_vol(daily, decimals=0):
+    """A daily volatility (%) written the one way the pages use: annualised first, daily in brackets."""
+    return f"{daily * ANNUAL:.{decimals}f}% ann. ({daily:.2f}% daily)"
+
+
+def _ordinal(x):
+    n = int(round(x))
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+_WAR_START = pd.Timestamp("2026-03-01")
+
+
+def vol_summary(ticker, as_of, vol_now, name=None):
+    """The single source of every volatility statement on the Risk and Market pages and in the AI input.
+
+    Returns dict(headline, headline2, detail, label, tile, regime, ...): `headline` and `headline2` are the
+    two lines of the large neutral heading, `detail` the paragraph under it, `label` the small grey line with
+    the 3-year label, `tile` the value for a metric tile. None if the history is too short."""
+    ctx = vol_context(ticker, as_of, vol_now)
+    close = load_close(ticker, _CONTEXT_START, dt.date.today())
+    hist = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
+    thr = regime_thresholds(ticker, hist)
+    regime = regime_label(vol_now, thr)
+    out = dict(regime=regime, thr=thr, ctx=ctx, tile=fmt_vol(vol_now, 0),
+               headline=f"{name + ' ' if name else ''}30-day volatility: {vol_now * ANNUAL:.0f}% annualised "
+                        f"({vol_now:.2f}% daily)",
+               label=(f"3-year label: {regime} (Elevated above the {ELEVATED_PCT}th percentile, "
+                      f"{fmt_vol(thr['elevated'])}; Extreme above the {EXTREME_PCT}th, {fmt_vol(thr['extreme'])})."))
     if ctx is None:
-        return ""
-    def o(x):
-        n = int(round(x))
-        return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
-    txt = (f"Percentile of its own 30-day volatility: {o(ctx['p1y'])} over the last year, {o(ctx['p3y'])} over "
-           f"3 years, {o(ctx['p_all'])} since {ctx['all_start']:%b %Y}")
-    if ctx['prewar_ratio'] is not None:
-        txt += (f"; {ctx['prewar_ratio']:.1f}x the pre-war level (median of Oct to Dec 2025, the last full quarter "
-                f"before the strikes on Iran on 28 Feb 2026: {ctx['prewar_median']:.2f}% daily, "
-                f"{ctx['prewar_median'] * annual:.0f}% annualised)")
-    return txt + "."
+        out.update(headline2="", detail="")
+        return out
+    r = ctx['prewar_ratio']
+    if r is None:
+        compare = "no pre-war reference"
+    elif r >= 1.1:
+        compare = f"{r:.1f}x its pre-war level"
+    elif r >= 0.9:
+        compare = f"close to its pre-war level ({r:.1f}x)"
+    else:
+        compare = f"below its pre-war level ({r:.1f}x)"
+    out['headline2'] = f"{compare} · {_ordinal(ctx['p3y'])} percentile of the last 3 years"
+    detail = ""
+    if ctx['prewar_median'] is not None:
+        detail += (f"Pre-war level: {ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% "
+                   "daily), the median of Oct to Dec 2025, the last full quarter before the strikes on Iran on "
+                   "28 Feb 2026. ")
+    detail += (f"Percentiles: {_ordinal(ctx['p1y'])} over the last year, {_ordinal(ctx['p3y'])} over 3 years, "
+               f"{_ordinal(ctx['p_all'])} since {ctx['all_start']:%b %Y}.")
+    if ctx['start_3y'] <= _WAR_START:
+        detail += " The 3-year window includes the volatility after the war began in March 2026."
+    out['detail'] = detail
+    return out
 
 
 def regime_label(vol, thr):
@@ -488,12 +522,10 @@ def vol_percentile(vol, thr):
 def regime_caption(thr):
     """One-line description of the thresholds, for page captions."""
     period = f"{thr['start']:%b %Y} to {thr['end']:%b %Y}"
-    return (f"Thresholds for this commodity: Normal up to {thr['elevated']:.2f}%, "
-            f"Elevated {thr['elevated']:.2f} to {thr['extreme']:.2f}%, Extreme above {thr['extreme']:.2f}% "
-            f"(the {ELEVATED_PCT}th and {EXTREME_PCT}th percentiles of its own 30-day rolling volatility, "
-            f"{period}, {thr['source']}). The signal at the top of the page is the same "
-            "classification. It compares volatility with the commodity's own recent past; it is not "
-            "a measure of overall risk.")
+    return (f"Thresholds for this commodity: Normal up to {fmt_vol(thr['elevated'])}, Elevated up to "
+            f"{fmt_vol(thr['extreme'])}, Extreme above that (the {ELEVATED_PCT}th and {EXTREME_PCT}th "
+            f"percentiles of its own 30-day rolling volatility, {period}, {thr['source']}). It compares volatility "
+            "with the commodity's own last 3 years; it is not a measure of overall risk.")
 
 
 def compute_regimes(features, thr):
