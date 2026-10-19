@@ -25,7 +25,7 @@ CARBON_CANDIDATES = [
         "ticker": "CARB.L",
         "label": "EU Carbon ETC (CARB.L, USD)",
         "short": "EU Carbon",
-        "name": "EU Carbon Allowance",
+        "name": "EU Carbon (EUA ETC, USD)",
         "unit": "ETC price, USD (tracks EUA futures)",
         "pure_eu": True,
         "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
@@ -163,6 +163,9 @@ def _raw_close(ticker, start, end):
     close = data['Close']
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
+    # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
+    # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
+    close = close[close.index.dayofweek < 5]
     return close.astype(float)
 
 
@@ -227,7 +230,11 @@ VAR_WINDOW = 250     # trading days behind the headline VaR and Expected Shortfa
 
 
 def _var_es(returns):
-    """Historical VaR 95%, VaR 99% and ES 97.5% of daily returns, in % (losses negative)."""
+    """Historical VaR 95%, VaR 99% and ES 97.5% of daily returns, in % (losses negative).
+
+    Quantiles use numpy's default linear interpolation between the two nearest days. ES is
+    the mean of the returns at or below the 2.5% quantile (7 of 250 days, about 2.8%).
+    """
     q95, q99, q975 = np.percentile(returns, [5, 1, 2.5])
     return q95 * 100, q99 * 100, returns[returns <= q975].mean() * 100
 
@@ -365,8 +372,12 @@ def fit_garch(returns_clean):
         # conditional_volatility is already a volatility series, no need for sqrt(x**2)
         current_cond_vol=float(result.conditional_volatility.iloc[-1]),
         forecast_vol=forecast_vol.values,
+        # Daily volatility forecast for day 5 and day 10 ahead (not holding-period volatility).
         forecast_5d=float(forecast_vol.iloc[4]),
         forecast_10d=float(forecast_vol.iloc[9]),
+        # Volatility of the 10-day holding-period return: sqrt of the sum of the 10 daily
+        # forecast variances (returns are close to uncorrelated from day to day).
+        forecast_cum_10d=float(np.sqrt(forecast.variance.iloc[-1].iloc[:10].sum())),
         ci_lo=np.percentile(_boot_vols, 5, axis=0),
         ci_hi=np.percentile(_boot_vols, 95, axis=0),
     )
@@ -507,12 +518,17 @@ def kupiec_pof(n, x, p):
 
 
 def basel_zone(exceptions, n=250):
-    """Basel traffic light for 99% VaR over 250 days: green 0–4, yellow 5–9, red 10+.
-    For shorter samples the thresholds are scaled by n / 250."""
-    scale = n / 250
-    if exceptions <= 4 * scale:
+    """Basel traffic light for 99% VaR over 250 days: green 0-4, yellow 5-9, red 10+.
+
+    The Basel zones (BCBS 1996) are defined for a 250-day backtest only. Scaling the
+    thresholds by n / 250 is not the Basel method, so for fewer days None is returned
+    and the page says there are not enough days.
+    """
+    if n < 250:
+        return None
+    if exceptions <= 4:
         return 'Green'
-    if exceptions <= 9 * scale:
+    if exceptions <= 9:
         return 'Yellow'
     return 'Red'
 
@@ -551,25 +567,58 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     )
 
 
+# ─── Which monthly contract a continuous front-month series is tracking ───
+@st.cache_data(ttl=3600, show_spinner=False)
+def front_month_contract(continuous, root, last_date, last_price):
+    """Delivery month of the monthly contract that `continuous` (e.g. TTF=F) tracked on `last_date`.
+
+    Yahoo Finance does not label the continuous series reliably, so the next two monthly
+    contracts are downloaded and the one whose close on `last_date` equals the continuous
+    close is taken. Returns (dt.date of the delivery month, contract symbol), or (None, None)
+    if no contract matches.
+    """
+    d = pd.Timestamp(last_date)
+    for k in (1, 2, 0):
+        month_index = d.month - 1 + k
+        year, month = d.year + month_index // 12, month_index % 12 + 1
+        sym = f"{root}{MONTH_CODES[month - 1]}{year % 100:02d}.NYM"
+        try:
+            data = yf.download(sym, start=d - pd.Timedelta(days=10), end=d + pd.Timedelta(days=1),
+                               progress=False)
+        except Exception:
+            continue
+        if data is None or data.empty:
+            continue
+        close = data['Close']
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = close.dropna()
+        if d in close.index and abs(float(close.loc[d]) - float(last_price)) < 1e-6:
+            return dt.date(year, month, 1), sym
+    return None, None
+
+
 # ─── Forward curves from individual monthly futures on Yahoo Finance ───
 MONTH_CODES = "FGHJKMNQUVXZ"
 # Continuous ticker → (monthly contract root on NYMEX, unit). EU carbon has no monthly
 # contracts on Yahoo Finance: EUA futures are annual December contracts on ICE Endex.
 CURVE_ROOTS = {"CL=F": ("CL", "$/barrel"), "BZ=F": ("BZ", "$/barrel"), "TTF=F": ("TTF", "€/MWh")}
-CURVE_FRESH_DAYS = 5     # a contract needs a settlement within this many trading days
+CURVE_FRESH_DAYS = 5     # a contract needs a close within this many trading days
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching monthly futures contracts...")
 def forward_curve(root, n=12, today=None):
-    """Latest prices of the next `n` monthly contracts, e.g. CLX26.NYM, CLZ26.NYM, ...
+    """Latest daily closes of the next `n` monthly contracts, e.g. CLX26.NYM, CLZ26.NYM, ...
 
     Symbols are generated from the current month onwards (with spares for contracts
     that have already expired) and downloaded in one batch. A contract is kept if it
-    has a settlement within the last CURVE_FRESH_DAYS trading days of the batch (the
-    dates on which any contract settled), so expired or stale contracts drop out while
-    a contract that missed only the latest day stays. Its price is its latest
-    settlement. Nothing is interpolated: missing contracts are simply absent. Returns a
-    DataFrame with Contract, Delivery, Price and Last trade, sorted by delivery month.
+    has a close within the last CURVE_FRESH_DAYS trading days of the batch (the dates
+    on which any contract traded), so expired or stale contracts drop out while a
+    contract that missed only the latest day stays. Its price is its latest daily close
+    on Yahoo Finance (for a finished day normally the settlement; on a trading day the
+    latest price). Weekend rows (Sunday evening session) are dropped. Nothing is
+    interpolated: missing contracts are simply absent. Returns a DataFrame with
+    Contract, Delivery, Price and Last trade, sorted by delivery month.
     """
     today = today or dt.date.today()
     symbols = {}
@@ -588,6 +637,9 @@ def forward_curve(root, n=12, today=None):
     closes = data['Close']
     if isinstance(closes, pd.Series):
         closes = closes.to_frame(list(symbols)[0])
+    # Same rule as _raw_close: a Saturday or Sunday row is an intraday price from the
+    # Sunday evening session, not a daily close.
+    closes = closes[closes.index.dayofweek < 5]
 
     rows = []
     for sym in closes.columns:
