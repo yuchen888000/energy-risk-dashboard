@@ -34,14 +34,14 @@ CARBON_CANDIDATES = [
     },
     {
         "ticker": "KRBN",
-        "label": "Global Carbon (KRBN — EUA-weighted)",
+        "label": "Global Carbon (KRBN, EUA-weighted)",
         "short": "Carbon",
         "name": "Carbon Allowances (Global)",
         "unit": "ETF price, USD",
         "pure_eu": False,
         "note": ("KraneShares Global Carbon Strategy ETF. EUA carries the dominant index weight, "
                  "but California (CCA), RGGI, UK (UKA) and Washington (WCA) allowances are also "
-                 "included — a correlated proxy for EU carbon, not a pure EUA price."),
+                 "included: a correlated proxy for EU carbon, not a pure EUA price."),
     },
     {
         "ticker": "ICLN",
@@ -388,24 +388,27 @@ def fit_garch(returns_clean):
 # history since 2010 includes the 2021-22 energy crisis, when TTF's daily volatility was
 # several times its normal level; percentiles taken over it set the "normal" line so high
 # that a market under real stress (e.g. 2026, with Qatari LNG disrupted) was still labelled
-# Calm. A recent window compares today with the market as it has recently been.
+# Normal. A recent window compares today with the market as it has recently been.
 REGIME_WINDOW = 750               # trading days, about 3 years
-CALM_PCT, CRISIS_PCT = 50, 90     # percentiles of the commodity's own 30-day volatility
+# Elevated = top 25%, Extreme = top 10% of the commodity's own 30-day volatility. There is no
+# industry-standard regime cut-off; desks usually quote where volatility sits in its own history
+# (its percentile), which the page shows next to the label.
+ELEVATED_PCT, EXTREME_PCT = 75, 90
 _MIN_HISTORY = 250
-REGIME_COLORS = {'Calm': 'green', 'Volatile': 'orange', 'Crisis': 'red'}
+REGIME_COLORS = {'Normal': 'green', 'Elevated': 'orange', 'Extreme': 'red'}
 # The headline signal is the regime under another name, so the two cannot disagree. It
 # describes volatility relative to the commodity's own recent past, not overall risk: low
 # volatility says nothing about supply, storage or the size of a position.
-RISK_SIGNAL = {'Calm': ("🟢 CALM: volatility below its 3-year median", "green"),
-               'Volatile': ("🟡 VOLATILE: volatility above its 3-year median", "orange"),
-               'Crisis': ("🔴 CRISIS-LEVEL: volatility in its top 10% of the last 3 years", "red")}
+RISK_SIGNAL = {'Normal': ("🟢 NORMAL: volatility outside the top 25% of its last 3 years", "green"),
+               'Elevated': ("🟡 ELEVATED: volatility in the top 25% of its last 3 years", "orange"),
+               'Extreme': ("🔴 EXTREME: volatility in the top 10% of its last 3 years", "red")}
 
 
 @st.cache_data(ttl=86400, show_spinner="Computing regime thresholds...")
 def regime_thresholds(ticker, fallback_vol):
-    """Volatile / Crisis thresholds from the commodity's own recent 30-day volatility.
+    """Elevated / Extreme thresholds from the commodity's own recent 30-day volatility.
 
-    Volatile starts at the CALM_PCT-th percentile and Crisis at the CRISIS_PCT-th, both
+    Elevated starts at the ELEVATED_PCT-th percentile and Extreme at the EXTREME_PCT-th, both
     taken over the last REGIME_WINDOW trading days up to today (so they do not move with
     the selected date range). If that history is too short, `fallback_vol` (the 30-day
     volatility of the selected range) is used instead. The mean and standard deviation
@@ -417,34 +420,39 @@ def regime_thresholds(ticker, fallback_vol):
     source = f"last {len(vol):,} trading days"
     if len(vol) < _MIN_HISTORY:
         vol, source = fallback_vol.dropna(), "selected date range only; recent history unavailable"
-    calm, crisis = np.percentile(vol, [CALM_PCT, CRISIS_PCT])
-    return dict(calm=float(calm), crisis=float(crisis), source=source,
+    elevated, extreme = np.percentile(vol, [ELEVATED_PCT, EXTREME_PCT])
+    return dict(elevated=float(elevated), extreme=float(extreme), source=source, hist=np.sort(vol.values),
                 start=vol.index[0], end=vol.index[-1], n=len(vol),
                 mean=float(vol.mean()), std=float(vol.std()))
 
 
 def regime_label(vol, thr):
     """Regime for one volatility value (%): a higher volatility never gets a lower regime."""
-    if vol > thr['crisis']:
-        return 'Crisis'
-    if vol > thr['calm']:
-        return 'Volatile'
-    return 'Calm'
+    if vol > thr['extreme']:
+        return 'Extreme'
+    if vol > thr['elevated']:
+        return 'Elevated'
+    return 'Normal'
+
+
+def vol_percentile(vol, thr):
+    """Share of the threshold window's 30-day volatilities below `vol`, in % (its percentile rank)."""
+    return 100.0 * np.searchsorted(thr['hist'], vol, side='left') / len(thr['hist'])
 
 
 def regime_caption(thr):
     """One-line description of the thresholds, for page captions."""
-    period = f"{thr['start']:%b %Y}–{thr['end']:%b %Y}"
-    return (f"Thresholds for this commodity: Calm < {thr['calm']:.2f}% · "
-            f"Volatile {thr['calm']:.2f}–{thr['crisis']:.2f}% · Crisis > {thr['crisis']:.2f}% "
-            f"(the {CALM_PCT}th and {CRISIS_PCT}th percentiles of its own 30-day rolling volatility, "
+    period = f"{thr['start']:%b %Y} to {thr['end']:%b %Y}"
+    return (f"Thresholds for this commodity: Normal up to {thr['elevated']:.2f}%, "
+            f"Elevated {thr['elevated']:.2f} to {thr['extreme']:.2f}%, Extreme above {thr['extreme']:.2f}% "
+            f"(the {ELEVATED_PCT}th and {EXTREME_PCT}th percentiles of its own 30-day rolling volatility, "
             f"{period}, {thr['source']}). The signal at the top of the page is the same "
             "classification. It compares volatility with the commodity's own recent past; it is not "
             "a measure of overall risk.")
 
 
 def compute_regimes(features, thr):
-    """Label each day Calm / Volatile / Crisis from its 30-day volatility alone.
+    """Label each day Normal / Elevated / Extreme from its 30-day volatility alone.
 
     `features` has a Volatility column (other columns are kept for the statistics);
     `thr` comes from regime_thresholds().
@@ -696,7 +704,7 @@ def forward_curve(root, n=12, today=None):
 
 
 def gas_season(delivery):
-    """Gas-year season of a delivery month: Winter = Oct–Mar, Summer = Apr–Sep."""
+    """Gas-year season of a delivery month: Winter = Oct to Mar, Summer = Apr to Sep."""
     y = delivery.year % 100
     if delivery.month >= 10:
         return f"Winter {y:02d}/{(y + 1) % 100:02d}"

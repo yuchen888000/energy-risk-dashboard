@@ -472,8 +472,8 @@ else:
             f"Ranked by **greenhouse-gas emissions per million euro of GDP at 2020 prices**. "
             f"EU-27 {selected_year}: **{eu['ghg_int']:.0f} tCO2e per M€**.")
         st.caption(
-            "What it measures: total greenhouse-gas emissions excluding land use (Eurostat env_air_gge, "
-            "TOTX4_MEMO) divided by GDP in chain-linked volumes (nama_10_gdp, CLV20_MEUR), so a fall over "
+            "What it measures: total greenhouse-gas emissions excluding land use and the memo items "
+            "(international aviation and maritime bunkers) (Eurostat env_air_gge, TOTX4_MEMO) divided by GDP in chain-linked volumes (nama_10_gdp, CLV20_MEUR), so a fall over "
             "time is a fall in emissions per unit of real output, not an effect of inflation. Levels across "
             "countries are converted at 2020 exchange rates, not purchasing power, which makes lower-income "
             "economies look more intensive. Renewable share of gross final energy consumption: nrg_ind_ren. "
@@ -775,7 +775,8 @@ else:
 
 # ─── Section 2b: 30-day tone trend ───
 st.subheader("Headline Tone, Last 30 Days")
-st.write(f"Daily tone of {selected_commodity}-related European energy headlines over the past 30 days")
+st.write(f"Daily tone of {selected_commodity}-related energy headlines over the past 30 days (the filter drops "
+         "US domestic stories; it does not require a European subject)")
 
 
 @st.cache_data(ttl=7200, show_spinner="Fetching 30-day news history...")
@@ -802,7 +803,7 @@ def get_sentiment_trend(rss_query, news_term, keywords, gas):
             pub = published_at(entry)
             if pub is None:
                 continue
-            rows.append({'Date': pub.tz_convert(None).normalize(), 'Headline': text,
+            rows.append({'Date': pub.tz_convert('Europe/Berlin').tz_localize(None).normalize(), 'Headline': text,
                          'Publisher': source, 'Score': finvader_score(text)})
             seen.add(key)
     if not rows:
@@ -817,7 +818,7 @@ avg_30d = None
 if trend_hl is not None and trend_hl['Date'].nunique() > 3:
     daily = trend_hl.groupby('Date')['Score'].agg(['mean', 'size'])
     avg_30d = float(trend_hl['Score'].mean())   # every headline counts once
-    today_ts = pd.Timestamp.now(tz='UTC').tz_convert(None).normalize()
+    today_ts = pd.Timestamp.now(tz='Europe/Berlin').tz_localize(None).normalize()   # Berlin calendar days
     tc1, tc2, tc3 = st.columns(3)
     if today_ts in daily.index:
         tc1.metric("Today's average tone (FinVADER)", f"{daily.loc[today_ts, 'mean']:+.3f}")
@@ -1038,9 +1039,17 @@ if has_corr:
 # 4. Large daily losses in the last 252 trading days.
 _tail_when = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x 3-year VaR99) in the last {len(recent_all)} days"
               + (", Brent roll days excluded" if IS_BRENT else ""))
-_tail_latest = f"worst {recent_rets.min():.2f}%" + (" (excl. roll days)" if IS_BRENT else "")
-checks.append(("Large daily loss", _tail_when, _tail_latest, len(tail_days) > 0,
-               f"{len(tail_days)} of {len(recent_rets)}"))
+# "Fires now" means the latest trading day, as for the other checks; the last breach in the window is
+# shown with its date, so a loss months ago is not read as today's signal.
+_last_ret = float(recent_all.iloc[-1])
+_last_is_roll = bool(_is_roll[-1]) if IS_BRENT else False
+_tail_now = (_last_ret < -tail_thr) and not _last_is_roll
+_tail_latest = (f"latest {_last_ret:+.2f}%"
+                + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
+                   else f"; worst in window {recent_rets.min():.2f}%")
+                + (" (excl. roll days)" if IS_BRENT else ""))
+checks.append(("Large daily loss", _tail_when.replace(" in the last", " on the latest day; breaches counted over the last"),
+               _tail_latest, _tail_now, f"{len(tail_days)} of {len(recent_rets)}"))
 if len(tail_days):
     _tail_detail = (f'{len(tail_days)} daily loss(es) in the last {len(recent_all)} trading days '
                     + ("(Brent roll days excluded) " if IS_BRENT else "")
@@ -1050,7 +1059,9 @@ if len(tail_days):
         _tail_detail += " " + tail_roll_fact
     elif roll_note and not IS_BRENT:
         _tail_detail += roll_note
-    anomalies.append({'level': '🔵 WATCH', 'type': f'Daily Loss Beyond {TAIL_MULT:.0f}x 3-Year VaR99',
+    anomalies.append({'level': '🔵 WATCH' if _tail_now else '🟢 INFO',
+                      'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x 3-Year VaR99'
+                               + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not today)')),
                       'detail': _tail_detail})
 
 check_tbl = pd.DataFrame(checks, columns=['Check', 'Fires when', 'Latest', 'Fires now',
@@ -1111,10 +1122,10 @@ def level_facts(vol_now, regime, vol_spike, vol_calm, ref_mean, g_now, g_10d, ga
         levels.append((subject, float(thr), float(cur)))
 
     v = f"{vol_now:.2f}%"
-    add('vol', "Current 30-day volatility", vol_now, v, regime['calm'],
-        f"the Calm/Volatile threshold {regime['calm']:.2f}%")
-    add('vol', "Current 30-day volatility", vol_now, v, regime['crisis'],
-        f"the Volatile/Crisis threshold {regime['crisis']:.2f}%")
+    add('vol', "Current 30-day volatility", vol_now, v, regime['elevated'],
+        f"the Normal/Elevated threshold {regime['elevated']:.2f}%")
+    add('vol', "Current 30-day volatility", vol_now, v, regime['extreme'],
+        f"the Elevated/Extreme threshold {regime['extreme']:.2f}%")
     add('vol', "Current 30-day volatility", vol_now, v, vol_spike,
         f"the volatility-spike threshold {vol_spike:.2f}% ({VOL_HI_PCT}th percentile of 3 years)")
     add('vol', "Current 30-day volatility", vol_now, v, vol_calm,
@@ -1217,7 +1228,7 @@ def drop_crossed_watch_sentences(text, levels):
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
                             var_95_v, current_regime_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
                             avg_score_v, score_model, avg_30d_v, anomaly_types_str,
-                            top_neg_str, date_str, regime_calm, regime_crisis, levels_str, tail_fact_str):
+                            top_neg_str, date_str, regime_elevated, regime_extreme, levels_str, tail_fact_str):
     api_key = None
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
@@ -1258,9 +1269,9 @@ Volatility
 - The GARCH check compares the day-10 forecast with the commodity's 3-year average 30-day volatility, not with current volatility; the GARCH model is fitted on the same 3 years. Describe the forecast only by the two facts given: its direction relative to current GARCH volatility (higher, lower or about the same) and whether it is above or below the 3-year average. Use neutral wording: do not call it normalisation, mean reversion, a return to normal, escalation, a build-up of risk, calming, reassuring or a danger signal.
 
 Risk signal and regime - one classification
-- "Regime" compares current 30-day volatility with thresholds for this commodity taken from its last 3 years of volatility (not the selected window): Calm below {regime_calm:.2f}% (its 50th percentile), Volatile {regime_calm:.2f}-{regime_crisis:.2f}%, Crisis above {regime_crisis:.2f}% (its 90th percentile).
+- "Regime" compares current 30-day volatility with thresholds for this commodity taken from its last 3 years of volatility (not the selected window): Normal up to {regime_elevated:.2f}% (its 75th percentile), Elevated {regime_elevated:.2f} to {regime_extreme:.2f}%, Extreme above {regime_extreme:.2f}% (its 90th percentile).
 - "Risk signal" is the same classification under another name. Do not present them as two separate pieces of evidence.
-- The regime measures volatility relative to the commodity's own recent past, not overall risk. Never call the market "low risk" because the regime is Calm: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
+- The regime measures volatility relative to the commodity's own recent past, not overall risk. Never call the market "low risk" because the regime is Normal: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
 - The selected-period average volatility is context only; it does not set the risk signal.
 
 VaR
@@ -1300,6 +1311,9 @@ HARD RULES
 - Compare a value only with a level listed for that value.
 - If the headline field says feeds were unreachable, treat BOTH tone readings as meaningless: do not mention tone or news anywhere in your answer, and build all three sentences from the volatility, VaR, GARCH and regime data alone.
 - Never infer complacency, fear or a price direction from headline tone.
+- GARCH is a model fitted on past daily returns. Never call it implied, options-implied or option-based, and never say it is or is not a "model artifact".
+- A check that last fired on an earlier date is a past event: name its date if you mention it, and never present it as a current signal.
+- Give no trading, hedging or position-sizing advice.
 - If a field reads N/A, None or None retrieved, pass over it in silence. Do not comment on its absence.
 - Never attribute a claim, forecast or warning to a named bank, agency, institution or analyst.
 - Never present a headline as established fact.
@@ -1349,10 +1363,12 @@ level_lines, level_list = level_facts(
     garch['current_cond_vol'] if garch is not None else None, garch_forecast_10d, GARCH_HI, GARCH_LO,
     corr_v=corr_now if has_corr else None, corr_lo_v=float(corr_lo) if has_corr else None,
     corr_hi_v=float(corr_hi) if has_corr else None, corr_label=compare_label)
-_worst_txt = (f"Worst daily loss in the last {len(recent_all)} trading days"
-              + (" (Brent roll days excluded)" if IS_BRENT else "")
-              + f": {recent_rets.min():.2f}%, " + ("beyond" if recent_rets.min() < -tail_thr else "within")
-              + f" the daily-loss threshold of -{tail_thr:.2f}%.")
+_worst_txt = (f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_ret:+.2f}%, "
+              + ("beyond" if _tail_now else "within") + f" the daily-loss threshold of -{tail_thr:.2f}%. "
+              + (f"The last loss beyond it was {tail_days.iloc[-1]:.2f}% on {tail_days.index[-1]:%d %b %Y}, "
+                 f"{(recent_all.index[-1] - tail_days.index[-1]).days} days before the data date: a past event, "
+                 "not a current signal." if len(tail_days) and not _tail_now else "")
+              + (" Brent roll days excluded." if IS_BRENT else ""))
 levels_for_llm = "\n".join(f"- {s}" for s in level_lines + [_worst_txt])
 
 narrative, error = generate_risk_narrative(
@@ -1372,8 +1388,8 @@ narrative, error = generate_risk_narrative(
     anomaly_types_str=anomaly_types_for_llm,
     top_neg_str=top_neg_for_llm,
     date_str=today_date_str,
-    regime_calm=float(regime_thr['calm']),
-    regime_crisis=float(regime_thr['crisis']),
+    regime_elevated=float(regime_thr['elevated']),
+    regime_extreme=float(regime_thr['extreme']),
     levels_str=levels_for_llm,
     tail_fact_str=tail_roll_fact,
 )

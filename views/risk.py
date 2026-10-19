@@ -11,6 +11,10 @@ import streamlit as st
 
 import common
 
+def _ord(n):
+    return "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
 ctx = common.context()
 selected_commodity = ctx.selected_commodity
 commodity = ctx.commodity
@@ -29,7 +33,7 @@ if CARBON_TICKER == "CARB.L":
 else:
     CARBON_FX_NOTE = f"the carbon proxy ({CARBON_TICKER}) is a USD fund, not a euro EUA price"
 
-with st.sidebar.expander("Methodology — Risk page"):
+with st.sidebar.expander("Methodology: Risk page"):
     st.markdown("""
     - **30-Day Rolling Volatility**: equal-weighted standard deviation of simple daily returns
       over 30 trading days, shown as a daily figure (annualised = daily x √252). This is a
@@ -42,8 +46,8 @@ with st.sidebar.expander("Methodology — Risk page"):
       the 2.5% quantile.
     - **GARCH(1,1) Forecast**: Student-t GARCH; daily volatility forecast for each of the next
       10 days, and the 10-day holding-period volatility.
-    - **Regime Detection**: per-commodity volatility thresholds only. Volatile above the
-      50th and Crisis above the 90th percentile of the commodity's own 30-day volatility
+    - **Regime Detection**: per-commodity volatility thresholds only. Elevated above the
+      75th and Extreme above the 90th percentile of the commodity's own 30-day volatility
       over the last 3 years (750 trading days), so the 2021-22 crisis does not set today's
       "normal". The headline signal is the same classification, and a lower volatility can
       never get a higher regime.
@@ -65,7 +69,7 @@ if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")
     st.stop()
 if not ctx.is_carbon and not core['has_compare']:
-    st.caption(f"{CARBON_LABEL} has limited coverage over the selected range — "
+    st.caption(f"{CARBON_LABEL} has limited coverage over the selected range, "
                "widen the date window for a fuller comparison.")
 
 _stale = [(n, a, b) for n, t in ((selected_commodity, commodity['ticker']),
@@ -89,9 +93,11 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 st.subheader(f"Volatility Regime: {selected_commodity}")
 st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
             unsafe_allow_html=True)
-st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% (daily) against this commodity's "
-           f"thresholds from its last 3 years (Volatile above {regime_thr['calm']:.2f}%, Crisis above "
-           f"{regime_thr['crisis']:.2f}%). This compares volatility with the commodity's own recent past. "
+st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% (daily, "
+           f"{latest_vol * ANNUAL:.0f}% annualised) is at the "
+           f"{common.vol_percentile(latest_vol, regime_thr):.0f}{_ord(round(common.vol_percentile(latest_vol, regime_thr)))} percentile of this commodity's last 3 years "
+           f"(Elevated above {regime_thr['elevated']:.2f}%, the 75th percentile; Extreme above "
+           f"{regime_thr['extreme']:.2f}%, the 90th). This compares volatility with the commodity's own recent past. "
            "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size."
            + (f" The end date is in the past, but the thresholds are always the last 3 years to today "
               f"({regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so this label is applied with hindsight."
@@ -115,7 +121,7 @@ mc2.metric("Average Volatility (daily)", f"{avg_vol:.2f}%",
            help=f"Average 30-day volatility over the selected period ({_vol_series.index.min():%d %b %Y} to "
                 f"{_vol_series.index.max():%d %b %Y}). Annualised: {avg_vol * ANNUAL:.1f}%. The regime "
                 "thresholds use a different period (the last 3 years), so a value below this average can "
-                "still be Volatile.")
+                "still be Elevated.")
 if len(_corr_pairs):
     mc3.metric(f"Correlation vs {_partner}", f"{overall_corr:.2f}",
                help=f"Pearson correlation of daily returns, {_corr_pairs.index.min():%d %b %Y} to "
@@ -179,7 +185,7 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # ─── Section 2b: Forward Curve ───
-st.subheader(f"Forward Curve — {selected_commodity}")
+st.subheader(f"Forward Curve: {selected_commodity}")
 _MIN_CONTRACTS = 3
 _MIN_SEASON = 3   # monthly contracts a season needs before its average is shown
 if commodity['ticker'] not in common.CURVE_ROOTS:
@@ -199,9 +205,15 @@ else:
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
-        labels_fc = [f"{d:%b %y}" for d in curve['Delivery']]
+        # A real monthly axis: months with no contract stay empty and the line is not drawn across them.
+        labels_fc = list(curve['Delivery'])
+        _all_months = pd.date_range(curve['Delivery'].min(), curve['Delivery'].max(), freq='MS')
+        _line = curve.set_index('Delivery')['Price'].reindex(_all_months)
+        _gaps = [f"{m:%b %y}" for m in _all_months[_line.isna()]]
         fig_fc, ax_fc = plt.subplots(figsize=(14, 3.8))
-        ax_fc.plot(labels_fc, curve['Price'], color=commodity['color'], linewidth=1.5, zorder=1)
+        ax_fc.plot(_all_months, _line.values, color=commodity['color'], linewidth=1.5, zorder=1)
+        ax_fc.set_xticks(_all_months)
+        ax_fc.set_xticklabels([f"{m:%b %y}" for m in _all_months])
 
         if curve_root == "TTF":
             # Gas curves are seasonal: winter delivery carries a heating premium, so front
@@ -218,6 +230,15 @@ else:
                           summers[0] if summers else None)
             curve_shape = "Seasonal curve"
 
+            # Contracts of a season still trading: a TTF month expires two business days before it starts.
+            _asof = curve['Last trade'].max()
+
+            def _open_months(key):
+                _y = int(key.split()[-1].split('/')[0]) + 2000
+                months = (pd.date_range(f"{_y}-10-01", f"{_y + 1}-03-01", freq='MS') if key.startswith("Winter")
+                          else pd.date_range(f"{_y}-04-01", f"{_y}-09-01", freq='MS'))
+                return sum(pd.Timestamp(np.busday_offset(m.date(), -2, roll='forward')) > _asof for m in months)
+
             fc1, fc2, fc3, fc4 = st.columns(4)
             fc1.markdown("<h3 style='color:steelblue; margin-top:0'>Seasonal curve</h3>",
                          unsafe_allow_html=True)
@@ -229,12 +250,12 @@ else:
                 _season_ok[key] = n_season >= _MIN_SEASON
                 if _season_ok[key]:
                     _d = curve.loc[curve['Season'] == key, 'Delivery']
-                    col_fc.metric(f"{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of 6 contracts)",
+                    col_fc.metric(f"{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of {_open_months(key)} contracts still trading)",
                                   f"{seasons.loc[key, 'Price']:.2f} {curve_unit}")
                 else:
                     _months = ", ".join(f"{d:%b %y}" for d in curve.loc[curve['Season'] == key, 'Delivery'])
                     col_fc.metric(f"{key} average", "n/a",
-                                  help=f"Only {n_season} of 6 monthly contracts available ({_months}); "
+                                  help=f"Only {n_season} of {_open_months(key)} monthly contracts still trading available ({_months}); "
                                        f"an average needs at least {_MIN_SEASON}.")
                     col_fc.caption(f"Only {n_season} contract{'s' if n_season > 1 else ''} ({_months}): "
                                    "no season average.")
@@ -248,15 +269,16 @@ else:
 
             season_colors = ['steelblue' if k.startswith("Winter") else 'darkorange' for k in curve['Season']]
             ax_fc.scatter(labels_fc, curve['Price'], c=season_colors, s=36, zorder=2)
-            ax_fc.scatter([], [], c='steelblue', label='Winter (Oct–Mar)')
-            ax_fc.scatter([], [], c='darkorange', label='Summer (Apr–Sep)')
+            ax_fc.scatter([], [], c='steelblue', label='Winter (Oct to Mar)')
+            ax_fc.scatter([], [], c='darkorange', label='Summer (Apr to Sep)')
             ax_fc.legend(fontsize=8, loc='upper right')
             shape_note = (
+                (f"No contract for {', '.join(_gaps)}: the gap is left empty, not interpolated. " if _gaps else "") +
                 "TTF is not labelled contango or backwardation: gas curves are seasonal, with winter "
-                "deliveries (Oct–Mar) usually priced above summer (Apr–Sep) because of heating demand "
+                "deliveries (Oct to Mar) usually priced above summer (Apr to Sep) because of heating demand "
                 "and storage costs, so comparing the front month with the last month mostly measures "
                 f"which seasons they fall in. A season average is shown only when at least {_MIN_SEASON} "
-                "of its six monthly contracts are available. These are NYMEX Dutch TTF contracts; the "
+                "of its monthly contracts still trading are available. These are NYMEX Dutch TTF contracts; the "
                 "European benchmark is ICE Endex TTF, whose prices can differ slightly. ")
         else:
             fb_spread = front['Price'] - back['Price']
@@ -272,7 +294,13 @@ else:
             fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
                          unsafe_allow_html=True)
             fc2.metric(f"Front month ({front['Delivery']:%b %y})", f"{front['Price']:.2f} {curve_unit}")
-            fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}")
+            _mixed = front['Last trade'].normalize() != back['Last trade'].normalize()
+            fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
+                       help=(f"Front month close of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} close of "
+                             f"{back['Last trade']:%d %b}: the two ends are from different days." if _mixed
+                             else f"Both closes of {front['Last trade']:%d %b}."))
+            if _mixed:
+                fc3.caption(f"Front {front['Last trade']:%d %b}, back {back['Last trade']:%d %b}")
             ax_fc.scatter(labels_fc, curve['Price'], color=commodity['color'], s=30, zorder=2)
             shape_note = (
                 "Contango: later deliveries cost more than the front month (spread negative). "
@@ -384,7 +412,7 @@ else:
 
 
 # ─── Section 4: Value at Risk ───
-st.subheader(f"Value at Risk (VaR) — {selected_commodity}")
+st.subheader(f"Value at Risk (VaR): {selected_commodity}")
 st.write(f"Historical simulation, 1-day horizon, per unit of a long {selected_commodity} position. "
          "VaR 95% is the daily loss exceeded on 5% of days (about 1 day in 20) and VaR 99% the loss exceeded "
          "on 1% of days; neither is the worst case (see Max daily loss and Expected Shortfall). "
@@ -394,6 +422,8 @@ _first, _last = returns_clean.index.min(), returns_clean.index.max()
 # The dates, not a named event: the worst days differ by commodity (Brent's is in 2020).
 full_label = f"full period ({_first:%b %Y} to {_last:%b %Y})"
 _recent_ret = returns_clean.tail(var_days)
+
+
 _n_tail = int((_recent_ret <= np.percentile(_recent_ret, 2.5)).sum())
 
 vc1, vc2, vc3, vc4 = st.columns(4)
@@ -423,7 +453,14 @@ vc4.metric("Max daily loss", f"{_recent_ret.min() * 100:.2f}%",
 vc4.caption(f"on {_worst_recent_day:%d %b %Y}; {full_label}: **{returns_clean.min() * 100:.2f}%** "
             f"({_worst_full_day:%d %b %Y})")
 st.caption(f"Expected Shortfall (ES) 97.5% is the average return on the days at or below the 2.5% quantile "
-           f"({_n_tail} of the last {var_days} days): how large losses are once VaR is breached.")
+           f"({_n_tail} of the last {var_days} days): the average loss in the worst 2.5% of days. The Basel Committee "
+           "chose ES 97.5% for FRTB because it gives \"a broadly similar level of risk capture as the existing 99th "
+           "percentile VaR threshold\" (BCBS, Fundamental review of the trading book, October 2013, p. 18)"
+           + (f". Here ES averages the worst {_n_tail} days while VaR 99% lies between the {int((len(_recent_ret) - 1) * 0.01) + 1}"
+              f"{_ord(int((len(_recent_ret) - 1) * 0.01) + 1)} and {int((len(_recent_ret) - 1) * 0.01) + 2}"
+              f"{_ord(int((len(_recent_ret) - 1) * 0.01) + 2)} worst, so "
+              "ES 97.5% can come out slightly below VaR 99%, as it does now; that is not a calculation error."
+              if abs(es_975) < abs(var_99) else "."))
 
 
 _brent_roll_days = common.brent_roll_days
@@ -566,13 +603,13 @@ if garch is not None:
         st.write(f"Fitted on daily returns from {returns_clean.index.min():%d %b %Y} to "
                  f"{returns_clean.index.max():%d %b %Y}.")
         st.write(f"**omega (ω):** {params['omega']:.6f}")
-        st.write(f"**alpha (α):** {params['alpha[1]']:.4f} — reaction to recent shocks")
-        st.write(f"**beta (β):** {params['beta[1]']:.4f} — persistence of volatility")
+        st.write(f"**alpha (α):** {params['alpha[1]']:.4f} (reaction to recent shocks)")
+        st.write(f"**beta (β):** {params['beta[1]']:.4f} (persistence of volatility)")
         persistence = params['alpha[1]'] + params['beta[1]']
-        st.write(f"**α + β = {persistence:.4f}** — "
+        st.write(f"**α + β = {persistence:.4f}**, "
                  f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
         if garch.get('nu') is not None:
-            st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} — lower means fatter tails")
+            st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} (lower means fatter tails)")
         st.write(f"**Reference level: sample average 30-day volatility = {avg_vol:.2f}%** "
                  "(daily), over the selected range. (The Market page's GARCH check uses the 3-year average instead.)")
         if garch['garch_long_run_ok']:
@@ -588,7 +625,7 @@ if garch is not None:
                    "uncertainty in the estimated parameters.")
 
 else:
-    st.caption("GARCH forecast unavailable for this date range — try a longer window.")
+    st.caption("GARCH forecast unavailable for this date range: try a longer window.")
 
 
 # ─── Section 5: Market Regime ───
@@ -614,12 +651,12 @@ with rcol1:
     for regime, group in features.groupby('Regime'):
         ax3.scatter(group.index, group['Volatility'],
                    c=common.REGIME_COLORS[regime], label=regime, alpha=0.5, s=10)
-    ax3.axhline(y=regime_thr['calm'], color='orange', linewidth=1, linestyle='--', alpha=0.5,
-                label=f"Volatile threshold ({regime_thr['calm']:.2f}%, p{common.CALM_PCT})")
-    ax3.axhline(y=regime_thr['crisis'], color='red', linewidth=1, linestyle='--', alpha=0.5,
-                label=f"Crisis threshold ({regime_thr['crisis']:.2f}%, p{common.CRISIS_PCT})")
+    ax3.axhline(y=regime_thr['elevated'], color='orange', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Elevated threshold ({regime_thr['elevated']:.2f}%, p{common.ELEVATED_PCT})")
+    ax3.axhline(y=regime_thr['extreme'], color='red', linewidth=1, linestyle='--', alpha=0.5,
+                label=f"Extreme threshold ({regime_thr['extreme']:.2f}%, p{common.EXTREME_PCT})")
     ax3.set_ylabel('30-day volatility (daily %)')
-    ax3.set_title(f'{selected_commodity} — Market Regime Detection')
+    ax3.set_title(f'{selected_commodity}: Market Regime Detection')
     ax3.legend(fontsize=7)
     plt.tight_layout()
     st.pyplot(fig2)
@@ -661,7 +698,7 @@ else:
         st.info("Enter at least one non-zero position.")
     elif len(book_returns) < _LOOKBACK + 50:
         st.info(f"Position risk needs at least {_LOOKBACK + 50} days of overlapping history for "
-                "the instruments held — widen the date range.")
+                "the instruments held: widen the date range.")
     else:
         pnl = common.book_pnl(book_returns, positions)
         recent = pnl.tail(_LOOKBACK)
@@ -689,7 +726,7 @@ else:
                         "liquidity horizon and a stress period, which this does not.")
         pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
                    help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
-        st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span> — "
+        st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span>, "
                     f"€{book_var95 / 1e6:,.2f}m of €{var_limit_m:,.1f}m used",
                     unsafe_allow_html=True)
         st.progress(min(usage, 1.0))
