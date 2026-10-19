@@ -461,20 +461,135 @@ def _ordinal(x):
 
 
 _WAR_START = pd.Timestamp("2026-03-01")
+_PRICE_TOL = 1e-4   # a continuous close and a single-contract close from the same download are the same quote
 
 
-def vol_summary(ticker, as_of, vol_now, name=None):
+@st.cache_data(ttl=3600, show_spinner="Checking contract rolls...")
+def window_rolls(ticker, window_returns):
+    """Contract rolls of a continuous front-month future (TTF=F, CL=F, BZ=F) inside a volatility window.
+
+    `window_returns` are the daily returns behind the latest 30-day volatility. The continuous series and the
+    individual monthly contracts are downloaded together, and each day is matched to the one contract whose
+    close equals the continuous close. A return day is a roll day when the continuous close equals contract
+    M on that day but did not equal M's close on the day before; its return then contains the gap between two
+    contracts, and M's own return that day replaces it. A day is not identified when the continuous close
+    matches no single contract on Yahoo Finance (expired contracts are no longer listed) or M has no close on
+    the day before; nothing is guessed for those days. For Brent the ICE rule (brent_roll_days) is the page's
+    roll calendar, so an unmatched Brent day counts as a roll day only if the rule makes it one.
+
+    Returns None for a ticker without monthly contracts, else dict(rolls, unknown, rule_only, adjusted_vol):
+    rolls = [(date, new contract symbol, continuous return, new contract return)], unknown = unidentified
+    return days, rule_only = Brent rule days with no contract price to adjust, adjusted_vol = 30-day
+    volatility (daily, %) with the new contract's return on the roll days (None if there is no roll)."""
+    if ticker not in CURVE_ROOTS:
+        return None
+    r = window_returns.dropna()
+    if r.empty:
+        return None
+    root = CURVE_ROOTS[ticker][0]
+    first, last = r.index[0], r.index[-1]
+    months = pd.period_range(first.to_period('M'), last.to_period('M') + 4, freq='M')
+    syms = [f"{root}{MONTH_CODES[p.month - 1]}{p.year % 100:02d}.NYM" for p in months]
+    try:
+        data = yf.download([ticker] + syms, start=first - pd.Timedelta(days=14),
+                           end=last + pd.Timedelta(days=1), progress=False)['Close']
+    except Exception:
+        data = pd.DataFrame()
+    if isinstance(data, pd.Series):
+        data = data.to_frame(ticker)
+    data = data[data.index.dayofweek < 5] if len(data) else data
+    cont = data[ticker].dropna() if ticker in data else pd.Series(dtype=float)
+    syms = [s for s in syms if s in data and data[s].notna().any()]
+
+    def match(day):
+        hits = [s for s in syms if pd.notna(data.at[day, s]) and abs(data.at[day, s] - cont[day]) < _PRICE_TOL]
+        return hits[0] if len(hits) == 1 else None
+
+    rule = set(brent_roll_days(cont.index)) if ticker == "BZ=F" and len(cont) else set()
+    rolls, unknown, rule_only = [], [], []
+    adj = r.copy()
+    for t in r.index:
+        pos = cont.index.get_indexer([t])[0]
+        m = match(t) if pos > 0 else None
+        if m is not None:
+            p = cont.index[pos - 1]
+            if match(p) == m:
+                continue                                  # same contract on both days: no roll
+            m_prev = data.at[p, m]
+            if pd.notna(m_prev) and abs(m_prev - cont[p]) >= _PRICE_TOL:
+                new_ret = data.at[t, m] / m_prev - 1
+                rolls.append((t, m, float(r[t]), float(new_ret)))
+                adj[t] = new_ret
+                continue
+        if ticker == "BZ=F":
+            if t in rule:
+                rule_only.append(t)
+            continue                                      # Brent: not a rule day, so not a roll day
+        unknown.append(t)
+    return dict(rolls=rolls, unknown=unknown, rule_only=rule_only,
+                adjusted_vol=float(adj.std() * 100) if rolls else None)
+
+
+def _contract_month(sym, root):
+    code = sym[len(root)]
+    return f"{dt.date(2000 + int(sym[len(root) + 1:len(root) + 3]), MONTH_CODES.index(code) + 1, 1):%b %y}"
+
+
+def _day_ranges(days, index):
+    """Consecutive runs of `days` within `index`, written '08 Sep to 22 Sep 2026' or '19 Oct 2026'."""
+    pos = sorted(index.get_indexer(days))
+    runs, start = [], pos[0]
+    for a, b in zip(pos, pos[1:] + [None]):
+        if b != a + 1:
+            runs.append((index[start], index[a]))
+            start = b
+    return ", ".join(f"{a:%d %b %Y}" if a == b else
+                     (f"{a:%d %b} to {b:%d %b %Y}" if a.year == b.year else f"{a:%d %b %Y} to {b:%d %b %Y}")
+                     for a, b in runs)
+
+
+def roll_sentence(ticker, window_returns):
+    """The line under the volatility heading when the 30-day window contains contract roll days, or ''."""
+    rc = window_rolls(ticker, window_returns)
+    if rc is None or not (rc['rolls'] or rc['unknown'] or rc['rule_only']):
+        return ""
+    root = CURVE_ROOTS[ticker][0]
+    idx = window_returns.dropna().index
+    parts = []
+    if rc['rolls']:
+        days = [f"{t:%d %b %Y} ({ticker} {cr * 100:+.2f}%, the {_contract_month(m, root)} contract it switched to "
+                f"{nr * 100:+.2f}%)" for t, m, cr, nr in rc['rolls']]
+        parts.append(f"Contract roll days in this 30-day window: {' and '.join(days)}. On a roll day the "
+                     "series' return includes the price gap between two contracts. With the new contract's own "
+                     f"return on {'that day' if len(days) == 1 else 'those days'}, the 30-day volatility is "
+                     f"{rc['adjusted_vol'] * ANNUAL:.0f}% annualised ({rc['adjusted_vol']:.2f}% daily).")
+    if rc['rule_only']:
+        parts.append(f"{_day_ranges(rc['rule_only'], idx)} {'is a roll day' if len(rc['rule_only']) == 1 else 'are roll days'} "
+                     "by the ICE Brent rule, but the series' close matches no single monthly contract on Yahoo "
+                     "Finance, so no adjusted figure is given.")
+    if rc['unknown']:
+        parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
+                     "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
+                     "roll on those days is neither ruled out nor adjusted.")
+    if rc['rolls']:
+        parts.append("The 3-year label and the percentiles use the unadjusted figure.")
+    return " ".join(parts)
+
+
+def vol_summary(ticker, as_of, vol_now, name=None, window_returns=None):
     """The single source of every volatility statement on the Risk and Market pages and in the AI input.
 
-    Returns dict(headline, headline2, detail, label, tile, regime, ...): `headline` and `headline2` are the
-    two lines of the large neutral heading, `detail` the paragraph under it, `label` the small grey line with
-    the 3-year label, `tile` the value for a metric tile. None if the history is too short."""
+    Returns dict(headline, headline2, roll, detail, label, tile, regime, ...): `headline` and `headline2` are
+    the two lines of the large neutral heading, `roll` the line on contract roll days in the 30-day window
+    (only when `window_returns`, the returns behind `vol_now`, are given), `detail` the paragraph under it,
+    `label` the small grey line with the 3-year label, `tile` the value for a metric tile."""
     ctx = vol_context(ticker, as_of, vol_now)
     close = load_close(ticker, _CONTEXT_START, dt.date.today())
     hist = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
     thr = regime_thresholds(ticker, hist)
     regime = regime_label(vol_now, thr)
     out = dict(regime=regime, thr=thr, ctx=ctx, tile=fmt_vol(vol_now, 0),
+               roll=roll_sentence(ticker, window_returns) if window_returns is not None else "",
                headline=f"{name + ' ' if name else ''}30-day volatility: {vol_now * ANNUAL:.0f}% annualised "
                         f"({vol_now:.2f}% daily)",
                label=(f"3-year label: {regime} (Elevated above the {ELEVATED_PCT}th percentile, "
@@ -486,11 +601,11 @@ def vol_summary(ticker, as_of, vol_now, name=None):
     if r is None:
         compare = "no pre-war reference"
     elif r >= 1.1:
-        compare = f"{r:.1f}x its pre-war level"
+        compare = f"{r:.2f}x its pre-war level"
     elif r >= 0.9:
-        compare = f"close to its pre-war level ({r:.1f}x)"
+        compare = f"close to its pre-war level ({r:.2f}x)"
     else:
-        compare = f"below its pre-war level ({r:.1f}x)"
+        compare = f"below its pre-war level ({r:.2f}x)"
     out['headline2'] = f"{compare} · {_ordinal(ctx['p3y'])} percentile of the last 3 years"
     detail = ""
     if ctx['prewar_median'] is not None:

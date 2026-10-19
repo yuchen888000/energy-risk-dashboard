@@ -91,12 +91,15 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 
 # ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
 st.subheader("Volatility")
-_vs = common.vol_summary(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol),
-                         name=selected_commodity)
+_vol_asof = df_analysis['Volatility'].dropna().index[-1]
+_vs = common.vol_summary(commodity['ticker'], _vol_asof, float(latest_vol), name=selected_commodity,
+                         window_returns=df_analysis['Returns'].loc[:_vol_asof].tail(30))
 # Neutral heading: no traffic-light colour, so one window cannot decide the reading on its own.
 st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
             f"<div style='font-size:1.25rem; font-weight:500; opacity:0.85; margin:0.2rem 0 0.6rem'>"
             f"{_vs['headline2']}</div>", unsafe_allow_html=True)
+if _vs['roll']:
+    st.markdown(f"<div style='font-size:0.95rem; margin-bottom:0.4rem'>{_vs['roll']}</div>", unsafe_allow_html=True)
 st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
 st.caption(_vs['label'] + " It compares volatility with the commodity's own past; it is not a measure of overall "
            "risk: low volatility says nothing about supply, storage or position size."
@@ -491,8 +494,9 @@ if commodity['ticker'].endswith("=F"):
                "contract rolls to the next month, the series switches contract and that day's return is "
                "not a real price move: when the next contract trades several dollars below the expiring one, "
                "the series shows a drop that no contract actually had. Roll days are not removed, so they can "
-               "distort the max daily loss, the tails, the VaR and the backtest exceptions. Desks use a "
-               "back-adjusted series built from individual contracts.")
+               "distort the volatility, the max daily loss, the tails, the VaR and the backtest exceptions. When "
+               "the latest 30-day window contains a roll day, the line under the volatility heading gives the "
+               "30-day volatility with the new contract's own return on that day.")
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
