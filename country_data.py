@@ -1,16 +1,20 @@
-"""Structural country energy data for EU-27 + CH, UK, NO, TR (2020–2024), all from Eurostat.
+"""Country energy data for EU-27 + CH, UK, NO, TR, all from Eurostat.
 
 Downloaded from the Eurostat API at run time and cached for a day:
-- import dependency (gas, oil, total): nrg_ind_id
+- import dependency (gas, oil, all products): nrg_ind_id, in % (net imports / gross
+  available energy of that fuel)
+- gross available energy by fuel (natural gas, oil and petroleum products, all products):
+  nrg_bal_c, in thousand tonnes of oil equivalent (ktoe)
 - renewable share of gross final energy consumption: nrg_ind_ren
 - greenhouse-gas intensity of GDP: env_air_gge (total GHG excluding LULUCF) divided by
-  nama_10_gdp (GDP at current prices), in tonnes CO2-equivalent per million euro.
-No value is typed in by hand. A country that lacks any of these series for a year (the UK
-after Brexit, Switzerland, and Turkey's renewable share) is listed as not scored.
-Every list follows the order of COUNTRIES; a missing value is None.
+  nama_10_gdp at constant prices (chain-linked volumes, 2020 reference year), in tonnes
+  CO2-equivalent per million euro.
+No value is typed in by hand. Years run from FIRST_YEAR to the latest year Eurostat
+returns; a country without a value is shown as missing, never filled in.
 """
 import re
 
+import pandas as pd
 import requests
 import streamlit as st
 
@@ -21,6 +25,7 @@ COUNTRIES = ['Germany', 'France', 'Italy', 'Spain', 'Netherlands',
              'Estonia', 'Slovakia', 'Croatia', 'Slovenia', 'Luxembourg',
              'Cyprus', 'Malta',
              'Switzerland', 'United Kingdom', 'Norway', 'Turkey']
+EU27 = 'EU-27'
 
 # ─── Eurostat download ───
 EUROSTAT_GEO = {
@@ -31,21 +36,46 @@ EUROSTAT_GEO = {
     'Estonia': 'EE', 'Slovakia': 'SK', 'Croatia': 'HR', 'Slovenia': 'SI', 'Luxembourg': 'LU',
     'Cyprus': 'CY', 'Malta': 'MT', 'Switzerland': 'CH', 'United Kingdom': 'UK',
     'Norway': 'NO', 'Turkey': 'TR',
+    EU27: 'EU27_2020',   # reference row, never ranked
 }
-YEARS = [2020, 2021, 2022, 2023, 2024]
+_GEO_NAME = {v: k for k, v in EUROSTAT_GEO.items()}
+FIRST_YEAR = 2020
 _EUROSTAT_URL = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/{}"
 
-# (dataset, extra filters) for each downloaded series
+# (dataset, filters) for each downloaded series
 _SERIES = {
-    'gas':   ('nrg_ind_id', {'siec': 'G3000', 'unit': 'PC'}),      # natural gas
-    'oil':   ('nrg_ind_id', {'siec': 'O4000XBIO', 'unit': 'PC'}),  # oil and petroleum products
-    'total': ('nrg_ind_id', {'siec': 'TOTAL', 'unit': 'PC'}),      # all products
-    'ren':   ('nrg_ind_ren', {'nrg_bal': 'REN', 'unit': 'PC'}),    # renewables, gross final consumption
+    'dep_gas':   ('nrg_ind_id', {'siec': 'G3000', 'unit': 'PC'}),       # natural gas
+    'dep_oil':   ('nrg_ind_id', {'siec': 'O4000XBIO', 'unit': 'PC'}),   # oil and petroleum products
+    'dep_total': ('nrg_ind_id', {'siec': 'TOTAL', 'unit': 'PC'}),       # all products
+    'gae_gas':   ('nrg_bal_c', {'nrg_bal': 'GAE', 'siec': 'G3000', 'unit': 'KTOE'}),
+    'gae_oil':   ('nrg_bal_c', {'nrg_bal': 'GAE', 'siec': 'O4000XBIO', 'unit': 'KTOE'}),
+    'gae_total': ('nrg_bal_c', {'nrg_bal': 'GAE', 'siec': 'TOTAL', 'unit': 'KTOE'}),
+    'ren':       ('nrg_ind_ren', {'nrg_bal': 'REN', 'unit': 'PC'}),     # renewables, gross final consumption
     # thousand tonnes CO2-equivalent, total excluding LULUCF and memo items
-    'ghg':   ('env_air_gge', {'airpol': 'GHG', 'unit': 'THS_T', 'src_crf': 'TOTX4_MEMO'}),
-    'gdp':   ('nama_10_gdp', {'na_item': 'B1GQ', 'unit': 'CP_MEUR'}),  # GDP, million euro
+    'ghg':       ('env_air_gge', {'airpol': 'GHG', 'unit': 'THS_T', 'src_crf': 'TOTX4_MEMO'}),
+    # GDP in million euro, chain-linked volumes (2020 prices), so inflation does not
+    # show up as a fall in emissions intensity
+    'gdp_clv':   ('nama_10_gdp', {'na_item': 'B1GQ', 'unit': 'CLV20_MEUR'}),
 }
-SERIES = ('gas', 'oil', 'total', 'ren', 'carbon')
+
+# The question, ranking measure and columns for each commodity.
+MODES = {
+    'gas': dict(
+        question="Which countries are most exposed to imported gas?",
+        measure='Net gas imports (% of all energy)',
+        share='Gas share of energy (%)', dep='Gas import dependency (%)',
+        inputs=('gae_gas', 'gae_total', 'dep_gas'), fuel='natural gas'),
+    'oil': dict(
+        question="Which countries are most exposed to imported oil?",
+        measure='Net oil imports (% of all energy)',
+        share='Oil share of energy (%)', dep='Oil import dependency (%)',
+        inputs=('gae_oil', 'gae_total', 'dep_oil'), fuel='oil and petroleum products'),
+    'carbon': dict(
+        question="Which economies emit the most greenhouse gas per unit of output?",
+        measure='GHG intensity (tCO2e per M€, 2020 prices)',
+        share=None, dep=None,
+        inputs=('ghg', 'gdp_clv'), fuel=None),
+}
 
 
 def _jsonstat_values(js):
@@ -68,54 +98,94 @@ def _jsonstat_values(js):
 
 @st.cache_data(ttl=86400, show_spinner="Downloading country data from Eurostat...")
 def _fetch_eurostat(dataset, filters):
+    """(values, last update) for one series, from FIRST_YEAR to the latest year available."""
     params = [('format', 'JSON'), ('lang', 'EN'), ('freq', 'A'),
-              ('sinceTimePeriod', str(YEARS[0])), ('untilTimePeriod', str(YEARS[-1]))]
+              ('sinceTimePeriod', str(FIRST_YEAR))]
     params += list(filters.items())
     params += [('geo', g) for g in EUROSTAT_GEO.values()]
     # Raises on failure, so a failed download is not cached for a day.
     r = requests.get(_EUROSTAT_URL.format(dataset), params=params, timeout=30)
     r.raise_for_status()
-    return _jsonstat_values(r.json())
+    js = r.json()
+    return _jsonstat_values(js), str(js.get('updated', ''))[:10]
+
+
+def _ratio(a, b, scale=100.0):
+    return None if a is None or not b else a / b * scale
 
 
 def load_country_data():
-    """Country series for 2020–2024 from Eurostat.
+    """One row per (country, year) with the raw Eurostat inputs and the derived measures.
 
-    Returns (data, complete, failed):
-    - data[series][year]: list in COUNTRIES order, None where Eurostat has no value.
-      Series: gas, oil, total, ren (%), carbon (tCO2e per million euro of GDP).
-    - complete[year]: list of bools, True where a country has all five series that year.
+    Returns (df, failed, updated):
+    - df columns: Country, Year, the raw series (dep_gas, dep_oil, dep_total in %; gae_* in
+      ktoe; ren in %; ghg in kt; gdp_clv in M€) and the derived columns gas_share and
+      oil_share (% of gross available energy), gas_exposure and oil_exposure (net imports of
+      the fuel as % of all gross available energy = share x dependency, with a negative
+      dependency (net exporter) counted as 0), ghg_int (tCO2e per million euro of GDP at 2020 prices).
     - failed: names of datasets that could not be downloaded.
+    - updated: {dataset: last Eurostat update date}.
     """
-    raw, failed = {}, []
+    raw, failed, updated = {}, [], {}
     for key, (dataset, filters) in _SERIES.items():
         try:
-            raw[key] = _fetch_eurostat(dataset, filters)
+            raw[key], updated[dataset] = _fetch_eurostat(dataset, filters)
         except Exception:
             raw[key] = {}
             failed.append(dataset)
-    data = {k: {} for k in SERIES}
-    complete = {}
-    for yr in YEARS:
-        for key in ('gas', 'oil', 'total', 'ren'):
-            data[key][yr] = [None if (v := raw[key].get((EUROSTAT_GEO[c], yr))) is None else round(v, 1)
-                             for c in COUNTRIES]
-        carbon = []
-        for c in COUNTRIES:
-            ghg, gdp = raw['ghg'].get((EUROSTAT_GEO[c], yr)), raw['gdp'].get((EUROSTAT_GEO[c], yr))
-            carbon.append(round(ghg * 1000 / gdp) if ghg is not None and gdp else None)
-        data['carbon'][yr] = carbon
-        complete[yr] = [all(data[k][yr][i] is not None for k in SERIES) for i in range(len(COUNTRIES))]
-    return data, complete, sorted(set(failed))
+    years = sorted({yr for vals in raw.values() for (_, yr) in vals})
+    rows = []
+    for name, geo in EUROSTAT_GEO.items():
+        for yr in years:
+            r = {'Country': name, 'Year': yr}
+            for key in _SERIES:
+                r[key] = raw[key].get((geo, yr))
+            for fuel in ('gas', 'oil'):
+                share = _ratio(r[f'gae_{fuel}'], r['gae_total'])
+                dep = r[f'dep_{fuel}']
+                r[f'{fuel}_share'] = share
+                if share is None:
+                    r[f'{fuel}_exposure'] = None
+                elif share == 0:
+                    # No use of the fuel: nothing to import, whatever the dependency field says.
+                    r[f'{fuel}_exposure'] = 0.0
+                elif dep is None:
+                    r[f'{fuel}_exposure'] = None
+                else:
+                    # share x dependency = net imports of the fuel / all gross available energy.
+                    # Dependency below 0 = net exporter: no net imports, counted as 0. Above 100
+                    # (imports that also refilled stocks) is kept, so the product stays equal to
+                    # net imports over gross available energy.
+                    r[f'{fuel}_exposure'] = share * max(dep, 0.0) / 100
+            r['ghg_int'] = _ratio(r['ghg'], r['gdp_clv'], scale=1000.0)  # kt -> t, per M€
+            rows.append(r)
+    df = pd.DataFrame(rows)
+    return df, sorted(set(failed)), updated
+
+
+def measure_column(mode):
+    """Name of the derived column that ranks countries in a mode."""
+    return {'gas': 'gas_exposure', 'oil': 'oil_exposure', 'carbon': 'ghg_int'}[mode]
+
+
+def available_years(df, mode):
+    """Years for which Eurostat publishes the EU-27 value of the mode's measure, i.e. years
+    with complete member-state data. Provisional later years for only some inputs (for
+    example the renewable share) do not count."""
+    if df.empty:
+        return []
+    col = measure_column(mode)
+    eu = df[(df['Country'] == EU27) & df[col].notna()]
+    return sorted(int(y) for y in eu['Year'])
 
 
 def dependency_key(commodity_name):
-    """Series key and label of the import dependency relevant to a commodity."""
+    """Country-section mode for a commodity: 'gas', 'oil' or 'carbon'."""
     if commodity_name == 'TTF Natural Gas':
-        return 'gas', 'Gas Import Dependency'
+        return 'gas'
     if commodity_name in ('WTI Crude Oil', 'Brent Crude Oil'):
-        return 'oil', 'Oil Import Dependency'
-    return 'total', 'Total Energy Dependency'
+        return 'oil'
+    return 'carbon'
 
 
 # Words that show a headline is about a country: its name, short forms and adjective.
