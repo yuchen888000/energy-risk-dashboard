@@ -93,11 +93,13 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 st.subheader(f"Volatility Regime: {selected_commodity}")
 st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
             unsafe_allow_html=True)
-st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% (daily, "
-           f"{latest_vol * ANNUAL:.0f}% annualised) is at the "
-           f"{common.vol_percentile(latest_vol, regime_thr):.0f}{_ord(round(common.vol_percentile(latest_vol, regime_thr)))} percentile of this commodity's last 3 years "
-           f"(Elevated above {regime_thr['elevated']:.2f}%, the 75th percentile; Extreme above "
-           f"{regime_thr['extreme']:.2f}%, the 90th). This compares volatility with the commodity's own recent past. "
+_vctx = common.vol_context(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol))
+st.markdown(f"**30-day volatility {latest_vol:.2f}% daily, {latest_vol * ANNUAL:.0f}% annualised.** "
+            + common.vol_context_text(_vctx, ANNUAL))
+st.caption(f"The label ({current_regime}) uses the last 3 years only: Elevated above {regime_thr['elevated']:.2f}% "
+           f"(the 75th percentile), Extreme above {regime_thr['extreme']:.2f}% (the 90th). Read it with the line above: "
+           "a market can be ordinary for its last 3 years and still well above where it was before the war. "
+           "This compares volatility with the commodity's own past. "
            "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size."
            + (f" The end date is in the past, but the thresholds are always the last 3 years to today "
               f"({regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so this label is applied with hindsight."

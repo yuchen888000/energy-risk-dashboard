@@ -198,14 +198,21 @@ _is_today = latest["TTF date"].date() == pd.Timestamp.now(tz="Europe/Berlin").da
 # The day-ahead auction for this delivery day runs the calendar day before; gas and carbon trade on weekdays,
 # so the last trading day before the auction is the last weekday before the delivery day.
 _trade_day = pd.Timestamp(np.busday_offset(day.date(), -1, roll="backward"))
-_gas_lags = latest["TTF date"].normalize() < _trade_day
+# Yahoo's TTF=F follows the NYMEX trading calendar, so a weekday can be an exchange holiday (e.g. US
+# Thanksgiving). Gas counts as lagging only if NYMEX Brent (BZ=F, same calendar) already has a price for
+# that day and TTF=F does not.
+_gas_lags = False
+if latest["TTF date"].normalize() < _trade_day:
+    _bz = common.load_close("BZ=F", _trade_day.date() - pd.Timedelta(days=7), pd.Timestamp.now().date())
+    _gas_lags = bool((_bz.dropna().index.normalize() == _trade_day).any())
 st.caption(f"Gas: {_hl_contract}, {'latest price' if _is_today else 'close'} of {latest['TTF date']:%a %d %b} "
            f"({latest['TTF']:.2f} €/MWh); not day-ahead gas, see Caveats. Carbon: EEX auction of "
            f"{latest['EUA date']:%a %d %b} ({latest['EUA']:.2f} €/t). Each is the latest price published before "
-           f"delivery; the last trading day before this delivery day is {_trade_day:%a %d %b} (Monday's power is "
+           f"delivery; the last weekday before this delivery day is {_trade_day:%a %d %b} (Monday's power is "
            "auctioned on Sunday, so Friday's prices are the latest)."
            + (f" **Gas is from an earlier day than that:** Yahoo Finance has no TTF price for "
-              f"{_trade_day:%a %d %b} yet, so this spread will change once it does." if _gas_lags else ""))
+              f"{_trade_day:%a %d %b} yet, although NYMEX (same calendar) traded that day, so this spread "
+              "will change once it does." if _gas_lags else ""))
 
 last_year = df[df.index > day - pd.DateOffset(years=1)]
 has_year = df.index[0] <= day - pd.DateOffset(years=1)

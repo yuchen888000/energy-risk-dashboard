@@ -1062,7 +1062,11 @@ if len(tail_days):
     anomalies.append({'level': '🔵 WATCH' if _tail_now else '🟢 INFO',
                       'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x 3-Year VaR99'
                                + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not today)')),
-                      'detail': _tail_detail})
+                      'detail': _tail_detail,
+                      'past': (None if _tail_now else
+                               f'daily loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x 3-year VaR99): {len(tail_days)} in the '
+                               f'last {len(recent_all)} trading days, the latest {tail_days.iloc[-1]:.2f}% on '
+                               f'{tail_days.index[-1]:%d %b %Y}')})
 
 check_tbl = pd.DataFrame(checks, columns=['Check', 'Fires when', 'Latest', 'Fires now',
                                           f'Days fired (of the last {CHECK_DAYS} trading days, or fewer if not available)'])
@@ -1097,7 +1101,9 @@ st.caption(
     "each percentile by construction, and the count shows how much of that fell in the last year. Latest "
     f"values are at the last date of the selected range ({df_analysis.index[-1]:%d %b %Y}). " + garch_window_note
     + " The GARCH counts use today's fitted parameters for every past day. Volatility is the standard deviation "
-    "of daily returns, not annualised." + roll_note)
+    "of daily returns, not annualised. " + common.vol_context_text(
+        common.vol_context(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol)),
+        np.sqrt(252)) + roll_note)
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
@@ -1228,7 +1234,8 @@ def drop_crossed_watch_sentences(text, levels):
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
                             var_95_v, current_regime_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
                             avg_score_v, score_model, avg_30d_v, anomaly_types_str,
-                            top_neg_str, date_str, regime_elevated, regime_extreme, levels_str, tail_fact_str):
+                            top_neg_str, date_str, regime_elevated, regime_extreme, levels_str, tail_fact_str,
+                            past_breaches_str="", vol_context_str=""):
     api_key = None
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
@@ -1253,6 +1260,8 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
         garch_line += (f"; the day-10 forecast is {abs(garch_10d / garch_ref_v - 1) * 100:.0f}% {_pos} the "
                        f"{garch_ref_label} ({garch_ref_v:.2f}%). Model fitted on the same 3 years")
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
+    past_line = past_breaches_str if past_breaches_str else "None"
+    context_line = vol_context_str if vol_context_str else "None"
     headline_line = top_neg_str if top_neg_str else "None retrieved"
     sentiment_30d_line = (f"{avg_30d_v:+.3f}" if avg_30d_v is not None else "N/A")
     sentiment_now_line = (f"{avg_score_v:+.3f} ({score_model})" if avg_score_v is not None
@@ -1283,7 +1292,7 @@ Headline tone - weak evidence, handle with care
 - Anything between -0.05 and +0.05 is NEUTRAL. Do not call it mildly positive or mildly negative.
 
 Checks and headlines
-- The checks field lists only the NAMES of the statistical checks that fired (percentiles of the last 3 years). Their thresholds are in the LEVELS list; do not invent other numbers.
+- The latest-day checks field lists only the NAMES of the statistical checks firing on the latest day (percentiles of the last 3 years). The past-breaches field lists events that are over; mention one only with its date, as past. Their thresholds are in the LEVELS list; do not invent other numbers.
 - The headline field is raw scraped text, truncated and unverified.
 
 MARKET DATA AS OF {date_str}
@@ -1293,7 +1302,9 @@ MARKET DATA AS OF {date_str}
 - {garch_line}
 - Regime: {current_regime_v}
 - Headline tone now: {sentiment_now_line} | 30-day average (FinVADER): {sentiment_30d_line}
-- Checks fired: {anomaly_line}
+- Checks firing on the latest day: {anomaly_line}
+- Past breaches in the last 252 trading days (with dates): {past_line}
+- Volatility against other windows: {context_line}
 - Daily-loss check and contract rolls: {tail_line}
 - Unverified headlines: {headline_line}
 
@@ -1303,7 +1314,7 @@ LEVELS AND WHERE EACH CURRENT VALUE IS (already computed; do not recompute or co
 TASK
 Write EXACTLY 3 sentences. Keep the whole comment under 100 words. No headers, no bullets, no line breaks. Write as of the data date above, not as of any later date.
 1. What this combination of readings means. Do not restate the figures - the reader is looking at them. Use at most one number, and only if it carries the argument.
-2. The sharpest tension or divergence in the data, and why it matters for positioning.
+2. The sharpest tension or divergence in the data, and what it changes in how the other figures should be read.
 3. One concrete, checkable thing to watch over the following ten trading days. Name one level from the LEVELS list and the value it applies to, and describe a move consistent with the side that value is on NOW: for a value already ABOVE a level, watch whether it stays above or falls back below; for a value already BELOW a level, watch whether it rises above or stays below. Do not simply say to watch whether the forecast proves correct.
 
 HARD RULES
@@ -1349,7 +1360,11 @@ Output only the 3 sentences."""
         return None, str(e)
 
 
-anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies)
+anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies if not a.get('past'))
+past_breaches_for_llm = "; ".join(a['past'] for a in anomalies if a.get('past'))
+vol_context_for_llm = common.vol_context_text(
+    common.vol_context(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol)),
+    np.sqrt(252))
 if not is_live:
     top_neg_for_llm = "none (news feeds unreachable, no tone computed)"
 else:
@@ -1386,6 +1401,8 @@ narrative, error = generate_risk_narrative(
     score_model=nlp_model_name,
     avg_30d_v=avg_30d,
     anomaly_types_str=anomaly_types_for_llm,
+    past_breaches_str=past_breaches_for_llm,
+    vol_context_str=vol_context_for_llm,
     top_neg_str=top_neg_for_llm,
     date_str=today_date_str,
     regime_elevated=float(regime_thr['elevated']),

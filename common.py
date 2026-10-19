@@ -399,7 +399,7 @@ REGIME_COLORS = {'Normal': 'green', 'Elevated': 'orange', 'Extreme': 'red'}
 # The headline signal is the regime under another name, so the two cannot disagree. It
 # describes volatility relative to the commodity's own recent past, not overall risk: low
 # volatility says nothing about supply, storage or the size of a position.
-RISK_SIGNAL = {'Normal': ("🟢 NORMAL: volatility outside the top 25% of its last 3 years", "green"),
+RISK_SIGNAL = {'Normal': ("🟢 NORMAL FOR ITS LAST 3 YEARS: volatility outside their top 25%", "green"),
                'Elevated': ("🟡 ELEVATED: volatility in the top 25% of its last 3 years", "orange"),
                'Extreme': ("🔴 EXTREME: volatility in the top 10% of its last 3 years", "red")}
 
@@ -424,6 +424,51 @@ def regime_thresholds(ticker, fallback_vol):
     return dict(elevated=float(elevated), extreme=float(extreme), source=source, hist=np.sort(vol.values),
                 start=vol.index[0], end=vol.index[-1], n=len(vol),
                 mean=float(vol.mean()), std=float(vol.std()))
+
+
+# Fixed pre-war reference: the last full quarter before the US-Israeli strikes on Iran on 28 Feb 2026.
+# A fixed window, like the fixed event dates of the historical scenarios, so the reference does not
+# drift with the date range; percentile windows alone cannot say "twice as volatile as before the war".
+PREWAR_START, PREWAR_END = pd.Timestamp("2025-10-01"), pd.Timestamp("2025-12-31")
+_CONTEXT_START = dt.date(2017, 1, 1)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def vol_context(ticker, as_of, vol_now):
+    """Where `vol_now` (30-day volatility of daily returns, %) sits against the commodity's own history
+    up to `as_of`: percentile rank over the last 250 and 750 trading days and since 2017, and the ratio
+    to the median 30-day volatility of the pre-war quarter (Oct to Dec 2025). Same volatility definition
+    as the page (simple returns, 30-day window, stale repeats excluded)."""
+    close = load_close(ticker, _CONTEXT_START, dt.date.today())
+    vol = (simple_returns(close).rolling(30, min_periods=20).std() * 100).dropna()
+    vol = vol[vol.index <= pd.Timestamp(as_of)]
+    if len(vol) < 250:
+        return None
+
+    def rank(window):
+        h = np.sort(window.values)
+        return 100.0 * np.searchsorted(h, vol_now, side='left') / len(h)
+
+    prewar = vol[(vol.index >= PREWAR_START) & (vol.index <= PREWAR_END)]
+    pre_med = float(prewar.median()) if len(prewar) >= 20 else None
+    return dict(p1y=rank(vol.tail(250)), p3y=rank(vol.tail(750)), p_all=rank(vol), all_start=vol.index[0],
+                prewar_median=pre_med, prewar_ratio=(vol_now / pre_med) if pre_med else None)
+
+
+def vol_context_text(ctx, annual):
+    """One sentence for page captions from vol_context()."""
+    if ctx is None:
+        return ""
+    def o(x):
+        n = int(round(x))
+        return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+    txt = (f"Percentile of its own 30-day volatility: {o(ctx['p1y'])} over the last year, {o(ctx['p3y'])} over "
+           f"3 years, {o(ctx['p_all'])} since {ctx['all_start']:%b %Y}")
+    if ctx['prewar_ratio'] is not None:
+        txt += (f"; {ctx['prewar_ratio']:.1f}x the pre-war level (median of Oct to Dec 2025, the last full quarter "
+                f"before the strikes on Iran on 28 Feb 2026: {ctx['prewar_median']:.2f}% daily, "
+                f"{ctx['prewar_median'] * annual:.0f}% annualised)")
+    return txt + "."
 
 
 def regime_label(vol, thr):
