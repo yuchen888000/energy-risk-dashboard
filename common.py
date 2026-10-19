@@ -567,6 +567,45 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     )
 
 
+def brent_roll_days(index):
+    """Days on which Yahoo's continuous Brent series (BZ=F) switches contract.
+
+    ICE Brent stops trading on the last business day of the second month before delivery, so the
+    front month changes on the first trading day of each month. In December the expiry moves one
+    business day earlier (ICE's rule for the business day before New Year's Day), so the January
+    roll happens on the last trading day of December instead. The first day of the series is
+    skipped (it may be mid-month).
+    """
+    months = pd.Series(index.to_period('M'), index=index)
+    first = months.ne(months.shift())
+    first.iloc[0] = False
+    first &= index.month != 1                      # no roll on the first trading day of January
+    last_dec = months.ne(months.shift(-1)) & (index.month == 12)
+    last_dec.iloc[-1] = False                      # the series may end mid-December
+    return index[(first | last_dec).values]
+
+
+def ttf_expiry_days(index):
+    """Trading days in `index` that are, or follow, a TTF front-month expiry.
+
+    ICE Endex TTF futures stop trading two UK business days before the first calendar day of the
+    delivery month. UK bank holidays are not modelled (weekdays only), so a date can be one day
+    off around a holiday. Yahoo's continuous TTF=F may switch contract on either of these days, so
+    a large move on them can be partly the gap between two contracts.
+    """
+    if len(index) == 0:
+        return index
+    out = set()
+    months = pd.period_range(index.min().to_period('M'), index.max().to_period('M') + 1, freq='M')
+    for m in months:
+        first = m.to_timestamp()
+        expiry = first - pd.offsets.BDay(2)
+        nxt = expiry + pd.offsets.BDay(1)
+        out.update([expiry.normalize(), nxt.normalize()])
+    idx_norm = index.normalize()
+    return index[idx_norm.isin(list(out))]
+
+
 # ─── Which monthly contract a continuous front-month series is tracking ───
 @st.cache_data(ttl=3600, show_spinner=False)
 def front_month_contract(continuous, root, last_date, last_price):

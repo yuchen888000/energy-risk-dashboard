@@ -54,7 +54,10 @@ with st.sidebar.expander("Methodology — Risk page"):
 
 st.title("Market Risk")
 st.markdown(f"Analyzing **{selected_commodity}** vs {compare_label}")
-if not ctx.is_carbon:
+if ctx.is_carbon:
+    st.caption(f"**{CARBON_LABEL}**: every return, volatility and VaR on this page is for this exchange-traded "
+               f"product's USD price, not for EUA futures in €/tCO2. {CARBON_NOTE}")
+else:
     st.caption(f"Carbon benchmark: **{CARBON_LABEL}**. {CARBON_NOTE}")
 
 core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, end_date)
@@ -89,7 +92,10 @@ st.markdown(f"<h2 style='color:{risk_color}'>{risk_level}</h2>",
 st.caption(f"Regime {current_regime}: current 30-day volatility {latest_vol:.2f}% (daily) against this commodity's "
            f"thresholds from its last 3 years (Volatile above {regime_thr['calm']:.2f}%, Crisis above "
            f"{regime_thr['crisis']:.2f}%). This compares volatility with the commodity's own recent past. "
-           "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size.")
+           "It is not a measure of overall risk: low volatility says nothing about supply, storage or position size."
+           + (f" The end date is in the past, but the thresholds are always the last 3 years to today "
+              f"({regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so this label is applied with hindsight."
+              if end_date < pd.Timestamp.today().date() else ""))
 _last_px = df_analysis['Price'].dropna().index.max()
 _last_cmp = df_analysis['Compare'].dropna().index.max() if df_analysis['Compare'].notna().any() else None
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
@@ -401,6 +407,15 @@ for _col, _name, _recent, _full, _help in (
                      "interpolation between the two nearest days.")
     _col.caption(f"{full_label}: **{_full:.2f}%**")
 
+_raw_px = common.load_close(commodity['ticker'], start_date, end_date)
+_nonpos = _raw_px[_raw_px <= 0]
+if len(_nonpos):
+    st.caption(f"⚠️ {selected_commodity} settled at or below zero on "
+               + ", ".join(f"{d:%d %b %Y} ({v:.2f})" for d, v in _nonpos.items())
+               + ". A percentage return is not defined across a zero or negative price, so the returns into and "
+                 "out of those days are left out, and the full-period max daily loss, VaR and ES do not include "
+                 "that move.")
+
 _worst_recent_day = _recent_ret.idxmin()
 _worst_full_day = returns_clean.idxmin()
 vc4.metric("Max daily loss", f"{_recent_ret.min() * 100:.2f}%",
@@ -411,22 +426,7 @@ st.caption(f"Expected Shortfall (ES) 97.5% is the average return on the days at 
            f"({_n_tail} of the last {var_days} days): how large losses are once VaR is breached.")
 
 
-def _brent_roll_days(index):
-    """Days on which Yahoo's continuous Brent series (BZ=F) switches contract.
-
-    ICE Brent stops trading on the last business day of the second month before delivery, so the
-    front month changes on the first trading day of each month. In December the expiry moves one
-    business day earlier (ICE's rule for the business day before New Year's Day), so the January
-    roll happens on the last trading day of December instead. The first day of the series is
-    skipped (it may be mid-month).
-    """
-    months = pd.Series(index.to_period('M'), index=index)
-    first = months.ne(months.shift())
-    first.iloc[0] = False
-    first &= index.month != 1                      # no roll on the first trading day of January
-    last_dec = months.ne(months.shift(-1)) & (index.month == 12)
-    last_dec.iloc[-1] = False                      # the series may end mid-December
-    return index[(first | last_dec).values]
+_brent_roll_days = common.brent_roll_days
 
 
 if commodity['ticker'] == "BZ=F":
@@ -441,6 +441,14 @@ if commodity['ticker'] == "BZ=F":
     else:
         st.caption(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
                    "day of a month, or the last trading day of December).")
+if commodity['ticker'] == "TTF=F":
+    _ttf_exp = common.ttf_expiry_days(df_analysis['Price'].dropna().index)
+    _flag = [d for d in (_worst_recent_day, _worst_full_day) if d in _ttf_exp]
+    if _flag:
+        st.caption("⚠️ " + " and ".join(sorted({f"{d:%d %b %Y}" for d in _flag})) + " is on or just after a TTF "
+                   "front-month expiry (ICE Endex: trading stops two UK business days before the delivery month), "
+                   "so part of that day's move may be the gap between two contracts if the continuous series "
+                   "switched on it. Which contract Yahoo's series followed that day is not verified.")
 if commodity['ticker'].endswith("=F"):
     st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
                "contract rolls to the next month, the series switches contract and that day's return is "
@@ -495,8 +503,11 @@ if len(_bt) >= 100:
     _zone_txt = (f"Basel traffic light **{_zone}** ({_rows[1]['Exceptions']} exceptions at 99%)." if _zone
                  else f"Basel traffic light not shown: it is defined for 250 backtest days and only {_n} are "
                       "available; widen the date range.")
+    _kup = "; ".join(f"Kupiec at {row['VaR level']}: {'rejected' if row['p-value'] < 0.05 else 'not rejected'} "
+                     f"({row['Exceptions']} exceptions vs {row['Expected']} expected, p = {row['p-value']:.3f})"
+                     for row in _rows)
     st.write(f"**VaR Backtest ({selected_commodity}), last {_n} trading days "
-             f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt)
+             f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt + " " + _kup + ".")
     st.dataframe(pd.DataFrame(_rows).set_index('VaR level'), width="stretch")
     st.caption(f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
                "and compared with that day's return. Kupiec also rejects too few exceptions. Basel zones: "
@@ -541,7 +552,7 @@ if garch is not None:
     forecast_days = list(range(1, 11))
     ax_fc.plot(forecast_days, forecast_vol.values, color='purple', linewidth=2, marker='o', markersize=5)
     ax_fc.fill_between(forecast_days, _ci_lo, _ci_hi,
-                       alpha=0.18, color='purple', label='Bootstrap 90% CI (500 draws)')
+                       alpha=0.18, color='purple', label='Simulated 90% range of future volatility (parameters fixed)')
     ax_fc.set_xlabel('Days Ahead')
     ax_fc.set_ylabel('Forecast Volatility (daily %)')
     ax_fc.set_title('Daily volatility forecast, days 1 to 10')
@@ -571,8 +582,10 @@ if garch is not None:
             st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown: with "
                      f"α + β = {garch['persistence']:.4f} the formula divides by almost zero and is unstable.")
         st.write(f"**Log-Likelihood:** {garch['loglikelihood']:.2f}")
-        st.caption("Confidence band: bootstrap residual resampling — 500 draws of standardised "
-                   "innovations propagated through the GARCH recursion; 5th–95th percentile shown.")
+        st.caption("Shaded band: 500 paths simulated by resampling the standardised residuals through the GARCH "
+                   "recursion with the fitted parameters held fixed; 5th to 95th percentile of the future "
+                   "conditional volatility. It shows the spread of future volatility under this model, not "
+                   "uncertainty in the estimated parameters.")
 
 else:
     st.caption("GARCH forecast unavailable for this date range — try a longer window.")
@@ -688,7 +701,8 @@ else:
             'Position (€m)': [positions[k] / 1e6 for k in positions],
             'Standalone VaR 95% (€m)': [standalone[k] / 1e6 for k in positions],
         }, index=list(positions)).round(2)
-        contrib_df.loc['Book (diversified)'] = [np.nan, round(book_var95 / 1e6, 2)]
+        contrib_df['Position (€m)'] = contrib_df['Position (€m)'].map(lambda v: f"{v:+.1f}")
+        contrib_df.loc['Book (diversified)'] = ["", round(book_var95 / 1e6, 2)]
         st.dataframe(contrib_df, width="stretch")
         _gross = sum(abs(v) for v in positions.values()) / 1e6
         _net = sum(positions.values()) / 1e6
@@ -700,8 +714,9 @@ else:
         # ── VaR backtest ──
         bt = common.var_backtest(pnl, window=_LOOKBACK, test_days=_TEST_DAYS)
         n_bt = len(bt)
-        st.write(f"**VaR Backtest, last {n_bt} trading days ({bt.index.min():%d %b %Y} to "
-                 f"{bt.index.max():%d %b %Y})**")
+        st.write(f"**VaR Backtest, last {n_bt} trading days on which every instrument held has a return "
+                 f"({bt.index.min():%d %b %Y} to {bt.index.max():%d %b %Y})**. Because only common trading days "
+                 "count, this window can start earlier than the single-commodity backtest above.")
         rows = _backtest_rows(bt, n_bt)
         exc99 = rows[1]['Exceptions']
         zone = common.basel_zone(exc99, n_bt)
