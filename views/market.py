@@ -1094,8 +1094,7 @@ else:
     st.info(f"None of the {len(checks)} checks fires on the latest data. They cover only volatility, the GARCH "
             "forecast, one correlation and daily losses; they say nothing about supply, storage, positions or news.")
 
-_vs_checks = common.vol_summary(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1],
-                                float(latest_vol), name=selected_commodity)
+_vs_checks = common.vol_summary(core, name=selected_commodity)
 st.caption(
     f"Reference window: {ref_source}, the same 3 years as the regime thresholds. Thresholds and the counts of "
     "days fired come from the same window, so the counts are in-sample: about 5% of the 3 years lies beyond "
@@ -1362,8 +1361,7 @@ Output only the 3 sentences."""
 
 anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies if not a.get('past'))
 past_breaches_for_llm = "; ".join(a['past'] for a in anomalies if a.get('past'))
-_vs = common.vol_summary(commodity['ticker'], df_analysis['Volatility'].dropna().index[-1], float(latest_vol),
-                         name=selected_commodity)
+_vs = common.vol_summary(core, name=selected_commodity)
 vol_summary_for_llm = f"{_vs['headline']}; {_vs['headline2']}. {_vs['detail']} {_vs['label']}"
 if not is_live:
     top_neg_for_llm = "none (news feeds unreachable, no tone computed)"

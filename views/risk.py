@@ -91,10 +91,9 @@ regime_thr, current_regime = core['regime_thr'], core['current_regime']
 
 # ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
 st.subheader("Volatility")
-_vol_asof = df_analysis['Volatility'].dropna().index[-1]
+_vol_asof = core['vol_asof']
 _past_end = end_date < pd.Timestamp.today().date()
-_vs = common.vol_summary(commodity['ticker'], _vol_asof, float(latest_vol), name=selected_commodity,
-                         window_returns=df_analysis['Returns'].loc[:_vol_asof].tail(30), past_end=_past_end)
+_vs = common.vol_summary(core, name=selected_commodity, with_roll=True, past_end=_past_end)
 # Neutral heading: no traffic-light colour, so one window cannot decide the reading on its own.
 st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
             f"<div style='font-size:1.25rem; font-weight:500; opacity:0.85; margin:0.2rem 0 0.6rem'>"
@@ -106,11 +105,25 @@ st.caption(_vs['label'] + " It compares volatility with the commodity's own past
            "risk: low volatility says nothing about supply, storage or position size."
            + (" With an end date in the past the label is applied with hindsight." if _past_end else ""))
 _last_px = df_analysis['Price'].dropna().index.max()
-_last_cmp = df_analysis['Compare'].dropna().index.max() if df_analysis['Compare'].notna().any() else None
+_cmp_own = common.load_close(ctx.compare_ticker, start_date, end_date).dropna()
+_last_cmp = _cmp_own.index.max() if len(_cmp_own) else None   # its own last price, not the last day both have
+# TTF=F follows the NYMEX trading calendar, as BZ=F does: when Brent already has a price for a later day and
+# TTF=F does not, Yahoo's TTF row for that day is late, not a holiday (same check as the Power page).
+_ttf_late = ""
+if not _past_end:
+    for _n, _t, _d in ((selected_commodity, commodity['ticker'], _last_px), (compare_label, ctx.compare_ticker, _last_cmp)):
+        if _t == "TTF=F" and _d is not None:
+            _bz = common.load_close("BZ=F", (_d - pd.Timedelta(days=7)).date(), pd.Timestamp.today().date()).dropna()
+            if len(_bz) and _bz.index[-1].normalize() > _d.normalize():
+                _ttf_late = (f" Yahoo Finance has no TTF=F price for {_bz.index[-1]:%d %b} yet, although NYMEX Brent "
+                             "(BZ=F, same trading calendar) has one, so TTF figures end a day earlier.")
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
-           + ". The last value can be a price from the current or the evening electronic session, not the settlement, "
-           "so it can change within the hour. Volatility, percentiles, thresholds and VaR all use the same download.")
+           + "." + _ttf_late
+           + (" The last value can be a price from the current or the evening electronic session, not the settlement, "
+              "so it can change within the hour." if not _past_end else "")
+           + " The volatility, percentiles, pre-war multiple, 3-year thresholds and label (here and in Market Regime), "
+           "VaR and the roll check all come from one download of the series, computed together.")
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -306,9 +319,18 @@ else:
                        help=(f"Last trading day {_expiry:%d %b %Y} ({common.EXPIRY_RULES[curve_root]}; exchange "
                              "holidays not modelled)." if _expiry is not None else None))
             if _soon:
-                fc2.caption(f"{_left} business day{'s' if _left != 1 else ''} to expiry after the {front['Last trade']:%d %b} "
-                            f"close. Close to expiry the front month can be squeezed, and `{commodity['ticker']}` "
-                            "may already follow the next contract.")
+                # The roll check of the volatility window (same download) says whether the continuous series
+                # has already moved past the front contract.
+                _rc = core['rolls'] if not _past_end else None
+                _moved = [(t, m) for t, m, _, _ in (_rc['rolls'] if _rc else [])
+                          if common.contract_delivery(m, curve_root) > front['Delivery']]
+                _follows = (f"`{commodity['ticker']}` has followed the "
+                            f"{common.contract_delivery(_moved[-1][1], curve_root):%b %y} contract since "
+                            f"{_moved[-1][0]:%d %b}." if _moved else
+                            f"`{commodity['ticker']}` may already follow the next contract.")
+                _to_go = (f"{front['Last trade']:%d %b} is its last trading day." if _left == 0 else
+                          f"{_left} business day{'s' if _left != 1 else ''} to expiry after the {front['Last trade']:%d %b} close.")
+                fc2.caption(f"{_to_go} Close to expiry the front month can be squeezed. {_follows}")
             _mixed = front['Last trade'].normalize() != back['Last trade'].normalize()
             fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
                        help=(f"Front month close of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} close of "
@@ -321,9 +343,9 @@ else:
                 "Contango: later deliveries cost more than the front month (spread negative). "
                 "Backwardation: the front month costs more (spread positive), usually a sign of tight "
                 "prompt supply. The label compares only the front and the last month shown. "
-                f"The continuous series in the price chart ({commodity['ticker']}) can switch to the next "
-                "contract a few days before the front contract expires, so its last price can differ "
-                "from the first contract on this curve. ")
+                f"The continuous series in the price chart ({commodity['ticker']}) switches to the next "
+                "contract on a day near the front contract's expiry, before or after it, so its last price can "
+                "differ from the first contract on this curve. ")
 
         for x_fc, y_fc in zip(labels_fc, curve['Price']):
             ax_fc.annotate(f"{y_fc:.2f}", (x_fc, y_fc), textcoords='offset points', xytext=(0, 7),
@@ -339,7 +361,8 @@ else:
                                       **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')}),
                          width="stretch", hide_index=True)
         st.caption(
-            shape_note
+            (f"The curve is today's, not as of the end date ({end_date:%d %b %Y}). " if _past_end else "")
+            + shape_note
             + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
             f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
             "days, at its latest close (for a finished day normally the settlement; a value for today is "
@@ -498,13 +521,14 @@ if commodity['ticker'] == "TTF=F":
     _flag = [d for d in (_worst_recent_day, _worst_full_day) if d in _ttf_exp]
     if _flag:
         st.caption("⚠️ " + " and ".join(sorted({f"{d:%d %b %Y}" for d in _flag})) + " is on or just after a TTF "
-                   "front-month expiry (ICE Endex: trading stops two UK business days before the delivery month), "
+                   "front-month expiry (NYMEX Dutch TTF, rule 1159102.E: trading stops on the second London business "
+                   "day before the delivery month, normally the same day as ICE Endex TTF), "
                    "so part of that day's move may be the gap between two contracts if the continuous series "
                    "switched on it. Which contract Yahoo's series followed that day is not verified.")
 if commodity['ticker'].endswith("=F"):
     st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
                "contract rolls to the next month, the series switches contract and that day's return is "
-               "not a real price move: when the next contract trades several dollars below the expiring one, "
+               "not a real price move: when the next contract trades below the expiring one, "
                "the series shows a drop that no contract actually had. Roll days are not removed, so they can "
                "distort the volatility, the max daily loss, the tails, the VaR and the backtest exceptions. When "
                "the latest 30-day window contains a roll day, the line under the volatility heading gives the "
@@ -649,7 +673,7 @@ st.subheader("Market Regime")
 st.write("Each day is labelled by its 30-day volatility against this commodity's own thresholds")
 
 features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
-st.markdown(f"**3-year label today: {current_regime}**")
+st.markdown(f"**3-year label {'on ' + format(_vol_asof, '%d %b %Y') if _past_end else 'today'}: {current_regime}**")
 st.caption(common.regime_caption(regime_thr))
 
 regime_stats = features.groupby('Regime').agg(
