@@ -246,14 +246,15 @@ else:
                           summers[0] if summers else None)
             curve_shape = "Seasonal curve"
 
-            # Contracts of a season still trading: a TTF month expires two business days before it starts.
+            # Contracts of a season still trading, by the same expiry rule as the curve (common.contract_expiry);
+            # a contract on its last trading day counts, as it does on the curve.
             _asof = curve['Last trade'].max()
 
             def _open_months(key):
                 _y = int(key.split()[-1].split('/')[0]) + 2000
                 months = (pd.date_range(f"{_y}-10-01", f"{_y + 1}-03-01", freq='MS') if key.startswith("Winter")
                           else pd.date_range(f"{_y}-04-01", f"{_y}-09-01", freq='MS'))
-                return sum(pd.Timestamp(np.busday_offset(m.date(), -2, roll='forward')) > _asof for m in months)
+                return sum(not common.contract_expired(curve_root, m, _asof) for m in months)
 
             fc1, fc2, fc3, fc4 = st.columns(4)
             fc1.markdown("<h3 style='color:steelblue; margin-top:0'>Seasonal curve</h3>",
@@ -365,9 +366,12 @@ else:
             + shape_note
             + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
             f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
-            "days, at its latest close (for a finished day normally the settlement; a value for today is "
-            "the latest price), so prices can be from different days (see Last trade); older or missing "
-            f"contracts are left out and nothing is interpolated. {n_curve} of 12 contracts available."
+            "days and has not passed its last trading day (exchange rule, holidays not modelled; a contract "
+            "on its last trading day is shown), at its latest close (for a finished day normally the "
+            "settlement; a value for today is the latest price), so prices can be from different days (see "
+            "Last trade). Contracts past their last trading day are not shown, even while Yahoo Finance still "
+            "lists them; older or missing contracts are left out and nothing is interpolated. "
+            f"{n_curve} of 12 contracts available."
         )
 
 # ─── Section 3: Volatility & Correlation ───

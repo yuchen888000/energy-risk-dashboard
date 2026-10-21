@@ -912,18 +912,18 @@ def ttf_expiry_days(index):
     TTF=F and the curve are NYMEX Dutch TTF futures: trading stops on the second London business day before
     the first calendar day of the delivery month, or the first earlier day that is both a London and a NYMEX
     business day (CME rule 1159102.E); ICE Endex TTF, the European benchmark, stops two UK business days
-    before the delivery month, normally the same day. Holidays are not modelled (weekdays only), so a date
-    can be one day off around a holiday. Yahoo's continuous TTF=F may switch contract on either of these days, so
-    a large move on them can be partly the gap between two contracts.
+    before the delivery month, normally the same day. The expiry comes from contract_expiry("TTF", ...), the
+    one place the rule is written. Holidays are not modelled (weekdays only), so a date can be one day off
+    around a holiday. Yahoo's continuous TTF=F may switch contract on either of these days, so a large move on
+    them can be partly the gap between two contracts.
     """
     if len(index) == 0:
         return index
     out = set()
     months = pd.period_range(index.min().to_period('M'), index.max().to_period('M') + 1, freq='M')
     for m in months:
-        first = m.to_timestamp()
-        expiry = first - pd.offsets.BDay(2)
-        nxt = expiry + pd.offsets.BDay(1)
+        expiry = contract_expiry("TTF", m.to_timestamp())
+        nxt = pd.Timestamp(np.busday_offset(expiry.date(), 1))
         out.update([expiry.normalize(), nxt.normalize()])
     idx_norm = index.normalize()
     return index[idx_norm.isin(list(out))]
@@ -973,14 +973,24 @@ def forward_curve(root, n=12, today=None):
     """Latest daily closes of the next `n` monthly contracts, e.g. CLX26.NYM, CLZ26.NYM, ...
 
     Symbols are generated from the current month onwards (with spares for contracts
-    that have already expired) and downloaded in one batch. A contract is kept if it
-    has a close within the last CURVE_FRESH_DAYS trading days of the batch (the dates
-    on which any contract traded), so expired or stale contracts drop out while a
-    contract that missed only the latest day stays. Its price is its latest daily close
-    on Yahoo Finance (for a finished day normally the settlement; on a trading day the
-    latest price). Weekend rows (Sunday evening session) are dropped. Nothing is
-    interpolated: missing contracts are simply absent. Returns a DataFrame with
-    Contract, Delivery, Price and Last trade, sorted by delivery month.
+    that have already expired) and downloaded in one batch. A contract is kept if
+      1. it has a close within the last CURVE_FRESH_DAYS trading days of the batch (the
+         dates on which any contract traded), so stale contracts drop out while a
+         contract that missed only the latest day stays; and
+      2. its last trading day by contract_expiry is not earlier than the batch's last
+         trading day (trading_days[-1]). Yahoo keeps listing a contract for some days
+         after it expires (CLX26 on 21 Oct 2026, the day after its last trading day), and
+         without this rule it would stay on the curve as the front month. A contract on
+         its last trading day is kept.
+    Holidays are not modelled in contract_expiry, so an expiry can be one day late. As a
+    safeguard for the first row only: the first contract is also dropped when it has no
+    price on the batch's last trading day, a later contract has one, and its last trading
+    day by the rule is that day or the next business day.
+    A contract's price is its latest daily close on Yahoo Finance (for a finished day
+    normally the settlement; on a trading day the latest price). Weekend rows (Sunday
+    evening session) are dropped. Nothing is interpolated: missing contracts are simply
+    absent. Returns a DataFrame with Contract, Delivery, Price and Last trade, sorted by
+    delivery month.
     """
     today = today or dt.date.today()
     symbols = {}
@@ -1013,9 +1023,21 @@ def forward_curve(root, n=12, today=None):
         return empty
     df = pd.DataFrame(rows)
     trading_days = closes.dropna(how='all').index
+    last_day = trading_days[-1]
     cutoff = trading_days[-min(CURVE_FRESH_DAYS, len(trading_days))]
     df = df[df['Last trade'] >= cutoff]
-    return df.sort_values('Delivery').head(n).reset_index(drop=True)
+    df = df[~df['Delivery'].map(lambda d: contract_expired(root, d, last_day))]
+    df = df.sort_values('Delivery').reset_index(drop=True)
+    if len(df) > 1:
+        # Safeguard for an expiry moved earlier by a holiday (see the docstring).
+        priced = closes.loc[last_day].notna()
+        first_exp = contract_expiry(root, df.loc[0, 'Delivery'])
+        if (not bool(priced.get(df.loc[0, 'Contract'], False))
+                and any(bool(priced.get(c, False)) for c in df['Contract'].iloc[1:])
+                and first_exp is not None
+                and 0 <= int(np.busday_count(last_day.date(), first_exp.date())) <= 1):
+            df = df.iloc[1:]
+    return df.head(n).reset_index(drop=True)
 
 
 EXPIRY_RULES = {
@@ -1026,13 +1048,21 @@ EXPIRY_RULES = {
 
 
 def contract_expiry(root, delivery):
-    """Last trading day of a WTI (CL) or Brent (BZ) monthly contract, weekdays only (holidays not modelled).
+    """Last trading day of a WTI (CL), Brent (BZ) or Dutch TTF (TTF) monthly contract, weekdays only (holidays
+    not modelled). This is the only place the expiry rules are written: the forward curve, the front-month
+    label and ttf_expiry_days all call it.
 
     WTI (CME rule 200102.F): trading ends 3 business days before the 25th calendar day of the month before
     the delivery month; if the 25th is not a business day, 4 business days before it. Brent (ICE rule, which
     NYMEX BZ follows): the last business day of the second month before delivery, moved one business day
-    earlier when that month is December. None for other roots (TTF has its own rule in ttf_expiry_days)."""
+    earlier when that month is December. Dutch TTF (CME rule 1159102.E, NYMEX contract used by TTF=F and the
+    curve): the second London business day before the first calendar day of the delivery month (ICE Endex
+    TTF: two UK business days before the delivery month, normally the same day). None for other roots."""
     d = pd.Timestamp(delivery)
+    if root == "TTF":
+        first = d.replace(day=1)
+        # roll='forward': when the 1st is a weekend day, count back from the next business day.
+        return pd.Timestamp(np.busday_offset(first.date(), -2, roll='forward'))
     if root == "CL":
         d25 = (d - pd.DateOffset(months=1)).replace(day=25)
         if d25.dayofweek < 5:
@@ -1044,6 +1074,13 @@ def contract_expiry(root, delivery):
         last = pd.Timestamp(np.busday_offset((m2 + pd.offsets.MonthEnd(0)).date(), 0, roll='backward'))
         return pd.Timestamp(np.busday_offset(last.date(), -1)) if m2.month == 12 else last
     return None
+
+
+def contract_expired(root, delivery, as_of):
+    """True when the contract's last trading day (contract_expiry) is earlier than `as_of`. A contract on its
+    last trading day is not expired. False when the root has no rule."""
+    expiry = contract_expiry(root, delivery)
+    return expiry is not None and expiry.normalize() < pd.Timestamp(as_of).normalize()
 
 
 def gas_season(delivery):
