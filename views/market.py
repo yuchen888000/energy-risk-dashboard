@@ -88,18 +88,17 @@ df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
 returns_clean = core['returns_clean']
 var_95 = core['var_95']              # last 250 trading days
-regime_thr, current_regime = core['regime_thr'], core['current_regime']
-features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
+ref3y = core['ref3y']   # the last 3 years of 30-day volatility, the window of this page's checks
 
 # Reference level for the GARCH check: the 3-year average 30-day volatility, the same window
-# as the regime thresholds and the volatility check, so it does not move with the sidebar dates.
-garch_ref = regime_thr['mean']
+# as the volatility check, so it does not move with the sidebar dates.
+garch_ref = ref3y['mean']
 garch_ref_name = "3-year average 30-day volatility"
-# The GARCH model for the check is fitted on the same 3 years (the last REGIME_WINDOW trading
+# The GARCH model for the check is fitted on the same 3 years (the last CHECK_WINDOW trading
 # days). Fitted on the whole sidebar range (from 2020, with the 2021-22 crisis), the model's
 # long-run level sits well above the 3-year average (TTF on 16 Oct 2026: 6.8% against 3.5%), so the
 # forecast is pulled towards a level from a different period than its reference.
-garch_returns = returns_clean.tail(common.REGIME_WINDOW)
+garch_returns = returns_clean.tail(common.CHECK_WINDOW)
 garch = common.fit_garch(garch_returns)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
 
@@ -861,18 +860,18 @@ st.write("Is anything statistically unusual today compared with this commodity's
 def recent_reference(ticker, compare_ticker):
     """30-day volatility, 30-day correlation and daily returns over the last 3 years up to today.
 
-    Same window as common.regime_thresholds (common.REGIME_WINDOW trading days) and the same
-    definitions as common.compute_core, so the volatility mean matches regime_thr['mean'].
+    Same window as common.three_year_reference (common.CHECK_WINDOW trading days) and the same
+    definitions as common.compute_core, so the volatility mean matches ref3y['mean'].
     """
     today = dt.date.today()
-    start = today - dt.timedelta(days=int(common.REGIME_WINDOW * 365 / 250) + 90)
+    start = today - dt.timedelta(days=int(common.CHECK_WINDOW * 365 / 250) + 90)
     price = common.load_close(ticker, start, today)
     compare = common.load_close(compare_ticker, start, today)
     df = pd.DataFrame({'Price': price, 'R': common.simple_returns(price),
                        'CR': common.simple_returns(compare)}).dropna(subset=['Price'])
     df = df[df['Price'] > 0]
-    vol = (df['R'].rolling(30, min_periods=20).std() * 100).dropna().tail(common.REGIME_WINDOW)
-    corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(common.REGIME_WINDOW)
+    vol = (df['R'].rolling(30, min_periods=20).std() * 100).dropna().tail(common.CHECK_WINDOW)
+    corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(common.CHECK_WINDOW)
     rets = df['R'].dropna()
     if len(vol):
         rets = rets.loc[vol.index[0]:]
@@ -894,7 +893,7 @@ def garch_10d_path(g):
 
 ref = recent_reference(commodity['ticker'], ctx.compare_ticker)
 if len(ref['vol']) < 250:
-    # Same fallback as the regime thresholds: the selected range when recent history is short.
+    # Same fallback as common.three_year_reference: the selected range when recent history is short.
     ref = dict(vol=df_analysis['Volatility'].dropna(), corr=df_analysis['Rolling Correlation'].dropna(),
                rets=returns_clean)
     ref_source = "selected date range (recent history unavailable)"
@@ -902,13 +901,13 @@ else:
     ref_source = f"{ref['vol'].index[0]:%d %b %Y} to {ref['vol'].index[-1]:%d %b %Y}, {len(ref['vol'])} trading days"
 
 if garch is not None and len(garch_returns):
-    _same = (garch_returns.index[-1].normalize() == pd.Timestamp(regime_thr['end']).normalize())
+    _same = (garch_returns.index[-1].normalize() == pd.Timestamp(ref3y['end']).normalize())
     garch_window_note = (
         f"The GARCH model behind the forecast check is fitted on the last {len(garch_returns)} trading days "
         f"of returns ({garch_returns.index[0]:%d %b %Y} to {garch_returns.index[-1]:%d %b %Y}), "
         + ("the same 3-year window as its reference, the 3-year average 30-day volatility, so model and "
            "reference describe the same period. " if _same else
-           f"while its reference, the 3-year average 30-day volatility, runs to {regime_thr['end']:%d %b %Y} "
+           f"while its reference, the 3-year average 30-day volatility, runs to {ref3y['end']:%d %b %Y} "
            "(the selected range ends earlier). ")
         + "The Risk page fits its GARCH on the whole selected range, so its forecast can differ.")
 else:
@@ -1096,13 +1095,14 @@ else:
 
 _vs_checks = common.vol_summary(core, name=selected_commodity)
 st.caption(
-    f"Reference window: {ref_source}, the same 3 years as the regime thresholds. Thresholds and the counts of "
+    f"Reference window: {ref_source}, the last 3 years. Thresholds and the counts of "
     "days fired come from the same window, so the counts are in-sample: about 5% of the 3 years lies beyond "
     "each percentile by construction, and the count shows how much of that fell in the last year. Latest "
     f"values are at the last date of the selected range ({df_analysis.index[-1]:%d %b %Y}). " + garch_window_note
     + " The GARCH counts use today's fitted parameters for every past day. Volatility is the standard deviation "
-    "of daily returns, shown annualised (x √252) with the daily figure in brackets. " + _vs_checks['detail'] + " "
-    + _vs_checks['label'] + roll_note)
+    "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether "
+    "today is unusual for the last 3 years; the volatility heading on the Risk page places it against the pre-war "
+    "level and the whole history instead. " + _vs_checks['detail'] + roll_note)
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
@@ -1114,7 +1114,7 @@ def _side(cur, thr):
     return "ABOVE" if cur > thr else "BELOW" if cur < thr else "EQUAL TO"
 
 
-def level_facts(vol_now, regime, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, garch_lo,
+def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, garch_lo,
                 corr_v=None, corr_lo_v=None, corr_hi_v=None, corr_label=""):
     """Every threshold on the page together with the current value it is compared with and the
     side that value is on, as (prompt lines, levels). Each level is (subject, threshold, current),
@@ -1127,10 +1127,6 @@ def level_facts(vol_now, regime, vol_spike, vol_calm, ref_mean, g_now, g_10d, ga
         levels.append((subject, float(thr), float(cur)))
 
     v = f"{common.fmt_vol(vol_now)}"
-    add('vol', "Current 30-day volatility", vol_now, v, regime['elevated'],
-        f"the Normal/Elevated threshold {common.fmt_vol(regime['elevated'])}")
-    add('vol', "Current 30-day volatility", vol_now, v, regime['extreme'],
-        f"the Elevated/Extreme threshold {common.fmt_vol(regime['extreme'])}")
     add('vol', "Current 30-day volatility", vol_now, v, vol_spike,
         f"the volatility-spike threshold {common.fmt_vol(vol_spike)} ({VOL_HI_PCT}th percentile of 3 years)")
     add('vol', "Current 30-day volatility", vol_now, v, vol_calm,
@@ -1231,9 +1227,9 @@ def drop_crossed_watch_sentences(text, levels):
 # cache key, and then a changed number could return an old narrative.
 @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
-                            var_95_v, current_regime_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
+                            var_95_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
                             avg_score_v, score_model, avg_30d_v, anomaly_types_str,
-                            top_neg_str, date_str, regime_elevated, regime_extreme, levels_str, tail_fact_str,
+                            top_neg_str, date_str, levels_str, tail_fact_str,
                             past_breaches_str=""):
     api_key = None
     try:
@@ -1276,11 +1272,11 @@ Volatility
 - The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
 - The GARCH check compares the day-10 forecast with the commodity's 3-year average 30-day volatility, not with current volatility; the GARCH model is fitted on the same 3 years. Describe the forecast only by the two facts given: its direction relative to current GARCH volatility (higher, lower or about the same) and whether it is above or below the 3-year average. Use neutral wording: do not call it normalisation, mean reversion, a return to normal, escalation, a build-up of risk, calming, reassuring or a danger signal.
 
-Volatility summary and the 3-year label
-- The volatility summary places current 30-day volatility against several windows: its multiple of the pre-war level (Oct to Dec 2025) and its percentiles over the last year, 3 years and since 2017. State the pre-war multiple whenever you describe the level of volatility; never describe the level from the 3-year label alone.
-- "3-year label" compares current 30-day volatility with thresholds from the last 3 years only (not the selected window): Normal up to {common.fmt_vol(regime_elevated)} (its 75th percentile), Elevated up to {common.fmt_vol(regime_extreme)}, Extreme above that (its 90th percentile). It is one of the windows in the summary, not a separate piece of evidence.
-- The regime measures volatility relative to the commodity's own recent past, not overall risk. Never call the market "low risk" because the regime is Normal: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
-- The selected-period average volatility is context only; it does not set the label.
+Volatility summary
+- The volatility summary places current 30-day volatility against two references that do not roll with the market: its multiple of the pre-war level (Oct to Dec 2025) and its percentile among every 30-day volatility since the start of the data (named in the summary). State the pre-war multiple whenever you describe the level of volatility.
+- There is no Normal / Elevated / Extreme label. Do not invent one, and do not call volatility high or low without one of the two references.
+- Volatility measures how much prices move, not overall risk. Never call the market "low risk" because volatility is low: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
+- The selected-period average volatility is context only.
 - Write volatility as the inputs do: annualised first, the daily figure in brackets.
 
 VaR
@@ -1300,7 +1296,6 @@ MARKET DATA AS OF {date_str}
 - 30-day rolling volatility: {common.fmt_vol(latest_vol_v)} (average over the selected period {common.fmt_vol(avg_vol_v)})
 - VaR 95%, 1-day (historical, last 250 trading days): {var_95_v:.2f}%
 - {garch_line}
-- 3-year label: {current_regime_v}
 - Headline tone now: {sentiment_now_line} | 30-day average (FinVADER): {sentiment_30d_line}
 - Checks firing on the latest day: {anomaly_line}
 - Past breaches in the last 252 trading days (with dates): {past_line}
@@ -1319,7 +1314,7 @@ Write EXACTLY 3 sentences. Keep the whole comment under 100 words. No headers, n
 HARD RULES
 - Never write "watch whether X pushes above", "pushes through", "breaks", "crosses" or "rises above" a level that X is already ABOVE, and never write "falls below" or "drops below" a level that X is already BELOW. Check the LEVELS list before naming any level.
 - Compare a value only with a level listed for that value.
-- If the headline field says feeds were unreachable, treat BOTH tone readings as meaningless: do not mention tone or news anywhere in your answer, and build all three sentences from the volatility, VaR, GARCH and regime data alone.
+- If the headline field says feeds were unreachable, treat BOTH tone readings as meaningless: do not mention tone or news anywhere in your answer, and build all three sentences from the volatility, VaR, GARCH and check data alone.
 - Never infer complacency, fear or a price direction from headline tone.
 - GARCH is a model fitted on past daily returns. Never call it implied, options-implied or option-based, and never say it is or is not a "model artifact".
 - A check that last fired on an earlier date is a past event: name its date if you mention it, and never present it as a current signal.
@@ -1362,7 +1357,7 @@ Output only the 3 sentences."""
 anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies if not a.get('past'))
 past_breaches_for_llm = "; ".join(a['past'] for a in anomalies if a.get('past'))
 _vs = common.vol_summary(core, name=selected_commodity)
-vol_summary_for_llm = f"{_vs['headline']}; {_vs['headline2']}. {_vs['detail']} {_vs['label']}"
+vol_summary_for_llm = f"{_vs['headline']}; {_vs['headline2']}. {_vs['detail']}"
 if not is_live:
     top_neg_for_llm = "none (news feeds unreachable, no tone computed)"
 else:
@@ -1372,7 +1367,7 @@ else:
 today_date_str = df_analysis.index[-1].strftime('%Y-%m-%d')
 
 level_lines, level_list = level_facts(
-    float(latest_vol), regime_thr, float(vol_hi), float(vol_lo), float(garch_ref),
+    float(latest_vol), float(vol_hi), float(vol_lo), float(garch_ref),
     garch['current_cond_vol'] if garch is not None else None, garch_forecast_10d, GARCH_HI, GARCH_LO,
     corr_v=corr_now if has_corr else None, corr_lo_v=float(corr_lo) if has_corr else None,
     corr_hi_v=float(corr_hi) if has_corr else None, corr_label=compare_label)
@@ -1390,7 +1385,6 @@ narrative, error = generate_risk_narrative(
     latest_vol_v=float(latest_vol),
     avg_vol_v=float(avg_vol),
     var_95_v=float(var_95),
-    current_regime_v=current_regime,
     garch_now=garch['current_cond_vol'] if garch is not None else None,
     garch_10d=garch_forecast_10d,
     garch_ref_v=float(garch_ref) if garch is not None else None,
@@ -1402,8 +1396,6 @@ narrative, error = generate_risk_narrative(
     past_breaches_str=past_breaches_for_llm,
     top_neg_str=top_neg_for_llm,
     date_str=today_date_str,
-    regime_elevated=float(regime_thr['elevated']),
-    regime_extreme=float(regime_thr['extreme']),
     levels_str=levels_for_llm,
     tail_fact_str=tail_roll_fact,
 )
@@ -1412,7 +1404,7 @@ narrative_dropped = []
 if narrative:
     narrative, narrative_dropped = drop_crossed_watch_sentences(narrative, level_list)
 
-_ai_scope = ("It only summarises the statistics on this page (volatility, VaR, GARCH, regime, headline tone "
+_ai_scope = ("It only summarises the statistics on this page (volatility, VaR, GARCH, headline tone "
              "and the checks above); it does not see fundamentals such as storage, flows, positioning or "
              "the forward curve.")
 _dropped_note = (f" An automatic check removed {len(narrative_dropped)} sentence(s) that asked the reader to "
@@ -1443,8 +1435,6 @@ export_df = df_analysis[['Price', 'Compare', 'Volatility', 'Rolling Correlation'
 export_df.columns = [selected_commodity, compare_label, '30-day volatility of daily returns (%)',
                      '30-day rolling correlation (returns)']
 export_df['Daily_Return_%'] = df_analysis['Returns'] * 100
-if 'Regime' in features.columns:
-    export_df = export_df.join(features[['Regime']], how='left')
 st.download_button(
     label=f"Download {selected_commodity} Risk Data (CSV)",
     data=export_df.to_csv(),

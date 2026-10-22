@@ -46,12 +46,13 @@ with st.sidebar.expander("Methodology: Risk page"):
       the 2.5% quantile.
     - **GARCH(1,1) Forecast**: Student-t GARCH; daily volatility forecast for each of the next
       10 days, and the 10-day holding-period volatility.
-    - **Regime Detection**: per-commodity volatility thresholds only. Elevated above the
-      75th and Extreme above the 90th percentile of the commodity's own 30-day volatility
-      over the last 3 years (750 trading days), so the 2021-22 crisis does not set today's
-      "normal". This 3-year label sits under a neutral heading that also gives the multiple of
-      the pre-war level (median of Oct to Dec 2025) and the percentiles over 1 year, 3 years and
-      since the start of the data (2017 or 2018); a lower volatility can never get a higher label.
+    - **Volatility references**: two references that do not roll with the market: the multiple of
+      the pre-war level (median 30-day volatility of Oct to Dec 2025) and the percentile among every
+      30-day volatility since the start of the data (2017; TTF from Oct 2017). No Normal / Elevated /
+      Extreme label: there is no industry-standard cut-off for one.
+    - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 in which
+      they would have lost the most (largest ES 97.5%), equally weighted, after the Basel method
+      (BCBS MAR33.7), shown next to the last 250 days.
     - **Historical scenarios**: today's positions replayed through three past windows
       (Russia's invasion of Ukraine, the August 2022 gas peak, the 2026 Iran war). It shows
       what happened, not a forecast.
@@ -87,7 +88,6 @@ returns_clean = core['returns_clean']
 var_95, var_99, es_975 = core['var_95'], core['var_99'], core['es_975']
 var_days = core['var_days']
 overall_corr = core['overall_corr']
-regime_thr, current_regime = core['regime_thr'], core['current_regime']
 
 # ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
 st.subheader("Volatility")
@@ -101,29 +101,34 @@ st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-
 if _vs['roll']:
     st.markdown(f"<div style='font-size:0.95rem; margin-bottom:0.4rem'>{_vs['roll']}</div>", unsafe_allow_html=True)
 st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
-st.caption(_vs['label'] + " It compares volatility with the commodity's own past; it is not a measure of overall "
-           "risk: low volatility says nothing about supply, storage or position size."
-           + (" With an end date in the past the label is applied with hindsight." if _past_end else ""))
+st.caption("This compares volatility with the commodity's own past; it is not a measure of overall risk: low "
+           "volatility says nothing about supply, storage or position size.")
 _last_px = df_analysis['Price'].dropna().index.max()
 _cmp_own = common.load_close(ctx.compare_ticker, start_date, end_date).dropna()
 _last_cmp = _cmp_own.index.max() if len(_cmp_own) else None   # its own last price, not the last day both have
 # TTF=F follows the NYMEX trading calendar, as BZ=F does: when Brent already has a price for a later day and
 # TTF=F does not, Yahoo's TTF row for that day is late, not a holiday (same check as the Power page).
 _ttf_late = ""
+# The last row can still be a live or evening-session price when the end date is the latest trading day or the
+# day before it (Yahoo rewrites a row to the settlement only hours later), not only when it is today.
+_recent_end = (pd.Timestamp.today().normalize() - pd.Timestamp(end_date)).days <= 3
+_futures = commodity['ticker'].endswith("=F")
 if not _past_end:
     for _n, _t, _d in ((selected_commodity, commodity['ticker'], _last_px), (compare_label, ctx.compare_ticker, _last_cmp)):
         if _t == "TTF=F" and _d is not None:
             _bz = common.load_close("BZ=F", (_d - pd.Timedelta(days=7)).date(), pd.Timestamp.today().date()).dropna()
             if len(_bz) and _bz.index[-1].normalize() > _d.normalize():
-                _ttf_late = (f" Yahoo Finance has no TTF=F price for {_bz.index[-1]:%d %b} yet, although NYMEX Brent "
-                             "(BZ=F, same trading calendar) has one, so TTF figures end a day earlier.")
+                _ttf_late = (f" TTF figures end a day earlier than Brent: Yahoo Finance has no TTF=F price for "
+                             f"{_bz.index[-1]:%d %b} in this download, although NYMEX Brent (BZ=F, which usually "
+                             "follows the same trading calendar) has one.")
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
-           + (" The last value can be a price from the current or the evening electronic session, not the settlement, "
-              "so it can change within the hour." if not _past_end else "")
-           + " The volatility, percentiles, pre-war multiple, 3-year thresholds and label (here and in Market Regime), "
-           "VaR and the roll check all come from one download of the series, computed together.")
+           + ((" The last value can be a price from the current or the evening electronic session, not the "
+               "settlement, so it can change within the hour." if _futures else
+               " The last value is the latest close on the London Stock Exchange.") if _recent_end else "")
+           + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
+           "the series, computed together.")
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -135,9 +140,7 @@ mc1.metric("Current Volatility (30-day)", common.fmt_vol(latest_vol),
            help="Standard deviation of the last 30 daily returns; annualised = daily x √252.")
 mc2.metric("Average Volatility (30-day)", common.fmt_vol(avg_vol),
            help=f"Average 30-day volatility over the selected period ({_vol_series.index.min():%d %b %Y} to "
-                f"{_vol_series.index.max():%d %b %Y}). The regime "
-                "thresholds use a different period (the last 3 years), so a value below this average can "
-                "still be Elevated.")
+                f"{_vol_series.index.max():%d %b %Y}).")
 if len(_corr_pairs):
     mc3.metric(f"Correlation vs {_partner}", f"{overall_corr:.2f}",
                help=f"Pearson correlation of daily returns, {_corr_pairs.index.min():%d %b %Y} to "
@@ -221,6 +224,9 @@ else:
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
+        # A value for today is the latest price, not a close (4-1).
+        _live_curve = last_trade.normalize() >= pd.Timestamp.today().normalize()
+        _px_word = "latest prices" if _live_curve else "latest closes"
         # A real monthly axis: months with no contract stay empty and the line is not drawn across them.
         labels_fc = list(curve['Delivery'])
         _all_months = pd.date_range(curve['Delivery'].min(), curve['Delivery'].max(), freq='MS')
@@ -267,13 +273,17 @@ else:
                 _season_ok[key] = n_season >= _MIN_SEASON
                 if _season_ok[key]:
                     _d = curve.loc[curve['Season'] == key, 'Delivery']
-                    col_fc.metric(f"{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of {_open_months(key)} contracts still trading)",
+                    col_fc.metric(f"{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of the {_open_months(key)} contracts still trading are on Yahoo Finance)",
                                   f"{seasons.loc[key, 'Price']:.2f} {curve_unit}")
+                    # 4-6: say when the contracts averaged are not from the same day
+                    _lt = curve.loc[curve['Season'] == key, 'Last trade']
+                    if _lt.dt.normalize().nunique() > 1:
+                        col_fc.caption(f"Prices from {_lt.min():%d %b} to {_lt.max():%d %b}")
                 else:
                     _months = ", ".join(f"{d:%b %y}" for d in curve.loc[curve['Season'] == key, 'Delivery'])
                     col_fc.metric(f"{key} average", "n/a",
-                                  help=f"Only {n_season} of {_open_months(key)} monthly contracts still trading available ({_months}); "
-                                       f"an average needs at least {_MIN_SEASON}.")
+                                  help=f"Only {n_season} of the {_open_months(key)} monthly contracts still trading are on Yahoo "
+                                       f"Finance ({_months}); an average needs at least {_MIN_SEASON}.")
                     col_fc.caption(f"Only {n_season} contract{'s' if n_season > 1 else ''} ({_months}): "
                                    "no season average.")
             if winter is not None and summer is not None and _season_ok.get(winter) and _season_ok.get(summer):
@@ -334,9 +344,9 @@ else:
                 fc2.caption(f"{_to_go} Close to expiry the front month can be squeezed. {_follows}")
             _mixed = front['Last trade'].normalize() != back['Last trade'].normalize()
             fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
-                       help=(f"Front month close of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} close of "
+                       help=(f"Front month price of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} price of "
                              f"{back['Last trade']:%d %b}: the two ends are from different days." if _mixed
-                             else f"Both closes of {front['Last trade']:%d %b}."))
+                             else f"Both {'latest prices' if _live_curve else 'closes'} of {front['Last trade']:%d %b}."))
             if _mixed:
                 fc3.caption(f"Front {front['Last trade']:%d %b}, back {back['Last trade']:%d %b}")
             ax_fc.scatter(labels_fc, curve['Price'], color=commodity['color'], s=30, zorder=2)
@@ -353,7 +363,7 @@ else:
                            ha='center', fontsize=7)
         ax_fc.set_ylabel(curve_unit)
         ax_fc.set_xlabel('Delivery month')
-        ax_fc.set_title(f"{selected_commodity} futures curve, latest closes {settled}: {curve_shape.lower()}")
+        ax_fc.set_title(f"{selected_commodity} futures curve, {_px_word} {settled}: {curve_shape.lower()}")
         plt.tight_layout()
         st.pyplot(fig_fc)
 
@@ -416,7 +426,7 @@ else:
 
 def _heatmap(corr, title):
     fig_h, ax_h = plt.subplots(figsize=(5, 5))
-    im = ax_h.imshow(corr, cmap='RdYlGn', vmin=-1, vmax=1)
+    im = ax_h.imshow(corr, cmap='RdBu', vmin=-1, vmax=1)
     ax_h.set_xticks(range(len(corr.columns)))
     ax_h.set_yticks(range(len(corr.columns)))
     ax_h.set_xticklabels(corr.columns, fontsize=9, rotation=45, ha='right')
@@ -443,7 +453,8 @@ if corr_full is not None:
         st.write(f"**Last 30 common trading days: {_recent_range}**")
         st.pyplot(_heatmap(corr_30d, f"Last 30 common days, {_recent_range}"))
 
-    st.caption("Green = positive correlation (move together). Red = negative (move inversely). "
+    st.caption("Blue = positive correlation (move together). Red = negative (move inversely); for a hedged book a "
+               "negative correlation is not in itself bad. "
                "Only days on which all four series have a return are used. Compare full period with the "
                "last 30 days to see whether relationships have shifted. The series do not close at the same "
                "time (TTF and the carbon ETC on European hours, Brent and WTI in the New York afternoon), so "
@@ -672,46 +683,6 @@ else:
     st.caption("GARCH forecast unavailable for this date range: try a longer window.")
 
 
-# ─── Section 5: Market Regime ───
-st.subheader("Market Regime")
-st.write("Each day is labelled by its 30-day volatility against this commodity's own thresholds")
-
-features = common.compute_regimes(df_analysis[['Volatility', 'Rolling Correlation']], regime_thr)
-st.markdown(f"**3-year label {'on ' + format(_vol_asof, '%d %b %Y') if _past_end else 'today'}: {current_regime}**")
-st.caption(common.regime_caption(regime_thr))
-
-regime_stats = features.groupby('Regime').agg(
-    Days=('Volatility', 'count'),
-    Avg_Volatility=('Volatility', lambda v: v.mean() * ANNUAL),
-    Avg_Daily=('Volatility', 'mean'),
-    Avg_Correlation=('Rolling Correlation', 'mean')
-).round(2)
-regime_stats.columns = ['Trading Days', 'Avg volatility, annualised (%)', 'Avg volatility, daily (%)',
-                        f'Avg correlation vs {_partner}']
-
-rcol1, rcol2 = st.columns([2, 1])
-with rcol1:
-    fig2, ax3 = plt.subplots(figsize=(12, 4))
-    for regime, group in features.groupby('Regime'):
-        ax3.scatter(group.index, group['Volatility'] * ANNUAL,
-                   c=common.REGIME_COLORS[regime], label=regime, alpha=0.8, s=10)
-    ax3.axhline(y=regime_thr['elevated'] * ANNUAL, color=common.REGIME_COLORS['Elevated'], linewidth=1, linestyle='--',
-                label=f"Elevated threshold ({common.fmt_vol(regime_thr['elevated'])}, p{common.ELEVATED_PCT})")
-    ax3.axhline(y=regime_thr['extreme'] * ANNUAL, color=common.REGIME_COLORS['Extreme'], linewidth=1, linestyle='--',
-                label=f"Extreme threshold ({common.fmt_vol(regime_thr['extreme'])}, p{common.EXTREME_PCT})")
-    ax3.set_ylabel('30-day volatility, annualised (%)')
-    ax3.set_title(f'{selected_commodity}: 3-year volatility labels, annualised')
-    ax3.legend(fontsize=7)
-    plt.tight_layout()
-    st.pyplot(fig2)
-with rcol2:
-    st.write("**Regime Statistics:**")
-    st.dataframe(regime_stats, width="stretch")
-st.caption(f"Every day in the chart is labelled with today's thresholds (from "
-           f"{regime_thr['start']:%b %Y} to {regime_thr['end']:%b %Y}), so the labels for earlier years are "
-           "applied with hindsight: they are not what a desk would have seen at the time.")
-
-
 # ─── Section 5a: Positions & Limits ───
 st.subheader("Positions & Limits")
 st.write("Risk of a book of positions in euros: VaR, Expected Shortfall, limit usage, a VaR backtest and "
@@ -792,6 +763,43 @@ else:
                    "book VaR above does the netting through the joint daily returns. Diversification benefit: "
                    f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR).")
 
+        # ── Stress period (after Basel MAR33.7) ──
+        st.write("**Stress period: today's positions in the 12 months they would have lost the most**")
+        _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
+        _sp = (common.stress_period(_stress_panel[list(positions)], positions)
+               if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
+        if _sp is None:
+            st.caption(f"No stress period: since {common.STRESS_FROM:%b %Y} there is no run of {common.STRESS_WINDOW} "
+                       "days on which every instrument held has a return within "
+                       f"{common.STRESS_MAX_SPAN} calendar days.")
+        else:
+            sc1, sc2, sc3 = st.columns(3)
+            for _c, _lab, _s, _now in ((sc1, "Stress VaR 95% (1-day)", _sp['var95'], book_var95),
+                                        (sc2, "Stress VaR 99% (1-day)", _sp['var99'], book_var99),
+                                        (sc3, "Stress ES 97.5% (1-day)", _sp['es975'], book_es975)):
+                _c.metric(_lab, f"€{_s / 1e6:,.2f}m",
+                          help=f"Same measure as above, on the stress period's {common.STRESS_WINDOW} days instead "
+                               f"of the last {len(recent)}.")
+                _c.caption(f"{_s / _now:.2f}x the last {len(recent)} days (€{_now / 1e6:,.2f}m)" if _now > 0 else "")
+            _tie_txt = (f" The ES is the same in {_sp['ties']} windows ending {_sp['first_tie_end']:%d %b %Y} to "
+                        f"{_sp['end']:%d %b %Y}, because ES 97.5% over 250 days depends only on the worst 7 days "
+                        "and these windows all contain them; the latest is shown." if _sp['ties'] > 1 else "")
+            st.caption(
+                f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, the {common.STRESS_WINDOW} trading "
+                f"days from {_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y} in which today's positions would "
+                f"have had the largest ES 97.5%, all days equally weighted. As above, only days on which every "
+                f"instrument held has a return count, and the {common.STRESS_WINDOW} days must fall within "
+                f"{common.STRESS_MAX_SPAN} calendar days"
+                + (", which leaves out the carbon ETC's suspension (Jun 2020 to Aug 2021) and its sparse prices "
+                   "before 2018" if CARBON_SHORT in positions else "")
+                + f".{_tie_txt} It changes when the "
+                "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
+                "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "
+                "scaling; here the horizon is 1 day, as above. The search starts in 2017: TTF=F starts on 23 Oct "
+                "2017, so a book with TTF cannot reach back to 2007 as Basel requires. Brent and WTI were checked "
+                "back to 2007 and 2000 (on 22 Oct 2026): no earlier 12 months was more volatile or had a larger "
+                "loss for one unit long or short.")
+
         # ── VaR backtest ──
         bt = common.var_backtest(pnl, window=_LOOKBACK, test_days=_TEST_DAYS)
         n_bt = len(bt)
@@ -823,7 +831,9 @@ else:
         st.pyplot(fig_bt)
 
         st.caption(
-            f"Historical simulation on the last {_LOOKBACK} trading days, 1-day horizon. "
+            f"Historical simulation on the last {_LOOKBACK} trading days, 1-day horizon. Only days on which "
+            "every instrument held has a return count: a move of one instrument on the other's holiday is "
+            "left out, and the other's next return spans both days. "
             "Backtest is hypothetical: today's positions applied to past returns, each day's VaR "
             f"estimated only from the {_LOOKBACK} days before it. Positions are held static. Returns are "
             "taken in each instrument's quote currency and applied to the € notional, so EUR/USD is ignored "

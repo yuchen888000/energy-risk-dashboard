@@ -1,7 +1,7 @@
 """Shared configuration, data loading and cached risk calculations.
 
 Every page imports this module, so the carbon benchmark, the commodity list and the
-core risk numbers (volatility, VaR, GARCH, regimes) are defined and computed in one
+core risk numbers (volatility, VaR, GARCH, stress period) are defined and computed in one
 place. The heavy calculations are wrapped in st.cache_data, so a page that needs a
 number another page already computed gets it from the cache.
 """
@@ -277,13 +277,14 @@ def _var_es(returns):
 
 @st.cache_data(ttl=3600, show_spinner="Computing risk metrics...")
 def compute_core(ticker, compare_ticker, start, end):
-    """Returns, rolling volatility/correlation, VaR, the 3-year thresholds and label, the percentile context
-    and the contract roll check of the latest 30-day window.
+    """Returns, rolling volatility/correlation, VaR, the volatility context (pre-war multiple, percentile since
+    the start of the data), the 3-year reference window of the Market page's checks and the contract roll check
+    of the latest 30-day window.
 
     Everything about `ticker` comes from one read of its shared download (_download_batch), inside this one
-    cached result, so the thresholds, the label, the percentiles, VaR and the roll check can never come from
-    two different downloads, even after the download cache expires. Returns None when fewer than 30
-    overlapping observations are available.
+    cached result, so the percentile, the pre-war multiple, the 3-year reference, VaR and the roll check can
+    never come from two different downloads, even after the download cache expires. Returns None when fewer
+    than 30 overlapping observations are available.
     """
     today = dt.date.today()
     batch = _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), today)
@@ -334,11 +335,10 @@ def compute_core(ticker, compare_ticker, start, end):
     overall_corr = returns_corr['Returns'].corr(returns_corr['Compare_Returns'])
 
     # 30-day volatility since the start of the data (2017) up to today, from the same download: the source of
-    # the 3-year thresholds and of the percentiles and pre-war multiple.
+    # the percentile, the pre-war multiple and the Market page's 3-year reference window.
     hist = _slice(raw, _CONTEXT_START, today)
     hist_vol = (simple_returns(hist.mask(_stale_mask(hist))).rolling(30, min_periods=20).std() * 100).dropna()
-    regime_thr = regime_thresholds(hist_vol, df_analysis['Volatility'])
-    current_regime = regime_label(latest_vol, regime_thr)
+    ref3y = three_year_reference(hist_vol, df_analysis['Volatility'])
 
     vol_asof = df_analysis['Volatility'].dropna().index[-1]
     window_returns = df_analysis['Returns'].loc[:vol_asof].tail(30)
@@ -350,7 +350,7 @@ def compute_core(ticker, compare_ticker, start, end):
         var_days=len(var_returns), var_95_full=var_95_full, var_99_full=var_99_full,
         es_975_full=es_975_full,
         overall_corr=overall_corr,
-        regime_thr=regime_thr, current_regime=current_regime,
+        ref3y=ref3y,
         vol_ctx=vol_context(hist_vol, vol_asof, float(latest_vol)),
         rolls=window_rolls(ticker, batch, window_returns),
         last_download=raw.index[-1] if len(raw) else None,
@@ -436,48 +436,38 @@ def fit_garch(returns_clean):
     )
 
 
-# ─── Regime Detection (per-commodity volatility thresholds) ───
-# Thresholds come from the last REGIME_WINDOW trading days only (about 3 years). The full
-# history since 2010 includes the 2021-22 energy crisis, when TTF's daily volatility was
-# several times its normal level; percentiles taken over it set the "normal" line so high
-# that a market under real stress (e.g. 2026, with Qatari LNG disrupted) was still labelled
-# Normal. A recent window compares today with the market as it has recently been.
-REGIME_WINDOW = 750               # trading days, about 3 years
-# Elevated = top 25%, Extreme = top 10% of the commodity's own 30-day volatility. There is no
-# industry-standard regime cut-off; desks usually quote where volatility sits in its own history
-# (its percentile), which the page shows next to the label.
-ELEVATED_PCT, EXTREME_PCT = 75, 90
+# ─── Volatility reference windows ───
+# The volatility heading compares today's 30-day volatility with two references that do not roll with the
+# market: the pre-war quarter (a calm baseline) and the commodity's whole history since the start of the data
+# (its percentile). A rolling 3-year Normal / Elevated / Extreme label was dropped: its cut-offs had no
+# industry source and its thresholds moved with the market (low after calm years, high after a crisis).
+# The Market page's statistical checks still ask "unusual compared with the last 3 years?", so the 3-year
+# window below is kept for them only.
+CHECK_WINDOW = 750               # trading days, about 3 years: the Market page's check window
 _MIN_HISTORY = 250
-# One hue, light to dark: the label is a single-window percentile, not a traffic-light signal.
-REGIME_COLORS = {'Normal': '#c6dbef', 'Elevated': '#4292c6', 'Extreme': '#08306b'}
 ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
 
 
-@st.cache_data(ttl=3600, show_spinner="Computing regime thresholds...")
-def regime_thresholds(hist_vol, fallback_vol):
-    """Elevated / Extreme thresholds from the commodity's own recent 30-day volatility.
+@st.cache_data(ttl=3600, show_spinner="Computing the 3-year reference...")
+def three_year_reference(hist_vol, fallback_vol):
+    """The last CHECK_WINDOW trading days of 30-day volatility up to today: the reference window of the Market
+    page's statistical checks (its mean is the GARCH check's reference level).
 
     `hist_vol` is the 30-day volatility up to today from the shared download, computed once in compute_core
-    (the only caller), so the cache key is the download itself and the thresholds expire with it.
-    Elevated starts at the ELEVATED_PCT-th percentile and Extreme at the EXTREME_PCT-th, both
-    taken over the last REGIME_WINDOW trading days up to today (so they do not move with
-    the selected date range). If that history is too short, `fallback_vol` (the 30-day
-    volatility of the selected range) is used instead. The mean and standard deviation
-    of the same window are returned for the volatility anomaly check.
+    (the only caller), so the cache key is the download itself and the window expires with it. If that history
+    is too short, `fallback_vol` (the 30-day volatility of the selected range) is used instead.
     """
-    vol = hist_vol.dropna().tail(REGIME_WINDOW)
+    vol = hist_vol.dropna().tail(CHECK_WINDOW)
     source = f"last {len(vol):,} trading days"
     if len(vol) < _MIN_HISTORY:
         vol, source = fallback_vol.dropna(), "selected date range only; recent history unavailable"
-    elevated, extreme = np.percentile(vol, [ELEVATED_PCT, EXTREME_PCT])
-    return dict(elevated=float(elevated), extreme=float(extreme), source=source, hist=np.sort(vol.values),
-                start=vol.index[0], end=vol.index[-1], n=len(vol),
+    return dict(source=source, start=vol.index[0], end=vol.index[-1], n=len(vol),
                 mean=float(vol.mean()), std=float(vol.std()))
 
 
 # Fixed pre-war reference: the last full quarter before the US-Israeli strikes on Iran on 28 Feb 2026.
 # A fixed window, like the fixed event dates of the historical scenarios, so the reference does not
-# drift with the date range; percentile windows alone cannot say "twice as volatile as before the war".
+# drift with the date range; a percentile alone cannot say "twice as volatile as before the war".
 PREWAR_START, PREWAR_END = pd.Timestamp("2025-10-01"), pd.Timestamp("2025-12-31")
 _CONTEXT_START = dt.date(2017, 1, 1)
 
@@ -485,33 +475,25 @@ _CONTEXT_START = dt.date(2017, 1, 1)
 @st.cache_data(ttl=3600, show_spinner=False)
 def vol_context(hist_vol, as_of, vol_now):
     """Where `vol_now` (30-day volatility of daily returns, %) sits against the commodity's own history
-    up to `as_of`: percentile rank over the last 250 and 750 trading days and since the start of the data (Jan 2017, or later where
-    the series starts later), and the ratio
-    to the median 30-day volatility of the pre-war quarter (Oct to Dec 2025). `hist_vol` is the 30-day
-    volatility from compute_core's download (simple returns, 30-day window, stale repeats excluded). The
-    pre-war median is given only when `as_of` is on or after 31 Dec 2025: before that the quarter is not
-    complete, and a median of part of it would be labelled as the whole quarter."""
+    up to `as_of`: its percentile rank since the start of the data (Jan 2017, or later where the series starts
+    later; TTF=F starts in Oct 2017) and the ratio to the median 30-day volatility of the pre-war quarter
+    (Oct to Dec 2025). `hist_vol` is the 30-day volatility from compute_core's download (simple returns, 30-day
+    window, stale repeats excluded). The pre-war median is given only when `as_of` is on or after 31 Dec 2025:
+    before that the quarter is not complete, and a median of part of it would be labelled as the whole
+    quarter."""
     vol = hist_vol[hist_vol.index <= pd.Timestamp(as_of)]
     if len(vol) < 250:
         return None
-
-    def rank(window):
-        # Share of the window strictly below vol_now. Both sides are rounded to 10 decimals first: today's
-        # volatility is computed on two paths (compute_core's window and the history here) that can differ by
-        # ~1e-14, which would otherwise count today itself as "below today" on some days and not on others.
-        h = np.sort(np.round(window.values, 10))
-        return 100.0 * np.searchsorted(h, round(float(vol_now), 10), side='left') / len(h)
-
-    def top(window):
-        # Highest of the window: nothing in it above vol_now (the rank can then read 99.9, shown as "highest").
-        return bool(round(float(vol_now), 10) >= np.round(window.values, 10).max())
-
+    # Share of the history strictly below vol_now. Both sides are rounded to 10 decimals first: today's
+    # volatility is computed on two paths (compute_core's window and the history here) that can differ by
+    # ~1e-14, which would otherwise count today itself as "below today" on some days and not on others.
+    h = np.sort(np.round(vol.values, 10))
+    now = round(float(vol_now), 10)
     complete = pd.Timestamp(as_of) >= PREWAR_END
     prewar = vol[(vol.index >= PREWAR_START) & (vol.index <= PREWAR_END)]
     pre_med = float(prewar.median()) if complete and len(prewar) >= 20 else None
-    return dict(p1y=rank(vol.tail(250)), p3y=rank(vol.tail(750)), p_all=rank(vol), all_start=vol.index[0],
-                top1y=top(vol.tail(250)), top3y=top(vol.tail(750)), top_all=top(vol),
-                start_3y=vol.tail(750).index[0], prewar_incomplete=not complete,
+    return dict(p_all=100.0 * np.searchsorted(h, now, side='left') / len(h), top_all=bool(now >= h.max()),
+                all_start=vol.index[0], prewar_incomplete=not complete,
                 prewar_median=pre_med, prewar_ratio=(vol_now / pre_med) if pre_med else None)
 
 
@@ -525,23 +507,17 @@ def _ordinal(x):
     return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
 
 
-def _pct_text(p):
-    """A percentile rank as an ordinal; within half a point of a label threshold (75th, 90th) with one decimal,
-    so a rank of 74.9 (Normal) and one of 75.1 (Elevated) do not both read "75th"."""
-    if any(abs(p - t) < 0.5 for t in (ELEVATED_PCT, EXTREME_PCT)):
-        return f"{p:.1f}th"
-    return _ordinal(p)
-
-
 _WAR_START = pd.Timestamp("2026-03-01")
 _PRICE_TOL = 1e-4   # a settled continuous close and a single-contract close are the same quote
 # The download's last day can be a live price, and Yahoo updates the continuous row and the contract rows at
 # slightly different moments (on 20 Oct 2026, 00:16 UTC: CL=F 98.09, CLZ26 98.10). On that day the closest
 # contract is taken if it is within 0.05% and every other contract is at least 0.05 percentage points farther.
 _LAST_TOL = 5e-4
-# A continuous front-month series on a given day follows a contract delivering 1 to 3 months later (TTF: the
-# next month; WTI: the next or the one after; Brent: two or three months ahead). Only those contracts are
-# compared, so a back-month contract that happens to close at the same price is never taken as the front.
+# A continuous front-month series on a given day follows a contract delivering a fixed number of months later:
+# TTF and WTI 1 or 2 (the next month, or the one after once the next has expired), Brent 2 or 3 (two months
+# ahead, three after the December expiry moved before New Year). Only those contracts are compared, so a
+# back-month contract that happens to close at the same price is never taken as the front.
+_FRONT_AHEAD = {"TTF": (1, 2), "CL": (1, 2), "BZ": (2, 3)}
 
 
 def window_rolls(ticker, batch, window_returns):
@@ -551,8 +527,8 @@ def window_rolls(ticker, batch, window_returns):
     download (_download_batch): the continuous series and the individual monthly contracts from one download,
     the same one behind the volatility. Each day is matched to the one contract whose
     close equals the continuous close (on the download's last day, which can be a live price, the closest
-    contract within _LAST_TOL when all others are at least _LAST_TOL farther). Only contracts delivering 1 to 3
-    months after the day are compared. A return day is a roll day when the
+    contract within _LAST_TOL when all others are at least _LAST_TOL farther). Only contracts that can be the
+    front month on that day are compared (_FRONT_AHEAD). A return day is a roll day when the
     continuous close equals contract
     M on that day but did not equal M's close on the day before; its return then contains the gap between two
     contracts, and M's own return that day replaces it. A day is not identified when the continuous close
@@ -577,11 +553,12 @@ def window_rolls(ticker, batch, window_returns):
 
     root = CURVE_ROOTS[ticker][0]
     months_ahead = {s: (contract_delivery(s, root).year * 12 + contract_delivery(s, root).month) for s in syms}
+    lo, hi = _FRONT_AHEAD[root]
 
     def match(day):
         m0 = day.year * 12 + day.month
         quotes = {s: data.at[day, s] for s in syms
-                  if 1 <= months_ahead[s] - m0 <= 3 and pd.notna(data.at[day, s])}
+                  if lo <= months_ahead[s] - m0 <= hi and pd.notna(data.at[day, s])}
         if day == live_day:
             gaps = sorted((abs(q / cont[day] - 1), s) for s, q in quotes.items())
             ok = gaps and gaps[0][0] < _LAST_TOL and all(g >= gaps[0][0] + _LAST_TOL for g, _ in gaps[1:])
@@ -637,24 +614,9 @@ def contract_delivery(sym, root):
     return dt.date(2000 + int(sym[len(root) + 1:len(root) + 3]), MONTH_CODES.index(sym[len(root)]) + 1, 1)
 
 
-def _adjusted_side(adj, regime, thr):
-    """The sentence for an adjusted 30-day volatility that falls on the other side of a label threshold, or ''."""
-    adj_regime = regime_label(adj, thr)
-    if adj_regime == regime:
-        return ""
-    order = ['Normal', 'Elevated', 'Extreme']
-    lower = order.index(adj_regime) < order.index(regime)
-    crossed = order[order.index(adj_regime) + 1] if lower else adj_regime
-    return (f"With the adjustment the figure would be {'below' if lower else 'above'} the {crossed} threshold, "
-            f"{fmt_vol(thr[crossed.lower()])}, so it would be labelled {adj_regime}; the 3-year label and the "
-            "percentiles stay on the unadjusted figure because the thresholds come from unadjusted history, "
-            "which contains roll days too.")
-
-
-def roll_sentence(ticker, rc, window_returns, regime, thr):
+def roll_sentence(ticker, rc, window_returns):
     """The line under the volatility heading when the 30-day window contains contract roll days, or ''.
-    `rc` is compute_core's window_rolls result for `window_returns`; `regime` and `thr` the 3-year label and
-    thresholds of the unadjusted figure."""
+    `rc` is compute_core's window_rolls result for `window_returns`."""
     if rc is None or not (rc['rolls'] or rc['unknown'] or rc['rule_only']):
         return ""
     root = CURVE_ROOTS[ticker][0]
@@ -676,35 +638,29 @@ def roll_sentence(ticker, rc, window_returns, regime, thr):
                      "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
                      "roll on those days is neither ruled out nor adjusted.")
     if rc['rolls']:
-        parts.append(_adjusted_side(rc['adjusted_vol'], regime, thr)
-                     or "The 3-year label and the percentiles use the unadjusted figure.")
+        parts.append("The heading, the percentile and the pre-war multiple use the unadjusted figure, because "
+                     "the history they are compared with contains roll days too.")
     return " ".join(parts)
 
 
 def vol_summary(core, name=None, with_roll=False, past_end=False):
     """The single source of every volatility statement on the Risk and Market pages and in the AI input.
 
-    Everything comes from `core` (compute_core): the latest 30-day volatility, its 3-year label and thresholds
-    (computed once there, the same ones the Market Regime section uses), the percentiles, the pre-war
-    multiple and the roll check, all from one download.
-    Returns dict(headline, headline2, roll, detail, label, tile, regime, ...): `headline` and `headline2` are
-    the two lines of the large neutral heading, `roll` the line on contract roll days in the 30-day window
-    (only with `with_roll`), `detail` the paragraph under it,
-    `label` the small grey line with the 3-year label, `tile` the value for a metric tile. With `past_end` (the
-    end date chosen is before today) the label says that it uses today's 3-year thresholds, not the 3 years to
-    the end date behind the percentiles, and the percentiles name the end date."""
+    Everything comes from `core` (compute_core): the latest 30-day volatility, its multiple of the pre-war
+    level, its percentile since the start of the data and the roll check, all from one download. Neither
+    reference rolls with the market: the pre-war quarter is fixed and the percentile uses the whole history.
+    Returns dict(headline, headline2, roll, detail, tile, ctx): `headline` and `headline2` are the two lines of
+    the large neutral heading, `roll` the line on contract roll days in the 30-day window (only with
+    `with_roll`), `detail` the paragraph under it, `tile` the value for a metric tile. With `past_end` (the end
+    date chosen is before today) the percentile names the end date."""
     vol_now, as_of = float(core['latest_vol']), pd.Timestamp(core['vol_asof'])
-    ctx, thr, regime = core['vol_ctx'], core['regime_thr'], core['current_regime']
+    ctx = core['vol_ctx']
     window_returns = core['df_analysis']['Returns'].loc[:as_of].tail(30)
-    out = dict(regime=regime, thr=thr, ctx=ctx, tile=fmt_vol(vol_now, 0),
-               roll=(roll_sentence(core['ticker'], core['rolls'], window_returns, regime, thr) if with_roll else ""),
+    rc = core['rolls']
+    out = dict(ctx=ctx, tile=fmt_vol(vol_now, 0),
+               roll=(roll_sentence(core['ticker'], rc, window_returns) if with_roll else ""),
                headline=f"{name + ' ' if name else ''}30-day volatility: {vol_now * ANNUAL:.0f}% annualised "
-                        f"({vol_now:.2f}% daily)",
-               label=(f"3-year label: {regime}"
-                      + (f", against today's 3-year thresholds ({thr['start']:%b %Y} to {thr['end']:%b %Y}), not the "
-                         f"3 years to {as_of:%d %b %Y} behind the percentiles above" if past_end else "")
-                      + f" (Elevated above the {ELEVATED_PCT}th percentile, {fmt_vol(thr['elevated'])}; Extreme above "
-                        f"the {EXTREME_PCT}th, {fmt_vol(thr['extreme'])})."))
+                        f"({vol_now:.2f}% daily)")
     if ctx is None:
         out.update(headline2="", detail="")
         return out
@@ -717,9 +673,12 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
         compare = f"close to its pre-war level ({r:.2f}x)"
     else:
         compare = f"below its pre-war level ({r:.2f}x)"
-    span3 = f"the 3 years to {as_of:%d %b %Y}" if past_end else "the last 3 years"
-    out['headline2'] = (f"{compare} · " + (f"highest in {span3}" if ctx['top3y'] else
-                                           f"{_pct_text(ctx['p3y'])} percentile of {span3}"))
+    span = f"since {ctx['all_start']:%b %Y}" + (f" (to {as_of:%d %b %Y})" if past_end else "")
+    pct = f"highest {span}" if ctx['top_all'] else f"{_ordinal(ctx['p_all'])} percentile {span}"
+    # A roll day in the 30-day window lifts or lowers the large figures; say so in the heading itself.
+    roll_flag = (" · includes a contract roll day (see below)"
+                 if with_roll and rc is not None and rc['rolls'] else "")
+    out['headline2'] = f"{compare} · {pct}{roll_flag}"
     detail = ""
     if ctx['prewar_median'] is not None:
         detail += (f"Pre-war level: {ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% "
@@ -728,51 +687,10 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
     elif ctx['prewar_incomplete']:
         detail += ("No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
                    f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
-
-    def _p(key, top, span):
-        return f"highest {span}" if ctx[top] else f"{_pct_text(ctx[key])} {span}"
-    detail += (("Percentiles up to " + f"{as_of:%d %b %Y}: " if past_end else "Percentiles: ")
-               + f"{_p('p1y', 'top1y', 'over the last year' if not past_end else 'over 1 year')}, "
-               + f"{_p('p3y', 'top3y', 'over 3 years')}, "
-               + f"{_p('p_all', 'top_all', 'since ' + format(ctx['all_start'], '%b %Y'))}.")
-    if ctx['start_3y'] <= _WAR_START <= pd.Timestamp(as_of):   # only if the war falls inside that 3-year window
-        detail += " The 3-year window includes the volatility after the war began in March 2026."
+    detail += (f"The percentile ranks today's figure among every 30-day volatility {span}, a history that "
+               "includes the 2021-22 crisis and the 2026 war; it does not move with a rolling window.")
     out['detail'] = detail
     return out
-
-
-def regime_label(vol, thr):
-    """Regime for one volatility value (%): a higher volatility never gets a lower regime."""
-    if vol > thr['extreme']:
-        return 'Extreme'
-    if vol > thr['elevated']:
-        return 'Elevated'
-    return 'Normal'
-
-
-def vol_percentile(vol, thr):
-    """Share of the threshold window's 30-day volatilities below `vol`, in % (its percentile rank)."""
-    return 100.0 * np.searchsorted(np.round(thr['hist'], 10), round(float(vol), 10), side='left') / len(thr['hist'])
-
-
-def regime_caption(thr):
-    """One-line description of the thresholds, for page captions."""
-    period = f"{thr['start']:%b %Y} to {thr['end']:%b %Y}"
-    return (f"Thresholds for this commodity: Normal up to {fmt_vol(thr['elevated'])}, Elevated up to "
-            f"{fmt_vol(thr['extreme'])}, Extreme above that (the {ELEVATED_PCT}th and {EXTREME_PCT}th "
-            f"percentiles of its own 30-day rolling volatility, {period}, {thr['source']}). It compares volatility "
-            "with the commodity's own last 3 years; it is not a measure of overall risk.")
-
-
-def compute_regimes(features, thr):
-    """Label each day Normal / Elevated / Extreme from its 30-day volatility alone.
-
-    `features` has a Volatility column (other columns are kept for the statistics);
-    `thr` comes from regime_thresholds().
-    """
-    features = features.dropna(subset=['Volatility']).copy()
-    features['Regime'] = features['Volatility'].apply(regime_label, thr=thr)
-    return features
 
 
 # ─── Cross-commodity returns (correlation matrix, portfolio VaR, positions) ───
@@ -823,6 +741,54 @@ def var_backtest(pnl, window=250, test_days=250, confs=(0.95, 0.99)):
         out[f'VaR{int(c * 100)}'] = -pnl.rolling(window).quantile(1 - c).shift(1)
         out[f'Exc{int(c * 100)}'] = out['PnL'] < -out[f'VaR{int(c * 100)}']
     return out.dropna().tail(test_days)
+
+
+STRESS_WINDOW = 250      # common trading days in a candidate stress period (about 12 months)
+STRESS_MAX_SPAN = 400    # calendar days those 250 days may span at most (12 months plus holiday slack)
+STRESS_FROM = dt.date(2017, 1, 1)
+
+
+@st.cache_data(ttl=3600, show_spinner="Searching for the stress period...")
+def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SPAN):
+    """The 12-month stress period of today's book and its VaR and ES, after the Basel method (BCBS d457,
+    MAR33.7): the window of past data in which the current positions lose the most, equally weighted.
+
+    `panel` holds the daily returns of the instruments (returns_panel, from STRESS_FROM to the end date) and
+    `positions` maps instrument to € notional. Only days on which every instrument held has a return count, as
+    for the book VaR above. A candidate is `window` such consecutive days spanning at most `max_span` calendar
+    days: 250 common days of instruments on different holiday calendars span about 370 days, while a long gap
+    (the carbon ETC's suspension from June 2020 to August 2021, its sparse prices before 2018) makes the span far
+    longer, so such a stretch cannot be passed off as 12 months. The stress period is the candidate with the
+    largest ES 97.5% (same definition as hist_es). The ES of 250 days depends on its worst 7 days only, so
+    neighbouring windows containing the same worst days share the largest ES exactly; the latest of them is
+    taken (Basel asks for the stress period to be refreshed at least quarterly, and the latest moves least when
+    it is).
+
+    Returns None when no candidate qualifies, else dict(start, end, ties, first_tie_end, var95, var99, es975,
+    search_from, search_to), losses as positive €.
+    """
+    cols = list(positions)
+    sub = panel[cols].dropna()
+    if len(sub) < window:
+        return None
+    pnl = (sub * pd.Series(positions)).sum(axis=1)
+    arr, idx = pnl.values, sub.index
+    span = np.full(len(arr), np.inf)
+    span[window - 1:] = (idx[window - 1:] - idx[:len(idx) - window + 1]).days
+    es_by_end = np.full(len(arr), np.nan)
+    for k in np.where(span <= max_span)[0]:
+        w = arr[k - window + 1:k + 1]
+        q = np.percentile(w, 2.5)
+        es_by_end[k] = -w[w <= q].mean()
+    if np.all(np.isnan(es_by_end)):
+        return None
+    top = np.nanmax(es_by_end)
+    ties = np.where(es_by_end >= top - 1e-9 * max(abs(top), 1.0))[0]
+    k = int(ties[-1])
+    w = pnl.iloc[k - window + 1:k + 1]
+    return dict(start=w.index[0], end=w.index[-1], ties=len(ties), first_tie_end=idx[int(ties[0])],
+                var95=float(hist_var(w, 0.95)), var99=float(hist_var(w, 0.99)), es975=float(hist_es(w, 0.975)),
+                search_from=idx[0], search_to=idx[-1])
 
 
 def kupiec_pof(n, x, p):
