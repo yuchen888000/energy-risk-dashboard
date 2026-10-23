@@ -368,8 +368,12 @@ def compute_core(ticker, compare_ticker, start, end):
     # The Market page's 3-year check window ends on the end date, never later, and comes from this same download
     # (the comparison series from its own shared download, the one `compare` above is cut from).
     ref_price = _slice(raw, _CONTEXT_START, end)
-    ref_compare = load_close(compare_ticker, min(pd.Timestamp(start).date(), _CONTEXT_START), end)
-    ref3y = three_year_reference(ref_price.mask(_stale_mask(ref_price)), ref_compare, df_analysis)
+    ref_mask = _stale_mask(ref_price)
+    # load_close, written out so the stale days of the comparison are known too.
+    cmp_raw = _raw_close(compare_ticker, min(pd.Timestamp(start).date(), _CONTEXT_START), end)
+    cmp_mask = _stale_mask(cmp_raw)
+    ref3y = three_year_reference(ref_price.mask(ref_mask), cmp_raw.mask(cmp_mask), df_analysis,
+                                 stale=(ticker, ref_mask), compare_stale=(compare_ticker, cmp_mask))
 
     vol_asof = df_analysis['Volatility'].dropna().index[-1]
     window_returns = df_analysis['Returns'].loc[:vol_asof].tail(30)
@@ -479,7 +483,29 @@ _MIN_HISTORY = 250
 ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
 
 
-def three_year_reference(price, compare, fallback):
+def _stale_runs(stales, first, last):
+    """[(ticker, first day, last day)] of every run of stale repeats between `first` and `last`, from `stales`
+    ((ticker, _stale_mask of its close) pairs; None is skipped)."""
+    out = []
+    for item in stales:
+        if item is None:
+            continue
+        ticker, mask = item
+        m = mask[(mask.index >= first) & (mask.index <= last)]
+        if not m.any():
+            continue
+        run_id = (~m).cumsum()[m]
+        out += [(ticker, g.index[0], g.index[-1]) for _, g in run_id.groupby(run_id)]
+    return out
+
+
+def _long_span(first, last):
+    """True when a window of CHECK_WINDOW trading days spans more than 3 years and 30 days, i.e. days without a
+    price (a suspension masked as stale) pushed its start back."""
+    return pd.Timestamp(first) < pd.Timestamp(last) - pd.DateOffset(years=3) - pd.Timedelta(days=30)
+
+
+def three_year_reference(price, compare, fallback, stale=None, compare_stale=None):
     """The reference window of the Market page's statistical checks: the last CHECK_WINDOW trading days up to
     the end date of the selected range, never later. A past end date is judged against the 3 years before it,
     with no data from after it.
@@ -493,6 +519,13 @@ def three_year_reference(price, compare, fallback):
     fired); `mean` (of vol) is the GARCH check's reference level. If that history has fewer than _MIN_HISTORY
     volatility values, the selected range (`fallback`, compute_core's df_analysis) is used instead and
     `fallback` is True.
+
+    Stale repeats have no return, so where a series was suspended the CHECK_WINDOW values reach back further
+    than 3 years (CARB.L to 2 Apr 2024: from 20 Jan 2020, across its 2020-21 suspension). `long` is True when
+    the volatility window spans more than 3 years and 30 days, and `stale` then lists the stale runs inside it
+    ((ticker, first, last), from the argument `stale`, (ticker, stale mask of `price`)); `corr_start`,
+    `corr_end`, `corr_long` and `corr_stale` say the same of the correlation window, which also loses the stale
+    days of the comparison series (`compare_stale`).
     """
     df = pd.DataFrame({'Price': price, 'R': simple_returns(price),
                        'CR': simple_returns(compare)}).dropna(subset=['Price'])
@@ -506,8 +539,20 @@ def three_year_reference(price, compare, fallback):
         rets = fallback['Returns'].dropna()
     else:
         rets = rets.loc[vol.index[0]:]
-    return dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=vol.index[-1], n=len(vol),
-                mean=float(vol.mean()), std=float(vol.std()), fallback=used_fallback)
+    out = dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=vol.index[-1], n=len(vol),
+               mean=float(vol.mean()), std=float(vol.std()), fallback=used_fallback,
+               long=False, stale=[], corr_start=None, corr_end=None, corr_long=False, corr_stale=[])
+    if not used_fallback:
+        out.update(long=_long_span(out['start'], out['end']))
+        if out['long']:
+            out['stale'] = _stale_runs([stale], out['start'], out['end'])
+    if len(corr):
+        out.update(corr_start=corr.index[0], corr_end=corr.index[-1])
+        if not used_fallback:
+            out['corr_long'] = _long_span(corr.index[0], corr.index[-1])
+            if out['corr_long']:
+                out['corr_stale'] = _stale_runs([stale, compare_stale], corr.index[0], corr.index[-1])
+    return out
 
 
 # Fixed pre-war reference: the last full quarter before the US-Israeli strikes on Iran on 28 Feb 2026.
@@ -553,6 +598,9 @@ def _ordinal(x):
 
 
 _WAR_START = pd.Timestamp("2026-03-01")
+# Oil's 2020 crash, named in the volatility history from March 2020 (WTI and Brent only).
+_CRASH_START = pd.Timestamp("2020-03-01")
+_OIL_TICKERS = ('CL=F', 'BZ=F')
 _PRICE_TOL = 1e-4   # a settled continuous close and a single-contract close are the same quote
 # The download's last day can be a live price, and Yahoo updates the continuous row and the contract rows at
 # slightly different moments (on 20 Oct 2026, 00:16 UTC: CL=F 98.09, CLZ26 98.10). On that day the closest
@@ -750,7 +798,14 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
                    f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
     # Name only the episodes that lie inside the history up to the end date (the war began with the strikes of
     # 28 Feb 2026, _WAR_START is the first day of the month after).
+    # For oil the largest 30-day volatility in the history is the 2020 crash (Brent 141% annualised on
+    # 21 Apr 2020, WTI higher), not the 2021-22 crisis, so it is named for WTI and Brent.
     events = []
+    if core['ticker'] in _OIL_TICKERS:
+        if as_of >= pd.Timestamp("2021-01-01"):
+            events.append("the 2020 crash")
+        elif as_of >= _CRASH_START:
+            events.append(f"the 2020 crash up to {as_of:%b %Y}")
     if as_of >= pd.Timestamp("2023-01-01"):
         events.append("the 2021-22 crisis")
     elif as_of >= pd.Timestamp("2021-01-01"):
@@ -758,8 +813,9 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
     if as_of >= _WAR_START:
         events.append("the 2026 war")
     whose = "the latest figure" if past_end else "today's figure"
+    listed = (", ".join(events[:-1]) + " and " + events[-1]) if len(events) > 1 else "".join(events)
     detail += (f"The percentile ranks {whose} among every 30-day volatility {span}"
-               + (f", a history that includes {' and '.join(events)}" if events else "")
+               + (f", a history that includes {listed}" if events else "")
                + "; it does not move with a rolling window.")
     out['detail'] = detail
     return out
