@@ -165,8 +165,29 @@ _data_full = (f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
 _kind = ("the last value is a live price, not a settlement" if "latest price" in _last_note else
          "the last value may not yet be the settlement" if "may not yet be the settlement" in _last_note else
          "the last value may be an intraday London price" if "London session" in _last_note else "")
-st.caption(f"Data up to {_last_px:%d %b %Y}" + (f" ({_kind})" if _kind else "") + "." + _ttf_late)
-_folded("How these volatility figures are built", _vs['roll'], _vs['detail'], _data_full)
+# The comparison series' last value in the same few words when it may not be a close (it enters the 30-day
+# correlation and the book's last-day P&L).
+_cmp_kind = ("a live price" if "latest price" in _cmp_value_note else
+             "may not yet be the settlement" if "may not yet be the settlement" in _cmp_value_note else
+             "may be an intraday London price" if "London session" in _cmp_value_note else "")
+_kinds = [k for k in (_kind, f"for {ctx.compare_label.split(' (')[0]}, {_cmp_kind}" if _cmp_kind else "") if k]
+st.caption(f"Data up to {_last_px:%d %b %Y}" + (f" ({'; '.join(_kinds)})" if _kinds else "") + "." + _ttf_late)
+# Roll days stay on the page in one short line (date, the contract switched to, the adjusted 30-day volatility),
+# because the heading points to them; the return breakdown and why the heading is unadjusted are in the details.
+_rc = core.get('rolls')
+if _rc and _rc.get('rolls'):
+    _root = common.CURVE_ROOTS[commodity['ticker']][0]
+    _bits = []
+    for _t, _sym, _r, _nr in _rc['rolls']:
+        _live = common.futures_row_state(_t) != 'close'
+        _bits.append(f"{pd.Timestamp(_t):%d %b %Y} (to the {common._contract_month(_sym, _root)} contract"
+                     + (", read from the latest price" if _live else "") + ")")
+    st.caption(("Contract roll days in the 30-day window: " if len(_bits) > 1 else "Contract roll day in the 30-day window: ")
+               + " and ".join(_bits)
+               + (f". With the new contract's own return on {'that day' if len(_bits) == 1 else 'those days'}, "
+                  "the 30-day volatility is "
+                  f"{common.fmt_vol(_rc['adjusted_vol'])}." if _rc.get('adjusted_vol') is not None else "."))
+_folded("Details: roll days, data dates and the references", _vs['roll'], _vs['detail'], _data_full.replace(_ttf_late, ""))
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -198,7 +219,7 @@ mc4.metric("VaR 95% (1-day, per unit)", f"{var_95:.2f}%",
                 "negative return. The € figures in Positions & Limits are shown as positive losses.")
 
 # ─── Section 2: Price Chart ───
-# Each date checked against a primary or contemporaneous source (see README).
+# Each date checked against a primary or contemporaneous source (project spec dashboard_规格/5_事实与来源.md, section E).
 macro_events = {
     "2021-07-14": "EU Fit for 55 package",
     "2022-02-24": "Russia invades Ukraine",
@@ -588,7 +609,8 @@ if commodity['ticker'] == "BZ=F":
     else:
         _var_notes.append(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
                    "day after an ICE Brent contract's last trading day: normally the first trading day of the "
-                   "month, the last trading day of December for the February contract).")
+                   "month, the last trading day of December for the February contract; or the day the roll check "
+                   "found the switch).")
 if commodity['ticker'] == "TTF=F":
     _ttf_exp = common.ttf_expiry_days(df_analysis['Price'].dropna().index)
     _flag = [d for d in (_worst_recent_day, _worst_full_day) if d in _ttf_exp]
@@ -822,7 +844,8 @@ else:
         st.caption(f"Book size: gross €{_gross:,.1f}m (sum of absolute positions), net €{_net:+,.1f}m (longs "
                    "minus shorts). Netting notionals across different commodities has no risk meaning; the "
                    "book VaR above does the netting through the joint daily returns. Diversification benefit: "
-                   f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR).")
+                   f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR). "
+                   "EUR/USD is not included: returns are in each instrument's own currency.")
 
         # ── Stress period (after Basel MAR33.7) ──
         st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months: normally 360 to 380 "
@@ -898,7 +921,8 @@ else:
                                         "counted this way, a window containing these days could have a larger ES than the stress "
                                         "period shown.")
                     _i = _j + 1
-            st.caption(f"Stress period: **{_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}**.")
+            st.caption(f"Stress period: **{_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}**"
+                       + (f" (the latest of {_sp['ties']} windows with the same ES)" if _sp['ties'] > 1 else "") + ".")
             if _nonpos_txt.strip():
                 st.caption("⚠️ " + _nonpos_txt.strip())
             _folded("How the stress period is chosen",
@@ -961,7 +985,7 @@ else:
 
 # ─── Section 5b: Historical scenario replay (uses the positions above) ───
 # Fixed past windows. Each starts at the close before the first day listed and ends at the
-# close of the last day. Dates are checked against prices and news sources (see README).
+# close of the last day. Dates are checked against prices and news sources (project spec dashboard_规格/5_事实与来源.md, section E).
 SCENARIOS = [
     {"name": "Russia invades Ukraine", "first": "2022-02-24", "last": "2022-03-08",
      "why": "from the invasion on 24 Feb 2022 to 8 Mar 2022, the day the US announced a ban on Russian oil "
@@ -1083,6 +1107,9 @@ else:
             st.pyplot(fig_sc)
 
         st.caption("This replays what happened; it is not a forecast or a probability.")
+        if _notes:
+            st.caption("⚠️ Brent roll days inside the windows (part of that day's Brent move is the gap between two "
+                       "contracts): " + "; ".join(_notes) + ".")
         _folded("How the replay works",
             "Today's positions are entered "
             "at the close before each window and held unchanged (no rebalancing, hedging or stop-loss): P&L = "
