@@ -50,3 +50,33 @@ def test_headline_filter(name, headline, gas, want):
     keep_us = _COMS[name]["ticker"] == "CL=F"
     assert _filt["is_relevant"](headline, _KW[name], gas=gas, keep_us=keep_us) == want, \
         _filt["drop_reason"](headline, _KW[name], gas, keep_us)
+
+
+# Stock picks with "gas stocks" or "oil stocks" (round 3 of 2026-10-23): a recommendation signal ("stocks for",
+# "dividend", "to buy", "to watch", "top N ... stocks") without a storage signal is a stock pick; with a storage
+# signal ("full", "storage", "injection" ...) the headline is about inventories and is kept.
+STOCK_TIP_CASES = [
+    ("Top 5 Gas Stocks for 2026", True),
+    ("Top 10 oil stocks for dividends", True),
+    ("Top 3 reasons European gas stocks are falling faster than expected", False),
+    ("Germany's 5 largest gas stocks sites near 80% full", False),
+    ("Top 5 gas stocks to buy as Europe heads into winter", True),
+    ("Top 10 gas stocks: storage injections slow as sites near full", False),
+]
+
+
+@pytest.mark.parametrize("headline,want", STOCK_TIP_CASES)
+def test_stock_tip(headline, want):
+    assert _filt["is_stock_tip"](headline) == want
+
+
+@pytest.mark.parametrize("name,headline,want", [
+    ("TTF Natural Gas", "Top 5 Gas Stocks for 2026", False),
+    ("Brent Crude Oil", "Top 10 oil stocks for dividends", False),
+    ("WTI Crude Oil", "Top 10 oil stocks for dividends", False),
+])
+def test_stock_picks_dropped(name, headline, want):
+    keep_us = _COMS[name]["ticker"] == "CL=F"
+    gas = _COMS[name]["ticker"] == "TTF=F"
+    assert _filt["is_relevant"](headline, _KW[name], gas=gas, keep_us=keep_us) == want
+    assert _filt["drop_reason"](headline, _KW[name], gas, keep_us) == "share tip or stock story"

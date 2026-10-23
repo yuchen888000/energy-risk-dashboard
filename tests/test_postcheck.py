@@ -50,7 +50,17 @@ MUST_DROP = [
     ("Watch whether the correlation rises above −0.43 in the next ten days.", LEVELS),
     ("Watch whether the correlation falls below -0.43 in the next ten days.", LEVELS_CORR_LOW),
     ("Watch whether the correlation with carbon falls below -0.21.", LEVELS_WTI_1114),
+    # more crossing verbs (round 3 of 2026-10-23): upward exceeds, tops, surpasses, breaks above;
+    # downward drops below, falls through
+    ("Watch whether volatility exceeds 28% annualised over the next ten days.", LEVELS),
+    ("Over the next ten days, watch whether volatility tops 39% annualised (2.45% daily).", LEVELS),
+    ("Watch whether 30-day volatility surpasses 39% annualised.", LEVELS),
+    ("Watch whether the correlation breaks above 0.30 in the coming days.", LEVELS),
+    ("Watch whether the correlation drops below -0.43 over the next ten days.", LEVELS_CORR_LOW),
+    ("Watch whether the correlation with carbon falls through -0.21.", LEVELS_WTI_1114),
 ]
+# The correlation above the top of its range.
+LEVELS_CORR_HIGH = [("corr", 0.79, 0.85), ("corr", -0.43, 0.85)]
 MUST_KEEP = [
     ("Watch whether volatility rises above 103% annualised (6.49% daily) over the next ten days.", LEVELS),
     ("Watch whether volatility falls back below 28% annualised (1.74% daily) over the next ten days.", LEVELS),
@@ -64,6 +74,15 @@ MUST_KEEP = [
     ("Watch whether the correlation with carbon rises back above -0.21.", LEVELS_WTI_1114),
     # no forward-looking cue: a statement, not a watch
     ("The correlation of 0.39 is above 0.30.", LEVELS),
+    # the same verbs where the move is still to come
+    ("Watch whether volatility exceeds 103% annualised (6.49% daily) over the next ten days.", LEVELS),
+    ("Watch whether the correlation tops 0.79 in the next ten days.", LEVELS),
+    ("Watch whether the correlation surpasses 0.79.", LEVELS),
+    ("Watch whether the correlation breaks above 0.79.", LEVELS),
+    ("Watch whether the correlation drops below -0.43 over the next ten days.", LEVELS),
+    ("Watch whether the correlation falls through 0.30 in the coming days.", LEVELS),
+    # "top" as a noun is not a crossing verb
+    ("Watch whether the correlation, now above the top of its range of 0.79, falls back.", LEVELS_CORR_HIGH),
     # a year range is not a negative number
     ("Watch whether volatility, low against the 2021-22 crisis, stays below 103% annualised.", LEVELS),
 ]

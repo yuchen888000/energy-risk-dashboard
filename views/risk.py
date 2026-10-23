@@ -115,7 +115,8 @@ st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-
             f"{_vs['headline2']}</div>", unsafe_allow_html=True)
 if _vs['roll']:
     st.markdown(f"<div style='font-size:0.95rem; margin-bottom:0.4rem'>{_vs['roll']}</div>", unsafe_allow_html=True)
-st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
+if _vs['detail']:
+    st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
 st.caption("This compares volatility with the commodity's own past; it is not a measure of overall risk: low "
            "volatility says nothing about supply, storage or position size.")
 _last_px = df_analysis['Price'].dropna().index.max()
@@ -147,7 +148,7 @@ _corr_30 = df_analysis['Rolling Correlation'].dropna()
 _partner = ctx.compare_ticker
 
 mc1, mc2, mc3, mc4 = st.columns(4)
-mc1.metric("Current Volatility (30-day)", common.fmt_vol(latest_vol),
+mc1.metric("Current Volatility (30-day)", _vs['tile'],
            help="Standard deviation of the last 30 daily returns; annualised = daily x √252.")
 mc2.metric("Average Volatility (30-day)", common.fmt_vol(avg_vol),
            help=f"Average 30-day volatility over the selected period ({_vol_series.index.min():%d %b %Y} to "
@@ -630,7 +631,7 @@ st.subheader("GARCH Volatility Forecast")
 st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1) "
          "with Student-t shocks (fat tails)")
 
-garch = common.fit_garch(returns_clean)
+garch = common.fit_garch(returns_clean, avg_vol)
 if garch is not None:
     forecast_vol = pd.Series(garch['forecast_vol'])
     current_cond_vol = garch['current_cond_vol']

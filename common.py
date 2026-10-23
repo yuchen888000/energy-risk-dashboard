@@ -289,6 +289,23 @@ def simple_returns(close):
     return close.where(close > 0).pct_change(fill_method=None)
 
 
+VOL_DAYS, VOL_MIN = 30, 20   # 30-day volatility: a window of 30 trading days, at least 20 returns in it
+
+
+def rolling_vol(close):
+    """The one definition of 30-day volatility (daily, %) behind every figure on the Risk and Market pages: the
+    standard deviation of simple daily returns over the last VOL_DAYS rows of the series' own trading days, given
+    only when at least VOL_MIN of those rows have a return.
+
+    `close` is the series on its own trading days with stale repeats set to NaN and the rows kept (load_close).
+    A stale run therefore stays inside the window as rows without a return, so a window never reaches back
+    across a suspension to fill itself up: after CARB.L's 2020-21 suspension the first figure comes once 20
+    returns after the gap exist. compute_core (the page series, the latest figure and the selected-range
+    average), the percentile history (vol_context), the Market page's check window (three_year_reference) and
+    the GARCH reference all take their 30-day volatility from here; vol_gap explains a missing latest figure."""
+    return simple_returns(close).rolling(VOL_DAYS, min_periods=VOL_MIN).std() * 100
+
+
 # ─── Core Calculations ───
 VAR_WINDOW = 250     # trading days behind the headline VaR and Expected Shortfall
 
@@ -312,7 +329,10 @@ def compute_core(ticker, compare_ticker, start, end):
     Everything about `ticker` comes from one read of its shared download (_download_batch), inside this one
     cached result, so the percentile, the pre-war multiple, the 3-year reference, VaR and the roll check can
     never come from two different downloads, even after the download cache expires. Returns None when fewer
-    than 30 overlapping observations are available.
+    than 30 overlapping observations are available. `latest_vol` is the 30-day volatility (rolling_vol) of the
+    last day with a price (`vol_asof`); it is None when that day's window (`vol_window`, its last VOL_DAYS
+    returns on the series' own trading days) holds fewer than VOL_MIN returns, and `vol_gap` then gives the count
+    and the stale runs in the window, so the pages can say why instead of showing an older figure.
     """
     today = _download_day()
     batch = _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), today)
@@ -340,7 +360,10 @@ def compute_core(ticker, compare_ticker, start, end):
     if len(df_analysis) < 30:
         return None
 
-    df_analysis['Volatility'] = df_analysis['Returns'].rolling(30, min_periods=20).std() * 100
+    # 30-day volatility on the commodity's own trading days, stale days kept as rows without a return
+    # (rolling_vol), then read on the days with a price.
+    own_vol = rolling_vol(price)
+    df_analysis['Volatility'] = own_vol.reindex(df_analysis.index)
 
     # Rolling correlation on returns (not price levels) to avoid spurious correlation.
     # min_periods=20, as for volatility: without it one missing day in either series (e.g. a
@@ -350,7 +373,12 @@ def compute_core(ticker, compare_ticker, start, end):
         df_analysis['Returns'].rolling(30, min_periods=20).corr(df_analysis['Compare_Returns'])
     )
 
-    latest_vol = df_analysis['Volatility'].dropna().iloc[-1]
+    # The latest figure is the one of the last day with a price. When that day's 30-day window holds fewer than
+    # VOL_MIN returns (after a suspension), there is no latest figure: an older one is not shown in its place.
+    vol_asof = df_analysis.index[-1]
+    latest_vol = df_analysis['Volatility'].iloc[-1]
+    latest_vol = None if pd.isna(latest_vol) else float(latest_vol)
+    window_returns = simple_returns(price).loc[:vol_asof].tail(VOL_DAYS)
     avg_vol = df_analysis['Volatility'].dropna().mean()
 
     returns_clean = df_analysis['Returns'].dropna()
@@ -365,7 +393,7 @@ def compute_core(ticker, compare_ticker, start, end):
     # 30-day volatility since the start of the data (2017) up to today, from the same download: the source of
     # the percentile and the pre-war multiple (vol_context cuts it at the end date).
     hist = _slice(raw, _CONTEXT_START, today)
-    hist_vol = (simple_returns(hist.mask(_stale_mask(hist))).rolling(30, min_periods=20).std() * 100).dropna()
+    hist_vol = rolling_vol(hist.mask(_stale_mask(hist))).dropna()
     # The Market page's 3-year check window ends on the end date, never later, and comes from this same download
     # (the comparison series from its own shared download, the one `compare` above is cut from).
     ref_price = _slice(raw, _CONTEXT_START, end)
@@ -376,27 +404,33 @@ def compute_core(ticker, compare_ticker, start, end):
     ref3y = three_year_reference(ref_price.mask(ref_mask), cmp_raw.mask(cmp_mask), df_analysis,
                                  stale=(ticker, ref_mask), compare_stale=(compare_ticker, cmp_mask))
 
-    vol_asof = df_analysis['Volatility'].dropna().index[-1]
-    window_returns = df_analysis['Returns'].loc[:vol_asof].tail(30)
+    vol_gap = None
+    if latest_vol is None:
+        first = window_returns.index[0]
+        runs = [(t, a, b) for t, a, b in _stale_runs([(ticker, ref_mask)], ref_mask.index[0], vol_asof)
+                if b >= first]
+        vol_gap = dict(n=int(window_returns.notna().sum()), need=VOL_MIN, days=len(window_returns), stale=runs)
     return dict(
         ticker=ticker,
         df_analysis=df_analysis, has_compare=has_compare,
-        latest_vol=latest_vol, avg_vol=avg_vol, vol_asof=vol_asof,
+        latest_vol=latest_vol, avg_vol=avg_vol, vol_asof=vol_asof, vol_window=window_returns, vol_gap=vol_gap,
         returns_clean=returns_clean, var_95=var_95, var_99=var_99, es_975=es_975,
         var_days=len(var_returns), var_95_full=var_95_full, var_99_full=var_99_full,
         es_975_full=es_975_full,
         overall_corr=overall_corr,
         ref3y=ref3y,
-        vol_ctx=vol_context(hist_vol, vol_asof, float(latest_vol)),
-        rolls=window_rolls(ticker, batch, window_returns),
+        vol_ctx=vol_context(hist_vol, vol_asof, latest_vol) if latest_vol is not None else None,
+        rolls=window_rolls(ticker, batch, window_returns) if latest_vol is not None else None,
         last_download=raw.index[-1] if len(raw) else None,
     )
 
 
 # ─── GARCH(1,1) ───
 @st.cache_data(ttl=3600, show_spinner="Fitting GARCH model...")
-def fit_garch(returns_clean):
-    """Fit GARCH(1,1) on daily % returns and forecast 10 days ahead.
+def fit_garch(returns_clean, ref_vol):
+    """Fit GARCH(1,1) on daily % returns and forecast 10 days ahead. `ref_vol` is the page's reference level,
+    an average 30-day volatility (daily, %) from rolling_vol: the Risk page's selected-range average, the Market
+    page's check-window average. It only decides whether the GARCH long-run level is shown.
 
     Returns None if the fit fails (e.g. too short a window).
     """
@@ -442,9 +476,10 @@ def fit_garch(returns_clean):
     # With α + β close to 1 (TTF, Brent and carbon all sit at 0.98 to 0.99) the formula divides
     # by almost zero: small changes in the fit move it a lot, and it can flip between sensible
     # and absurd from one day to the next. So the reference level for comparisons is always the
-    # sample average of the 30-day rolling volatility; the GARCH value is shown for information
-    # only, and only when it is stable (α + β < 0.98 and within 1.5x the sample average).
-    sample_avg_vol = float((returns_clean.dropna().rolling(30).std() * 100).mean())
+    # page's average 30-day volatility (`ref_vol`, rolling_vol, not a second definition here); the GARCH
+    # value is shown for information only, and only when it is stable (α + β < 0.98 and within 1.5x
+    # that average).
+    sample_avg_vol = float(ref_vol)
     garch_long_run_ok = (garch_long_run is not None and persistence < 0.98
                          and garch_long_run <= 1.5 * sample_avg_vol)
 
@@ -512,36 +547,43 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     with no data from after it.
 
     `price` is the commodity's close from compute_core's download (the only caller) from the start of the data
-    to the end date, stale repeats masked; `compare` the comparison series over the same span. The definitions
-    are compute_core's: simple returns on each series' own trading days, non-positive prices dropped, 30-day
-    windows with at least 20 returns. Returns dict(vol, corr, rets, start, end, n, mean, std, fallback): the
-    last CHECK_WINDOW values of 30-day volatility (daily, %) and of the 30-day correlation of returns, and the
-    daily returns from the window's first day (for the 3-year VaR99, the GARCH fit and the counts of days
-    fired); `mean` (of vol) is the GARCH check's reference level. If that history has fewer than _MIN_HISTORY
-    volatility values, the selected range (`fallback`, compute_core's df_analysis) is used instead and
-    `fallback` is True.
+    to the end date, stale repeats masked (rows kept); `compare` the comparison series over the same span. The
+    definitions are compute_core's: simple returns on each series' own trading days, non-positive prices
+    dropped, 30-day volatility from rolling_vol (the same figure on the same day as the page's latest value and
+    the percentile history). Returns dict(vol, corr, rets, start, end, n, mean, std, fallback, rows, days,
+    short): the last CHECK_WINDOW values of 30-day volatility (daily, %) and of the 30-day correlation of
+    returns up to the last day with a price (`end`), and the daily returns from the window's first day to `end`
+    (for the 3-year VaR99, the GARCH fit and the counts of days fired); `mean` (of vol) is the GARCH check's
+    reference level; `days` are the days with a price from `start` to `end` and `rows` their number, which is
+    larger than `n` when some of them have no 30-day volatility (the first days after a suspension); `short` is
+    True when the history up to the end date has fewer than CHECK_WINDOW values. If it has fewer than
+    _MIN_HISTORY, the selected range (`fallback`, compute_core's df_analysis) is used instead and `fallback` is
+    True.
 
     Stale repeats have no return, so where a series was suspended the CHECK_WINDOW values reach back further
-    than 3 years (CARB.L to 2 Apr 2024: from 20 Jan 2020, across its 2020-21 suspension). `long` is True when
+    than 3 years (CARB.L to 2 Apr 2024: from Dec 2019, across its 2020-21 suspension). `long` is True when
     the volatility window spans more than 3 years and 30 days, and `stale` then lists the stale runs inside it
     ((ticker, first, last), from the argument `stale`, (ticker, stale mask of `price`)); `corr_start`,
     `corr_end`, `corr_long` and `corr_stale` say the same of the correlation window, which also loses the stale
     days of the comparison series (`compare_stale`).
     """
-    df = pd.DataFrame({'Price': price, 'R': simple_returns(price),
+    df = pd.DataFrame({'Price': price, 'R': simple_returns(price), 'V': rolling_vol(price),
                        'CR': simple_returns(compare)}).dropna(subset=['Price'])
     df = df[df['Price'] > 0]
-    vol = (df['R'].rolling(30, min_periods=20).std() * 100).dropna().tail(CHECK_WINDOW)
+    vol = df['V'].dropna().tail(CHECK_WINDOW)
     corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(CHECK_WINDOW)
     rets = df['R'].dropna()
     used_fallback = len(vol) < _MIN_HISTORY
     if used_fallback:
         vol, corr = fallback['Volatility'].dropna(), fallback['Rolling Correlation'].dropna()
         rets = fallback['Returns'].dropna()
+        days = fallback.index[fallback.index >= vol.index[0]]
     else:
         rets = rets.loc[vol.index[0]:]
-    out = dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=vol.index[-1], n=len(vol),
+        days = df.index[df.index >= vol.index[0]]
+    out = dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=days[-1], n=len(vol),
                mean=float(vol.mean()), std=float(vol.std()), fallback=used_fallback,
+               rows=len(days), days=days, short=(not used_fallback and len(vol) < CHECK_WINDOW),
                long=False, stale=[], corr_start=None, corr_end=None, corr_long=False, corr_stale=[])
     if not used_fallback:
         out.update(long=_long_span(out['start'], out['end']))
@@ -753,47 +795,84 @@ def roll_sentence(ticker, rc, window_returns):
     return " ".join(parts)
 
 
+def vol_gap_sentence(core):
+    """Why there is no latest 30-day volatility (compute_core's vol_gap), or '' when there is one. The count, the
+    window and the stale run come from the data."""
+    g = core.get('vol_gap')
+    if not g:
+        return ""
+    as_of = pd.Timestamp(core['vol_asof'])
+    count = f"{g['n']} of the {g['need']} returns needed in the last {g['days']} trading days"
+    if g['stale']:
+        t, a, b = g['stale'][-1]
+        return (f"No 30-day volatility on {as_of:%d %b %Y}: not enough prices since the stale {t} prices of "
+                f"{a:%d %b %Y} to {b:%d %b %Y} ended ({count}).")
+    return f"No 30-day volatility on {as_of:%d %b %Y}: not enough prices ({count})."
+
+
+# The US-Israeli strikes on Iran that started the war. Before this date the AI input names neither the war
+# nor the strikes, and calls the fixed reference quarter by its months only ("the Oct to Dec 2025 level").
+_STRIKES = pd.Timestamp("2026-02-28")
+
+
 def vol_summary(core, name=None, with_roll=False, past_end=False):
     """The single source of every volatility statement on the Risk and Market pages and in the AI input.
 
     Everything comes from `core` (compute_core): the latest 30-day volatility, its multiple of the pre-war
     level, its percentile since the start of the data and the roll check, all from one download. Neither
     reference rolls with the market: the pre-war quarter is fixed and the percentile uses the whole history.
-    Returns dict(headline, headline2, roll, detail, tile, ctx): `headline` and `headline2` are the two lines of
-    the large neutral heading, `roll` the line on contract roll days in the 30-day window (only with
-    `with_roll`), `detail` the paragraph under it, `tile` the value for a metric tile. With `past_end` (the end
-    date chosen is before today) the percentile names the end date."""
-    vol_now, as_of = float(core['latest_vol']), pd.Timestamp(core['vol_asof'])
+    Returns dict(headline, headline2, roll, detail, tile, ctx, ai, prewar_ai): `headline` and `headline2` are
+    the two lines of the large neutral heading, `roll` the line on contract roll days in the 30-day window (only
+    with `with_roll`), `detail` the paragraph under it, `tile` the value for a metric tile. With `past_end` (the
+    end date chosen is before today) the percentile names the end date. When the last day with a price has no
+    30-day volatility (vol_gap), the heading says so and why, and no figure is given.
+
+    `ai` is the same statement for the AI input, which is written as of the data date: when that date is before
+    the strikes of 28 Feb 2026 it names neither the strikes nor a war (the reference quarter is "the Oct to Dec
+    2025 level"), and when the quarter is not complete by then it leaves the quarter out altogether. The page
+    keeps its own wording ("no pre-war reference"). `prewar_ai` is the reference's name for the prompt ('' when
+    there is none)."""
+    as_of = pd.Timestamp(core['vol_asof'])
     ctx = core['vol_ctx']
-    window_returns = core['df_analysis']['Returns'].loc[:as_of].tail(30)
+    window_returns = core['vol_window']
     rc = core['rolls']
+    lead = f"{name + ' ' if name else ''}30-day volatility"
+    if core['latest_vol'] is None:
+        why = vol_gap_sentence(core)
+        return dict(ctx=None, tile="n/a", roll="", headline=f"{lead}: not available", headline2=why, detail="",
+                    ai=f"{lead}: not available. {why}", prewar_ai="")
+    vol_now = float(core['latest_vol'])
     out = dict(ctx=ctx, tile=fmt_vol(vol_now, 0),
                roll=(roll_sentence(core['ticker'], rc, window_returns) if with_roll else ""),
-               headline=f"{name + ' ' if name else ''}30-day volatility: {vol_now * ANNUAL:.0f}% annualised "
-                        f"({vol_now:.2f}% daily)")
+               headline=f"{lead}: {vol_now * ANNUAL:.0f}% annualised ({vol_now:.2f}% daily)")
     if ctx is None:
-        out.update(headline2="", detail="")
+        out.update(headline2="", detail="", ai=out['headline'], prewar_ai="")
         return out
+    before_strikes = as_of < _STRIKES
     r = ctx['prewar_ratio']
+    level, level_ai = "its pre-war level", ("its Oct to Dec 2025 level" if before_strikes else "its pre-war level")
     if r is None:
-        compare = "no pre-war reference"
+        compare, compare_ai = "no pre-war reference", (None if before_strikes else "no pre-war reference")
     elif r >= 1.1:
-        compare = f"{r:.2f}x its pre-war level"
+        compare, compare_ai = f"{r:.2f}x {level}", f"{r:.2f}x {level_ai}"
     elif r >= 0.9:
-        compare = f"close to its pre-war level ({r:.2f}x)"
+        compare, compare_ai = f"close to {level} ({r:.2f}x)", f"close to {level_ai} ({r:.2f}x)"
     else:
-        compare = f"below its pre-war level ({r:.2f}x)"
+        compare, compare_ai = f"below {level} ({r:.2f}x)", f"below {level_ai} ({r:.2f}x)"
     span = f"since {ctx['all_start']:%b %Y}" + (f" (to {as_of:%d %b %Y})" if past_end else "")
     pct = f"highest {span}" if ctx['top_all'] else f"{_ordinal(ctx['p_all'])} percentile {span}"
     # A roll day in the 30-day window lifts or lowers the large figures; say so in the heading itself.
     roll_flag = (" · includes a contract roll day (see below)"
                  if with_roll and rc is not None and rc['rolls'] else "")
     out['headline2'] = f"{compare} · {pct}{roll_flag}"
-    detail = ""
+    headline2_ai = (f"{compare_ai} · " if compare_ai else "") + pct + roll_flag
+    detail, detail_ai = "", ""
     if ctx['prewar_median'] is not None:
-        detail += (f"Pre-war level: {ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% "
-                   "daily), the median of Oct to Dec 2025, the last full quarter before the strikes on Iran on "
-                   "28 Feb 2026. ")
+        _lvl = f"{ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% daily)"
+        detail += (f"Pre-war level: {_lvl}, the median of Oct to Dec 2025, the last full quarter before the strikes on "
+                   "Iran on 28 Feb 2026. ")
+        detail_ai += (f"Oct to Dec 2025 level: {_lvl}, the median of that quarter. " if before_strikes else
+                      detail)
     elif ctx['prewar_incomplete']:
         detail += ("No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
                    f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
@@ -815,10 +894,14 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
         events.append("the 2026 war")
     whose = "the latest figure" if past_end else "today's figure"
     listed = (", ".join(events[:-1]) + " and " + events[-1]) if len(events) > 1 else "".join(events)
-    detail += (f"The percentile ranks {whose} among every 30-day volatility {span}"
-               + (f", a history that includes {listed}" if events else "")
-               + "; it does not move with a rolling window.")
-    out['detail'] = detail
+    ranks = (f"The percentile ranks {whose} among every 30-day volatility {span}"
+             + (f", a history that includes {listed}" if events else "")
+             + "; it does not move with a rolling window.")
+    out['detail'] = detail + ranks
+    out['ai'] = (f"{out['headline']}; {headline2_ai.replace(' (see below)', '')}. {detail_ai + ranks}"
+                 + (f" {out['roll']}" if out['roll'] else ""))
+    out['prewar_ai'] = ("" if r is None else
+                        "the Oct to Dec 2025 level" if before_strikes else "the pre-war level (Oct to Dec 2025)")
     return out
 
 
@@ -850,15 +933,15 @@ def last_value_note(ticker, end_date, last_day, now=None):
     """The sentence on the last price of `ticker`, whose last row is `last_day`. For a future: when the row can
     still be live (futures_row_live) it says the value is the latest price, which can be the evening electronic
     session after the settlement; otherwise ''. For the carbon ETC and other non-futures: a note on the latest
-    close, or '' when the end date is more than three days before today. The Risk and Market pages both call
-    this, so the note is written in one place."""
+    close, or '' when the end date is more than three days before today in Berlin (berlin_today, the date the
+    default end date uses). The Risk and Market pages both call this, so the note is written in one place."""
     if ticker.endswith("=F"):
         if not futures_row_live(last_day, now):
             return ""
         return (f" The last value, of {pd.Timestamp(last_day):%d %b}, is the latest price: it can be the current "
                 "session or the evening electronic session after the settlement, not the settlement, so it can "
                 "change within the hour.")
-    if (pd.Timestamp.today().normalize() - pd.Timestamp(end_date)).days > 3:
+    if (pd.Timestamp(berlin_today()) - pd.Timestamp(end_date)).days > 3:
         return ""
     if ticker.endswith(".L"):
         return " The last value is the latest close on Yahoo Finance (London Stock Exchange)."
