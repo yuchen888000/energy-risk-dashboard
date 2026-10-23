@@ -169,6 +169,21 @@ def test_curve_words_mixed_rows_after_midnight():
     assert "a row of 23 Oct can be the current session" in w['caption']
     assert "a row of 22 Oct may not yet be the settlement" in w['caption']
     assert w['hover'].startswith("Latest prices of 23 Oct")
+    # The title names the day whose prices may not yet be settlements (audit 2026-10-23, decision 16).
+    assert w['title'] == "latest prices 22 Oct 2026 (22 Oct prices may not yet be settlements)"
+
+
+def test_curve_title_mixed_unsettled_and_close():
+    # 23 Oct 03:00 New York: 22 Oct rows may not yet be settlements, 21 Oct rows are closes.
+    w = _curve(ny("2026-10-23 03:00"), ["2026-10-22", "2026-10-21"])
+    assert w['state'] == 'unsettled'
+    assert w['title'] == "prices of 22 Oct 2026 (22 Oct prices may not yet be settlements)"
+
+
+def test_curve_title_single_state_unchanged():
+    # 22 Oct 20:00: the 22 Oct rows are live and the 20 Oct rows closes; no row may be unsettled, title unchanged.
+    w = _curve(ny("2026-10-22 20:00"), ["2026-10-22", "2026-10-20"])
+    assert w['title'] == "latest prices 22 Oct 2026"
 
 
 @pytest.mark.parametrize("now, ttf_last, bz_days, late", [

@@ -9,6 +9,7 @@ import datetime as dt
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import holidays
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -808,6 +809,27 @@ def contract_delivery(sym, root):
     return dt.date(2000 + int(sym[len(root) + 1:len(root) + 3]), MONTH_CODES.index(sym[len(root)]) + 1, 1)
 
 
+def rule_roll_days(root, days):
+    """For WTI (CL) and Dutch TTF (TTF): the days among `days` that are a front contract's last trading day by the
+    exchange rule (contract_expiry) or the next business day on the same calendar, as {day: (delivery month,
+    last trading day)}. Yahoo's continuous series switches contract on or near the expiry, so these are the days
+    on which a roll is possible when the roll check (window_rolls) cannot match a contract; they are candidates,
+    not identified roll days. Brent has its own rule calendar (brent_roll_days). Empty for other roots."""
+    if root not in ("CL", "TTF") or len(days) == 0:
+        return {}
+    days = pd.DatetimeIndex(days).normalize()
+    cal = EXPIRY_CALENDARS[root]
+    out = {}
+    lo, hi = days.min().to_period('M'), days.max().to_period('M') + 3
+    for m in pd.period_range(lo, hi, freq='M'):
+        exp = contract_expiry(root, m.to_timestamp())
+        nxt = pd.Timestamp(np.busday_offset(exp.date(), 1, busdaycal=cal))
+        for d in (exp.normalize(), nxt.normalize()):
+            if d in days:
+                out[d] = (m.to_timestamp(), exp)
+    return out
+
+
 def roll_sentence(ticker, rc, window_returns):
     """The line under the volatility heading when the 30-day window contains contract roll days, or ''.
     `rc` is compute_core's window_rolls result for `window_returns`."""
@@ -831,10 +853,31 @@ def roll_sentence(ticker, rc, window_returns):
         parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
                      "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
                      "roll on those days is neither ruled out nor adjusted.")
+        cand = rule_roll_days(root, rc['unknown'])
+        # A contract whose roll was already identified (on its expiry or the day after) needs no candidate.
+        found = {pd.Timestamp(t).normalize() for t, _, _, _ in rc['rolls']}
+        cal = EXPIRY_CALENDARS.get(root)
+        cand = {d: (m, exp) for d, (m, exp) in cand.items()
+                if not ({exp.normalize(), pd.Timestamp(np.busday_offset(exp.date(), 1, busdaycal=cal))} & found)}
+        if cand:
+            parts.append(rule_roll_sentence(cand))
     if rc['rolls']:
         parts.append("The heading, the percentile and the pre-war multiple use the unadjusted figure, because "
                      "the history they are compared with contains roll days too.")
     return " ".join(parts)
+
+
+def rule_roll_sentence(cand):
+    """'By the exchange rule ...' for rule_roll_days' candidates: which contract stopped trading when, and that the
+    day may be a roll day (not verified)."""
+    by_exp = {}
+    for d, (m, exp) in sorted(cand.items()):
+        by_exp.setdefault((m, exp), []).append(d)
+    bits = [f"the {m:%b %y} contract's last trading day was {exp:%d %b %Y}, so the series may have switched "
+            "contract on " + " or ".join(f"{d:%d %b %Y}" for d in ds)
+            for (m, exp), ds in by_exp.items()]
+    return ("By the exchange rule, " + "; ".join(bits) + " (not verified: the expired contract is no longer listed "
+            "on Yahoo Finance, so its close cannot be compared).")
 
 
 def _gap_sentence(what, counted, g, as_of):
@@ -1032,6 +1075,13 @@ def futures_curve_words(trades, front_day, settled, now=None):
     fd = f"{pd.Timestamp(front_day):%d %b}"
     title = {'live': f"latest prices {settled}", 'unsettled': f"prices of {settled} (may not yet be settlements)",
              'close': f"latest closes {settled}"}[state]
+    # Contracts from different days: name the days whose rows may not yet be settlements, so a title over
+    # "22 Oct to 23 Oct" does not call every price the latest one.
+    unsettled = [t for t in days if futures_row_state(t, now) == 'unsettled']
+    if unsettled and len(states) > 1:
+        ud = ", ".join(f"{t:%d %b}" for t in unsettled)
+        title = (f"latest prices {settled} ({ud} prices may not yet be settlements)" if state == 'live'
+                 else f"prices of {settled} ({ud} prices may not yet be settlements)")
     hover = {'live': f"Latest prices of {fd} (the last row can be the evening electronic session after the "
                      "settlement, not the settlement).",
              'unsettled': f"Prices of {fd}, which may not yet be settlements: {_UNSETTLED_WHY}.",
@@ -1344,8 +1394,8 @@ def ttf_expiry_days(index):
     the first calendar day of the delivery month, or the first earlier day that is both a London and a NYMEX
     business day (CME rule 1159102.E); ICE Endex TTF, the European benchmark, stops two UK business days
     before the delivery month, normally the same day. The expiry comes from contract_expiry("TTF", ...), the
-    one place the rule is written. Holidays are not modelled (weekdays only), so a date can be one day off
-    around a holiday. Yahoo's continuous TTF=F may switch contract on either of these days, so a large move on
+    one place the rule is written, on the exchange calendars (EXPIRY_CALENDARS); the day after is the next NYMEX
+    business day. Yahoo's continuous TTF=F may switch contract on either of these days, so a large move on
     them can be partly the gap between two contracts.
     """
     if len(index) == 0:
@@ -1354,7 +1404,7 @@ def ttf_expiry_days(index):
     months = pd.period_range(index.min().to_period('M'), index.max().to_period('M') + 1, freq='M')
     for m in months:
         expiry = contract_expiry("TTF", m.to_timestamp())
-        nxt = pd.Timestamp(np.busday_offset(expiry.date(), 1))
+        nxt = pd.Timestamp(np.busday_offset(expiry.date(), 1, busdaycal=NYMEX_BDAYS))
         out.update([expiry.normalize(), nxt.normalize()])
     idx_norm = index.normalize()
     return index[idx_norm.isin(list(out))]
@@ -1422,7 +1472,8 @@ def forward_curve(root, n=12, today=None):
          after it expires (CLX26 on 21 Oct 2026, the day after its last trading day), and
          without this rule it would stay on the curve as the front month. A contract on
          its last trading day is kept.
-    Holidays are not modelled in contract_expiry, so an expiry can be one day late. As a
+    contract_expiry uses exchange calendars (EXPIRY_CALENDARS); a closure missing from them (an
+    unscheduled one, such as a national day of mourning) could still make an expiry one day late. As a
     safeguard for the first row only: the first contract is also dropped when it has no
     price on the batch's last trading day, a later contract has one, and its last trading
     day by the rule is that day or the next business day.
@@ -1481,39 +1532,76 @@ def forward_curve(root, n=12, today=None):
 
 
 EXPIRY_RULES = {
-    "CL": "NYMEX WTI: 3 business days before the 25th of the month before delivery, 4 if the 25th is not a "
+    "CL": "NYMEX WTI: 3 NYMEX business days before the 25th of the month before delivery, 4 if the 25th is not a "
           "business day",
-    "BZ": "Brent: last business day of the second month before delivery, one business day earlier in December",
+    "BZ": "Brent: last London business day of the second month before delivery, one business day earlier in "
+          "December",
 }
+
+# Exchange calendars for the expiry rules (the `holidays` package): London business days are England's bank
+# holidays (ICE Brent, NYMEX BZ and the London leg of NYMEX Dutch TTF count London business days), NYMEX
+# business days are CME's holidays (calendar "XCME"). Checked on 2026-10-23 against CME's published last
+# trading days for every listed contract (CME product calendars 425 WTI, 424 Brent Last Day Financial and 8378
+# Dutch TTF: 124, 100 and 122 contracts from Nov 2026 to Feb 2037): all equal.
+_CAL_YEARS = range(2000, 2041)
+LONDON_BDAYS = np.busdaycalendar(holidays=sorted(holidays.UK(subdiv="ENG", years=_CAL_YEARS).keys()))
+NYMEX_BDAYS = np.busdaycalendar(holidays=sorted(holidays.financial_holidays("XCME", years=_CAL_YEARS).keys()))
+_LONDON_NYMEX_BDAYS = np.busdaycalendar(holidays=sorted(
+    set(holidays.UK(subdiv="ENG", years=_CAL_YEARS).keys())
+    | set(holidays.financial_holidays("XCME", years=_CAL_YEARS).keys())))
+EXPIRY_CALENDARS = {"CL": NYMEX_BDAYS, "BZ": LONDON_BDAYS, "TTF": _LONDON_NYMEX_BDAYS}
+# How the pages describe the calendars behind an expiry date, per root.
+_CAL_WORDS = {"CL": "CME's holiday calendar", "BZ": "England's bank holidays (London business days)",
+              "TTF": "England's bank holidays and CME's holiday calendar"}
+
+
+def expiry_cal_note(root):
+    """'exchange holidays from ..., checked against CME's published last trading days' for `root`."""
+    return (f"exchange holidays from {_CAL_WORDS.get(root, 'weekdays only')}, checked against CME's published "
+            "last trading days")
 
 
 def contract_expiry(root, delivery):
-    """Last trading day of a WTI (CL), Brent (BZ) or Dutch TTF (TTF) monthly contract, weekdays only (holidays
-    not modelled). This is the only place the expiry rules are written: the forward curve, the front-month
-    label and ttf_expiry_days all call it.
+    """Last trading day of a WTI (CL), Brent (BZ) or Dutch TTF (TTF) monthly contract, on the exchange
+    calendars above (England's bank holidays for London business days, CME's holidays for NYMEX business days).
+    This is the only place the expiry rules are written: the forward curve, the front-month label and
+    ttf_expiry_days all call it.
 
     WTI (CME rule 200102.F): trading ends 3 business days before the 25th calendar day of the month before
-    the delivery month; if the 25th is not a business day, 4 business days before it. Brent (ICE rule, which
-    NYMEX BZ follows): the last business day of the second month before delivery, moved one business day
-    earlier when that month is December. Dutch TTF (CME rule 1159102.E, NYMEX contract used by TTF=F and the
-    curve): the second London business day before the first calendar day of the delivery month (ICE Endex
-    TTF: two UK business days before the delivery month, normally the same day). None for other roots."""
+    the delivery month; if the 25th is not a business day, 4 business days before it (3 before the business day
+    preceding it). Brent (ICE rule, which NYMEX BZ follows, 698102.E): the last London business day of the
+    second month before delivery, moved one business day earlier when that month is December. Dutch TTF (CME
+    rule 1159102.E, NYMEX contract used by TTF=F and the curve): the second London business day before the first
+    calendar day of the delivery month; if that day is not a NYMEX business day, the first earlier day that is
+    both (ICE Endex TTF: two UK business days before the delivery month, normally the same day). None for other
+    roots. Checked against CME's published calendars (see EXPIRY_CALENDARS)."""
     d = pd.Timestamp(delivery)
     if root == "TTF":
-        first = d.replace(day=1)
-        # roll='forward': when the 1st is a weekend day, count back from the next business day.
-        return pd.Timestamp(np.busday_offset(first.date(), -2, roll='forward'))
+        first = d.replace(day=1).date()
+        day = np.busday_offset(first, -2, roll='forward', busdaycal=LONDON_BDAYS)
+        if not np.is_busday(day, busdaycal=NYMEX_BDAYS):
+            day = np.busday_offset(day, 0, roll='backward', busdaycal=_LONDON_NYMEX_BDAYS)
+        return pd.Timestamp(day)
     if root == "CL":
-        d25 = (d - pd.DateOffset(months=1)).replace(day=25)
-        if d25.dayofweek < 5:
-            return pd.Timestamp(np.busday_offset(d25.date(), -3))
-        # 25th on a weekend: the business day before it, then 3 more back (= 4 business days before the 25th).
-        return pd.Timestamp(np.busday_offset(np.busday_offset(d25.date(), 0, roll='backward'), -3))
+        d25 = (d - pd.DateOffset(months=1)).replace(day=25).date()
+        if np.is_busday(d25, busdaycal=NYMEX_BDAYS):
+            return pd.Timestamp(np.busday_offset(d25, -3, busdaycal=NYMEX_BDAYS))
+        prev = np.busday_offset(d25, 0, roll='backward', busdaycal=NYMEX_BDAYS)
+        return pd.Timestamp(np.busday_offset(prev, -3, busdaycal=NYMEX_BDAYS))
     if root == "BZ":
         m2 = d - pd.DateOffset(months=2)
-        last = pd.Timestamp(np.busday_offset((m2 + pd.offsets.MonthEnd(0)).date(), 0, roll='backward'))
-        return pd.Timestamp(np.busday_offset(last.date(), -1)) if m2.month == 12 else last
+        last = np.busday_offset((m2 + pd.offsets.MonthEnd(0)).date(), 0, roll='backward', busdaycal=LONDON_BDAYS)
+        return pd.Timestamp(np.busday_offset(last, -1, busdaycal=LONDON_BDAYS) if m2.month == 12 else last)
     return None
+
+
+def exchange_busday_count(root, start, end):
+    """Business days from `start` (included) to `end` (excluded) on the calendar of `root`'s expiry rule
+    (EXPIRY_CALENDARS); weekdays only for other roots."""
+    cal = EXPIRY_CALENDARS.get(root)
+    if cal is None:
+        return int(np.busday_count(pd.Timestamp(start).date(), pd.Timestamp(end).date()))
+    return int(np.busday_count(pd.Timestamp(start).date(), pd.Timestamp(end).date(), busdaycal=cal))
 
 
 def contract_expired(root, delivery, as_of):

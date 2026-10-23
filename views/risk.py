@@ -54,7 +54,7 @@ with st.sidebar.expander("Methodology: Risk page"):
       over 30 trading days, shown annualised (daily x √252) with the daily figure in brackets. This is a
       simplification: RiskMetrics uses exponentially weighted (EWMA) log returns.
     - **Rolling Correlation**: Pearson correlation of daily returns with the comparison asset over 30 days.
-    - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs last 30 common trading days).
+    - **Cross-Commodity Matrix**: 4×4 correlation heatmap (full period vs the last 30 trading days, at least 20 with all four returns).
     - **Value at Risk (VaR)**: 95% and 99% historical VaR and 97.5% Expected Shortfall
       from the last 250 trading days, with the full-period figures alongside. Quantiles use
       linear interpolation between the two nearest days; ES averages the days at or below
@@ -340,14 +340,14 @@ else:
             fc1.markdown(f"<h3 style='color:{shape_color}; margin-top:0'>{curve_shape}</h3>",
                          unsafe_allow_html=True)
             _expiry = common.contract_expiry(curve_root, front['Delivery'])
-            _left = (int(np.busday_count((front['Last trade'] + pd.Timedelta(days=1)).date(),
-                                         (_expiry + pd.Timedelta(days=1)).date()))
+            _left = (common.exchange_busday_count(curve_root, front['Last trade'] + pd.Timedelta(days=1),
+                                                  _expiry + pd.Timedelta(days=1))
                      if _expiry is not None else None)
             _soon = _left is not None and _left < 3
             fc2.metric(f"Front month ({front['Delivery']:%b %y}" + (f", expires {_expiry:%d %b}" if _soon else "") + ")",
                        f"{front['Price']:.2f} {curve_unit}",
-                       help=(f"Last trading day {_expiry:%d %b %Y} ({common.EXPIRY_RULES[curve_root]}; exchange "
-                             "holidays not modelled)." if _expiry is not None else None))
+                       help=(f"Last trading day {_expiry:%d %b %Y} ({common.EXPIRY_RULES[curve_root]}; "
+                             f"{common.expiry_cal_note(curve_root)})." if _expiry is not None else None))
             if _soon:
                 # The roll check of the volatility window (same download) says whether the continuous series
                 # has already moved past the front contract.
@@ -395,7 +395,7 @@ else:
             + shape_note
             + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
             f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
-            "days and has not passed its last trading day (exchange rule, holidays not modelled; a contract "
+            "days and has not passed its last trading day (exchange rule and holiday calendar; a contract "
             "on its last trading day is shown), "
             + _curve_words['caption']
             + "Contracts past their last trading day are not shown, even while Yahoo Finance still "
@@ -436,9 +436,13 @@ st.write("How do gas, oil and carbon move relative to each other, over the whole
 _panel = common.returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
 if _panel is not None and _panel.dropna().shape[0] > 30:
     _returns_df = _panel.dropna()
-    _recent_df = _returns_df.tail(30)
     corr_full = _returns_df.corr().round(3)
-    corr_30d = _recent_df.corr().round(3)
+    # Recent matrix: the same window rule as the 30-day correlation line (common.rolling_corr): the last 30 trading
+    # days of the panel, given only when at least 20 of them have a return in all four series, so the window never
+    # reaches back across a suspension (the carbon ETC in 2020-21) to fill itself up.
+    _recent_rows = _panel.dropna(how='all').tail(common.VOL_DAYS)
+    _recent_df = _recent_rows.dropna()
+    corr_30d = _recent_df.corr().round(3) if len(_recent_df) >= common.VOL_MIN else None
 else:
     corr_full, corr_30d = None, None
 
@@ -464,18 +468,26 @@ def _heatmap(corr, title):
 if corr_full is not None:
     cm1, cm2 = st.columns(2)
     _full_range = f"{_returns_df.index.min():%d %b %Y} to {_returns_df.index.max():%d %b %Y}"
-    _recent_range = f"{_recent_df.index.min():%d %b %Y} to {_recent_df.index.max():%d %b %Y}"
+    _win_range = f"{_recent_rows.index.min():%d %b %Y} to {_recent_rows.index.max():%d %b %Y}"
     with cm1:
         st.write(f"**Full period: {_full_range}** ({len(_returns_df):,} common days)")
         st.pyplot(_heatmap(corr_full, f"Full period, {_full_range}"))
     with cm2:
-        st.write(f"**Last 30 common trading days: {_recent_range}**")
-        st.pyplot(_heatmap(corr_30d, f"Last 30 common days, {_recent_range}"))
+        st.write(f"**Last {common.VOL_DAYS} trading days: {_win_range}** ({len(_recent_df)} with a return in all "
+                 "four series)")
+        if corr_30d is not None:
+            st.pyplot(_heatmap(corr_30d, f"Last {common.VOL_DAYS} trading days, {_win_range}"))
+        else:
+            st.caption(f"No recent matrix: only {len(_recent_df)} of the last {common.VOL_DAYS} trading days have a "
+                       f"return in all four series, and at least {common.VOL_MIN} are needed (the same rule as the "
+                       "30-day correlation line), so the window does not reach back across a gap such as the "
+                       "carbon ETC's stale prices.")
 
     st.caption("Blue = positive correlation (move together). Red = negative (move inversely); for a hedged book a "
                "negative correlation is not in itself bad. "
-               "Only days on which all four series have a return are used. Compare full period with the "
-               "last 30 days to see whether relationships have shifted. The series do not close at the same "
+               "Only days on which all four series have a return are used; the recent matrix uses the last 30 "
+               "trading days on which any of the four has a return, and needs at least 20 of them with all four. Compare full "
+               "period with the last 30 days to see whether relationships have shifted. The series do not close at the same "
                "time (TTF and the carbon ETC on European hours, Brent and WTI in the New York afternoon), so "
                "news after the European close reaches oil the same day and gas and carbon the next day, "
                "which lowers same-day correlations between the two groups.")

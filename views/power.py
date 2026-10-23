@@ -224,7 +224,7 @@ else:
 _today = common.berlin_today()
 _hl = common.front_month_contract("TTF=F", latest["TTF date"])
 _hl_contract = (f"TTF {_hl['delivery']:%b %y} future (front month)" if _hl["matched"] else
-                f"TTF {_hl['delivery']:%b %y} future (front month by the exchange expiry rule, holidays not modelled; "
+                f"TTF {_hl['delivery']:%b %y} future (front month by the exchange expiry rule; "
                 "this price could not be matched to a single monthly contract on Yahoo Finance)")
 # The day-ahead auction for this delivery day runs the calendar day before; gas and carbon trade on weekdays,
 # so the last trading day before the auction is the last weekday before the delivery day.
@@ -658,7 +658,7 @@ _wait_day = pd.Timestamp(np.busday_offset(_decide.date(), _WAIT_DAYS))
 _front = common.front_month_contract("TTF=F", ttf_last_date)
 _front_exp = common.contract_expiry("TTF", _front["delivery"])
 # The front contract stops trading before the plant could buy in a week: switch to the next contract that
-# is still trading on the wait day (contract_expiry, holidays not modelled).
+# is still trading on the wait day (contract_expiry, on the exchange holiday calendars).
 _switch = _wait_day.normalize() > _front_exp.normalize()
 _batch = common.shared_download("TTF=F", _fit_from)
 _c = pd.Series(dtype=float)
@@ -720,7 +720,7 @@ else:
 if _switch:
     st.warning(f"The front-month contract, TTF {_front['delivery']:%b %y}, "
                f"{'stopped' if _front_exp.normalize() < _decide else 'stops'} trading on "
-               f"{_front_exp:%a %d %b %Y} (its last trading day by the exchange rule, holidays not modelled), "
+               f"{_front_exp:%a %d %b %Y} (its last trading day by the exchange rule and holiday calendar), "
                f"before {_wait_day:%a %d %b}, {_WAIT_DAYS} business days after {_decide:%a %d %b}: the plant cannot "
                f"wait a week to buy {_front['delivery']:%B} gas on it. Once that contract has stopped trading, "
                f"{_front['delivery']:%B} gas can still be bought for shorter delivery periods, such as the TTF day, "
@@ -765,8 +765,7 @@ if wait is not None:
     else:
         _price_help = ("Yahoo Finance `TTF=F`. Its price could not be matched to a single monthly contract on Yahoo "
                        "Finance for this date, so the delivery month is the front month by the exchange expiry rule "
-                       f"(`{contract}`; holidays not modelled, so it can be a month off for a day or two around a "
-                       "holiday).")
+                       f"(`{contract}`, {common.expiry_cal_note("TTF")}).")
     _w_label = {"live": f"latest price {price_date:%d %b %Y}",
                 "unsettled": f"price of {price_date:%d %b %Y} (may not yet be the settlement)",
                 "close": f"close {price_date:%d %b %Y}"}[_w_state]
@@ -849,7 +848,8 @@ if wait is not None:
     else:
         # A roll day among the last returns of the fit weighs most on the GARCH variance at the end of the sample.
         # Only days the roll check identifies (common.window_rolls: TTF=F's close equals a new monthly contract's)
-        # are named; when Yahoo no longer lists the contracts, nothing is said.
+        # are named with a range without them; when Yahoo no longer lists the contracts, a day on the exchange rule's
+        # expiry or the day after is named as a possible roll (not verified) and no range is given.
         _roll_txt = ""
         _last_r = _ttf_fit.pct_change(fill_method=None).dropna().tail(_ROLL_CHECK)
         _rc = common.window_rolls("TTF=F", _batch, _last_r)
@@ -869,6 +869,13 @@ if wait is not None:
                 _roll_txt += (f" Fitted again on the same series, the range with {'that day' if _one else 'those days'} "
                               f"left out would be {_half(_alt['lo'][-1] * _s_alt):.1f} to "
                               f"{_half(_alt['hi'][-1] * _s_alt):.1f} €/MWh (same seed and number of paths).")
+        elif _rc and _rc["unknown"]:
+            # Not matched to a listed contract: name a possible roll on the exchange-rule days, without a range.
+            _cand = common.rule_roll_days("TTF", _rc["unknown"])
+            if _cand:
+                _roll_txt = (" " + common.rule_roll_sentence(_cand) + f" These days are among the last {_ROLL_CHECK} "
+                             "returns of the fit, which weigh most on the fitted volatility; no range without them "
+                             "is given, because the roll is not identified.")
         _method = (f"GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}. Monthly roll jumps in `TTF=F` feed into the "
                    "fitted volatility." + _roll_txt + _fit_note)
@@ -880,7 +887,7 @@ if wait is not None:
            else "")
         + ", 5th to 95th percentile. The front-month contract's last trading day comes from the exchange rule "
         "(NYMEX Dutch TTF, CME rule 1159102.E, normally the same day as ICE Endex TTF: two UK business days "
-        "before the delivery month); exchange holidays are not modelled, so it can be a day off. The volume "
+        "before the delivery month), with " + common.expiry_cal_note("TTF") + ". The volume "
         "assumes the plant runs as the flexible plant has recently; a spot (day-ahead) gas comparison is "
         "not shown because no freely licensed daily TTF spot series is available."
     )

@@ -10,3 +10,4 @@ requests
 finvader
 scipy
 openpyxl
+holidays
