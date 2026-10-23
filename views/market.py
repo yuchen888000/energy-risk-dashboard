@@ -1289,7 +1289,7 @@ st.caption(
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
     f"percentile by construction, and the count shows how much of that fell in {_count_span}.{corr_source} Latest values are "
     f"at the last trading day with a price in the selected range ({_asof:%d %b %Y})."
-    + common.last_value_note(commodity['ticker'], end_date) + " " + garch_fit_note
+    + common.last_value_note(commodity['ticker'], end_date, _asof) + " " + garch_fit_note
     + " The Risk page fits its GARCH on the whole selected range, so its forecast can differ. The GARCH counts "
     "use the parameters fitted on the whole window for every past day. Volatility is the standard deviation "
     "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether the "

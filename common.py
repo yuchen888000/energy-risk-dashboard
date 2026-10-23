@@ -7,6 +7,7 @@ number another page already computed gets it from the cache.
 """
 import datetime as dt
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -821,17 +822,46 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
     return out
 
 
-def last_value_note(ticker, end_date):
-    """The sentence on the last price, or '' when the end date is more than three days before today. Yahoo
-    rewrites a futures row to the settlement only hours after the close, so the note is kept for three days.
-    The Risk and Market pages both call this, so the note is written in one place."""
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def futures_live_from(now=None):
+    """The earliest row date of a NYMEX future (TTF=F, CL=F, BZ=F and their monthly contracts) that can still
+    hold a live price rather than a close: the last weekday before today's New York date. A row of that day or
+    later can be the current session or, after the settlement, the evening electronic session, which Yahoo
+    Finance writes on the row of the day that settled (at 03:17 UTC on 23 October 2026 the 22 October row of the
+    December WTI contract was 100.14 against a settlement of 99.47). A row older than that has a full trading day after it and is a
+    close. `now` is a time (any time zone; naive means UTC), so the rule can be tested without the clock."""
+    now = pd.Timestamp.now(tz=NEW_YORK) if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
+    today_ny = now.tz_convert(NEW_YORK).date()
+    return pd.Timestamp(np.busday_offset(today_ny, -1, roll='forward'))
+
+
+def futures_row_live(last_day, now=None):
+    """True when a futures row dated `last_day` can still be a live or evening-session price (futures_live_from),
+    False when it is a close. The Risk page's forward curve, its "Data up to" line and last_value_note all use
+    this, so the label is decided in one place."""
+    return pd.Timestamp(last_day).normalize() >= futures_live_from(now)
+
+
+def last_value_note(ticker, end_date, last_day, now=None):
+    """The sentence on the last price of `ticker`, whose last row is `last_day`. For a future: when the row can
+    still be live (futures_row_live) it says the value is the latest price, which can be the evening electronic
+    session after the settlement; otherwise ''. For the carbon ETC and other non-futures: a note on the latest
+    close, or '' when the end date is more than three days before today. The Risk and Market pages both call
+    this, so the note is written in one place."""
+    if ticker.endswith("=F"):
+        if not futures_row_live(last_day, now):
+            return ""
+        return (f" The last value, of {pd.Timestamp(last_day):%d %b}, is the latest price: it can be the current "
+                "session or the evening electronic session after the settlement, not the settlement, so it can "
+                "change within the hour.")
     if (pd.Timestamp.today().normalize() - pd.Timestamp(end_date)).days > 3:
         return ""
-    if ticker.endswith("=F"):
-        return (" The last value can be a price from the current or the evening electronic session, not the "
-                "settlement, so it can change within the hour.")
     if ticker.endswith(".L"):
-        return " The last value is the latest close on the London Stock Exchange."
+        return " The last value is the latest close on Yahoo Finance (London Stock Exchange)."
     return " The last value is the latest close."
 
 
@@ -903,7 +933,7 @@ def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SP
     `panel` holds the daily returns of the instruments (returns_panel, from STRESS_FROM to the end date) and
     `positions` maps instrument to € notional. Only days on which every instrument held has a return count, as
     for the book VaR above. A candidate is `window` such consecutive days spanning at most `max_span` calendar
-    days: 250 common days of instruments on different holiday calendars span about 370 days, while a long gap
+    days: 250 common days of instruments on different holiday calendars normally span 360 to 380 days, while a long gap
     (the carbon ETC's suspension from June 2020 to August 2021, its sparse prices before 2018) makes the span far
     longer, so such a stretch cannot be passed off as 12 months. The stress period is the candidate with the
     largest ES 97.5% (same definition as hist_es). The ES of 250 days depends on its worst 7 days only, so

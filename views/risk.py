@@ -135,9 +135,9 @@ if not _past_end:
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
-           # The last row can still be a live or evening-session price when the end date is the latest trading
-           # day or shortly after it (Yahoo rewrites a row to the settlement only hours later).
-           + common.last_value_note(commodity['ticker'], end_date)
+           # A futures row of the last weekday before today's New York date or later can still be a live or
+           # evening-session price (common.futures_row_live, the same rule as the forward curve below).
+           + common.last_value_note(commodity['ticker'], end_date, _last_px)
            + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
            "the series, computed together.")
 
@@ -235,8 +235,9 @@ else:
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
-        # A value for today is the latest price, not a close (4-1).
-        _live_curve = last_trade.normalize() >= pd.Timestamp.today().normalize()
+        # 2-1: a row of the last weekday before today's New York date or later can be the current or the
+        # evening electronic session, which Yahoo writes on the settled day's row: a latest price, not a close.
+        _live_curve = common.futures_row_live(last_trade)
         _px_word = "latest prices" if _live_curve else "latest closes"
         # A real monthly axis: months with no contract stay empty and the line is not drawn across them.
         labels_fc = list(curve['Delivery'])
@@ -293,7 +294,7 @@ else:
                 else:
                     _months = ", ".join(f"{d:%b %y}" for d in curve.loc[curve['Season'] == key, 'Delivery'])
                     col_fc.metric(f"{key} average", "n/a",
-                                  help=f"Only {n_season} of the {_open_months(key)} monthly contracts still trading are on Yahoo "
+                                  help=f"Only {n_season} of the {_open_months(key)} monthly contracts still trading {'is' if n_season == 1 else 'are'} on Yahoo "
                                        f"Finance ({_months}); an average needs at least {_MIN_SEASON}.")
                     col_fc.caption(f"Only {n_season} contract{'s' if n_season > 1 else ''} ({_months}): "
                                    "no season average.")
@@ -357,7 +358,9 @@ else:
             fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
                        help=(f"Front month price of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} price of "
                              f"{back['Last trade']:%d %b}: the two ends are from different days." if _mixed
-                             else f"Both {'latest prices' if _live_curve else 'closes'} of {front['Last trade']:%d %b}."))
+                             else (f"Latest prices of {front['Last trade']:%d %b} (the last row can be the evening "
+                                   "electronic session after the settlement, not the settlement)." if _live_curve
+                                   else f"Both closes of {front['Last trade']:%d %b}.")))
             if _mixed:
                 fc3.caption(f"Front {front['Last trade']:%d %b}, back {back['Last trade']:%d %b}")
             ax_fc.scatter(labels_fc, curve['Price'], color=commodity['color'], s=30, zorder=2)
@@ -388,9 +391,13 @@ else:
             + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
             f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
             "days and has not passed its last trading day (exchange rule, holidays not modelled; a contract "
-            "on its last trading day is shown), at its latest close (for a finished day normally the "
-            "settlement; a value for today is the latest price), so prices can be from different days (see "
-            "Last trade). Contracts past their last trading day are not shown, even while Yahoo Finance still "
+            "on its last trading day is shown), "
+            + (f"at its latest price: a row of {common.futures_live_from():%d %b} or later can be the current "
+               "session or the evening electronic session after the settlement, not the settlement, so the curve "
+               "can change within the hour. Prices can be from different days (see Last trade). " if _live_curve else
+               "at its latest close (for a finished day normally the settlement), so prices can be from different "
+               "days (see Last trade). ")
+            + "Contracts past their last trading day are not shown, even while Yahoo Finance still "
             "lists them; older or missing contracts are left out and nothing is interpolated. "
             f"{n_curve} of 12 contracts available."
         )
@@ -505,9 +512,12 @@ _raw_px = common.load_close(commodity['ticker'], start_date, end_date)
 _nonpos = _raw_px[_raw_px <= 0]
 if len(_nonpos):
     _why = _nonpos_why(len(_nonpos))
+    # 3-2: say which figures the left-out days fall in: the last var_days days (headline) and/or the full period.
+    _in_recent = len(_recent_ret) and any(_recent_ret.index[0] <= d <= _recent_ret.index[-1] for d in _nonpos.index)
+    _which = (f"the headline (last {var_days} days) and full-period" if _in_recent else "the full-period")
     st.caption(f"⚠️ {selected_commodity} settled at or below zero on "
                + ", ".join(f"{d:%d %b %Y} ({v:.2f})" for d, v in _nonpos.items())
-               + f". {_why[0].upper() + _why[1:]}, and the full-period max daily loss, VaR and ES do not include "
+               + f". {_why[0].upper() + _why[1:]}, and {_which} max daily loss, VaR and ES do not include "
                  "that move.")
 
 _worst_recent_day = _recent_ret.idxmin()
@@ -772,7 +782,7 @@ else:
                    f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR).")
 
         # ── Stress period (after Basel MAR33.7) ──
-        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months: normally about 370 "
+        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months: normally 360 to 380 "
                  f"calendar days, at most {common.STRESS_MAX_SPAN}) in which today's positions have the largest "
                  "ES 97.5%**")
         _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
@@ -801,31 +811,50 @@ else:
             # 4-3: the same explanation as the single-commodity VaR when ES 97.5% is below VaR 99%.
             _es_txt = (" " + _es_below_var99(_sp['n_tail'], common.STRESS_WINDOW)
                        if _sp['es975'] < _sp['var99'] else "")
-            # 1-1: a held instrument with a zero or negative price inside the stress period or the last
-            # 250 days (WTI on 20 Apr 2020): that day and the next drop out of the book P&L. Found from the prices.
+            # 1-1: a held instrument with a zero or negative close anywhere in the search range (WTI on 20 Apr
+            # 2020): those days and the next have no percentage return, so they are not in the book P&L and the
+            # search never sees them. Their P&L is given as the price change on a fixed quantity (the quantity
+            # bought at the last positive close, as in the scenario replay below) and compared with the stress
+            # ES. Found from the prices, nothing hard-coded; the returns themselves are not changed.
             _nonpos_txt = ""
             _tickers = common.panel_tickers(CARBON_SHORT, CARBON_TICKER)
             for _k, _v in positions.items():
                 _px = common.load_close(_tickers[_k], common.STRESS_FROM, end_date).dropna()
-                _bad = [i for i, x in enumerate(_px.values) if x <= 0]
-                for _i in _bad:
-                    _d = _px.index[_i]
-                    _in = [_lab for _lab, _a, _b in (("stress-period", _sp['start'], _sp['end']),
-                                                     (f"last-{len(recent)}-day", recent.index[0], recent.index[-1]))
-                           if _a <= _d <= _b]
-                    if not _in:
+                _vals = _px.values
+                _i = 1
+                while _i < len(_vals):
+                    if _vals[_i] > 0 or _vals[_i - 1] <= 0:
+                        _i += 1
                         continue
-                    _figs = f"the {' and '.join(_in)} VaR and ES"
-                    _nonpos_txt += (f" {_k} settled at {_px.iloc[_i]:.2f} on {_d:%d %b %Y}"
-                                    + (f", from {_px.iloc[_i - 1]:.2f} the day before" if _i > 0 else "")
-                                    + ": " + _nonpos_why(1, " of the book P&L"))
-                    if _v > 0:
-                        _nonpos_txt += f". For a long {_k} position {_figs} therefore understate that day's loss."
-                    elif _i + 1 < len(_px):
-                        _nonpos_txt += (f". For a short {_k} position that day was a gain, and the next day, when "
-                                        f"{_k} rose back to {_px.iloc[_i + 1]:.2f}, a loss; {_figs} include neither.")
-                    else:
-                        _nonpos_txt += f". For a short {_k} position that day was a gain, left out of {_figs}."
+                    # A run of zero or negative closes from _i; the day after the run has no return either.
+                    _j = _i
+                    while _j < len(_vals) and _vals[_j] <= 0:
+                        _j += 1
+                    if _px.index[_i] < _sp['search_from']:
+                        _i = _j + 1
+                        continue
+                    _days = list(range(_i, min(_j + 1, len(_vals))))
+                    _qty = _v / _vals[_i - 1]
+                    _pnl = [(_px.index[d], _qty * (_vals[d] - _vals[d - 1])) for d in _days]
+                    _n_run = _j - _i
+                    _nonpos_txt += (f" {_k} settled at " + ", ".join(f"{_vals[d]:.2f} on {_px.index[d]:%d %b %Y}"
+                                                                    for d in range(_i, _j))
+                                    + f", from {_vals[_i - 1]:.2f} the day before: "
+                                    + _nonpos_why(_n_run, " of the book P&L and of the stress-period search")
+                                    + f". Holding the quantity bought at the {_px.index[_i - 1]:%d %b %Y} close of "
+                                    f"{_vals[_i - 1]:.2f}, as the scenario replay below does, the {_k} position "
+                                    "would have "
+                                    + " and ".join(f"{'made' if _p >= 0 else 'lost'} €{abs(_p) / 1e6:,.2f}m on "
+                                                   f"{_d:%d %b %Y}" for _d, _p in _pnl) + ".")
+                    _worse = [(_d, -_p) for _d, _p in _pnl if -_p > _sp['es975']]
+                    if _worse:
+                        _nonpos_txt += ((" The loss on " if len(_worse) == 1 else " The losses on ")
+                                        + " and ".join(f"{_d:%d %b %Y}" for _d, _ in _worse)
+                                        + (" is" if len(_worse) == 1 else " are each")
+                                        + f" larger than the stress ES 97.5% shown (€{_sp['es975'] / 1e6:,.2f}m): "
+                                        "counted this way, a window containing these days could have a larger ES than the stress "
+                                        "period shown.")
+                    _i = _j + 1
             st.caption(
                 f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, searched from "
                 f"{_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y}: the {common.STRESS_WINDOW} trading "
