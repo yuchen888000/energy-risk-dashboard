@@ -306,6 +306,23 @@ def rolling_vol(close):
     return simple_returns(close).rolling(VOL_DAYS, min_periods=VOL_MIN).std() * 100
 
 
+def rolling_corr(close, compare):
+    """The one definition of 30-day correlation behind every figure on the Risk and Market pages: the Pearson
+    correlation of simple daily returns of `close` and `compare` over the last VOL_DAYS rows of `close`'s own
+    trading days, given only when at least VOL_MIN of those rows have a return in both series. The same window
+    rule as rolling_vol.
+
+    `close` and `compare` are each on their own trading days with stale repeats set to NaN and the rows kept
+    (load_close). The returns of `compare` are taken on its own days and placed on the rows of `close`, so a stale
+    run or a non-positive price of either series stays inside the window as rows without a pair: a window never
+    reaches back across a suspension of the commodity itself (CARB.L in 2020-21 on the carbon page) to fill
+    itself up. compute_core (the page line, the latest figure) and three_year_reference (the Market page's
+    check window) both take their 30-day correlation from here; corr_gap explains a missing latest figure."""
+    pairs = pd.DataFrame({'R': simple_returns(close),
+                          'CR': simple_returns(compare).reindex(close.index)})
+    return pairs['R'].rolling(VOL_DAYS, min_periods=VOL_MIN).corr(pairs['CR'])
+
+
 # ─── Core Calculations ───
 VAR_WINDOW = 250     # trading days behind the headline VaR and Expected Shortfall
 
@@ -332,7 +349,9 @@ def compute_core(ticker, compare_ticker, start, end):
     than 30 overlapping observations are available. `latest_vol` is the 30-day volatility (rolling_vol) of the
     last day with a price (`vol_asof`); it is None when that day's window (`vol_window`, its last VOL_DAYS
     returns on the series' own trading days) holds fewer than VOL_MIN returns, and `vol_gap` then gives the count
-    and the stale runs in the window, so the pages can say why instead of showing an older figure.
+    and the stale runs in the window, so the pages can say why instead of showing an older figure. `latest_corr`
+    and `corr_gap` say the same of the 30-day correlation with the comparison series (rolling_corr): the figure of
+    `vol_asof`, or None with the count of days with both returns in the window and the stale runs of either series.
     """
     today = _download_day()
     batch = _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), today)
@@ -365,13 +384,10 @@ def compute_core(ticker, compare_ticker, start, end):
     own_vol = rolling_vol(price)
     df_analysis['Volatility'] = own_vol.reindex(df_analysis.index)
 
-    # Rolling correlation on returns (not price levels) to avoid spurious correlation.
-    # min_periods=20, as for volatility: without it one missing day in either series (e.g. a
-    # London holiday for the carbon ETC) blanks the next 30 days of the line. pandas uses the
-    # days on which both returns exist.
-    df_analysis['Rolling Correlation'] = (
-        df_analysis['Returns'].rolling(30, min_periods=20).corr(df_analysis['Compare_Returns'])
-    )
+    # 30-day correlation of returns (not price levels, to avoid spurious correlation), on the same rows and with
+    # the same window rule as the volatility (rolling_corr), then read on the days with a price.
+    own_corr = rolling_corr(price, compare)
+    df_analysis['Rolling Correlation'] = own_corr.reindex(df_analysis.index)
 
     # The latest figure is the one of the last day with a price. When that day's 30-day window holds fewer than
     # VOL_MIN returns (after a suspension), there is no latest figure: an older one is not shown in its place.
@@ -379,6 +395,11 @@ def compute_core(ticker, compare_ticker, start, end):
     latest_vol = df_analysis['Volatility'].iloc[-1]
     latest_vol = None if pd.isna(latest_vol) else float(latest_vol)
     window_returns = simple_returns(price).loc[:vol_asof].tail(VOL_DAYS)
+    # The same for the correlation: the pairs of returns in the last VOL_DAYS rows up to vol_asof.
+    latest_corr = df_analysis['Rolling Correlation'].iloc[-1]
+    latest_corr = None if pd.isna(latest_corr) else float(latest_corr)
+    corr_window = pd.DataFrame({'R': window_returns,
+                                'CR': simple_returns(compare).reindex(window_returns.index)}).dropna()
     avg_vol = df_analysis['Volatility'].dropna().mean()
 
     returns_clean = df_analysis['Returns'].dropna()
@@ -410,10 +431,21 @@ def compute_core(ticker, compare_ticker, start, end):
         runs = [(t, a, b) for t, a, b in _stale_runs([(ticker, ref_mask)], ref_mask.index[0], vol_asof)
                 if b >= first]
         vol_gap = dict(n=int(window_returns.notna().sum()), need=VOL_MIN, days=len(window_returns), stale=runs)
+    corr_gap = None
+    if latest_corr is None and has_compare and len(window_returns):
+        first = window_returns.index[0]
+        runs = sorted([(t, a, b) for t, a, b in _stale_runs([(ticker, ref_mask), (compare_ticker, cmp_mask)],
+                                                            ref_mask.index[0], vol_asof) if b >= first],
+                      key=lambda r: r[2])
+        # A stale run of the comparison that lasts up to the commodity's last price has not ended.
+        _cmp_rows = cmp_mask.index[cmp_mask.index <= vol_asof]
+        ongoing = bool(runs) and runs[-1][0] == compare_ticker and len(_cmp_rows) > 0 and runs[-1][2] == _cmp_rows[-1]
+        corr_gap = dict(n=len(corr_window), need=VOL_MIN, days=len(window_returns), stale=runs, ongoing=ongoing)
     return dict(
         ticker=ticker,
         df_analysis=df_analysis, has_compare=has_compare,
         latest_vol=latest_vol, avg_vol=avg_vol, vol_asof=vol_asof, vol_window=window_returns, vol_gap=vol_gap,
+        latest_corr=latest_corr, corr_gap=corr_gap,
         returns_clean=returns_clean, var_95=var_95, var_99=var_99, es_975=es_975,
         var_days=len(var_returns), var_95_full=var_95_full, var_99_full=var_99_full,
         es_975_full=es_975_full,
@@ -550,7 +582,7 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     to the end date, stale repeats masked (rows kept); `compare` the comparison series over the same span. The
     definitions are compute_core's: simple returns on each series' own trading days, non-positive prices
     dropped, 30-day volatility from rolling_vol (the same figure on the same day as the page's latest value and
-    the percentile history). Returns dict(vol, corr, rets, start, end, n, mean, std, fallback, rows, days,
+    the percentile history) and 30-day correlation from rolling_corr, both read on the days with a price. Returns dict(vol, corr, rets, start, end, n, mean, std, fallback, rows, days,
     short): the last CHECK_WINDOW values of 30-day volatility (daily, %) and of the 30-day correlation of
     returns up to the last day with a price (`end`), and the daily returns from the window's first day to `end`
     (for the 3-year VaR99, the GARCH fit and the counts of days fired); `mean` (of vol) is the GARCH check's
@@ -568,10 +600,10 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     days of the comparison series (`compare_stale`).
     """
     df = pd.DataFrame({'Price': price, 'R': simple_returns(price), 'V': rolling_vol(price),
-                       'CR': simple_returns(compare)}).dropna(subset=['Price'])
+                       'C': rolling_corr(price, compare)}).dropna(subset=['Price'])
     df = df[df['Price'] > 0]
     vol = df['V'].dropna().tail(CHECK_WINDOW)
-    corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(CHECK_WINDOW)
+    corr = df['C'].dropna().tail(CHECK_WINDOW)
     rets = df['R'].dropna()
     used_fallback = len(vol) < _MIN_HISTORY
     if used_fallback:
@@ -749,16 +781,18 @@ def _contract_month(sym, root):
 
 
 def _day_ranges(days, index):
-    """Consecutive runs of `days` within `index`, written '08 Sep to 22 Sep 2026' or '19 Oct 2026'."""
+    """Consecutive runs of `days` within `index`, written '08 Sep to 22 Sep 2026' or '19 Oct 2026'; two runs are
+    joined with 'and', three or more with commas and 'and' before the last ('02 Feb 2026 and 02 Mar 2026')."""
     pos = sorted(index.get_indexer(days))
     runs, start = [], pos[0]
     for a, b in zip(pos, pos[1:] + [None]):
         if b != a + 1:
             runs.append((index[start], index[a]))
             start = b
-    return ", ".join(f"{a:%d %b %Y}" if a == b else
-                     (f"{a:%d %b} to {b:%d %b %Y}" if a.year == b.year else f"{a:%d %b %Y} to {b:%d %b %Y}")
-                     for a, b in runs)
+    parts = [f"{a:%d %b %Y}" if a == b else
+             (f"{a:%d %b} to {b:%d %b %Y}" if a.year == b.year else f"{a:%d %b %Y} to {b:%d %b %Y}")
+             for a, b in runs]
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
 
 
 def contract_delivery(sym, root):
@@ -795,19 +829,32 @@ def roll_sentence(ticker, rc, window_returns):
     return " ".join(parts)
 
 
+def _gap_sentence(what, counted, g, as_of):
+    """'No 30-day <what> on <day>: ...' from a vol_gap or corr_gap of compute_core (count, window, stale runs)."""
+    as_of = pd.Timestamp(as_of)
+    count = f"{g['n']} of the {g['need']} {counted} needed in the last {g['days']} trading days"
+    if g['stale']:
+        t, a, b = g['stale'][-1]
+        if g.get('ongoing'):
+            return (f"No 30-day {what} on {as_of:%d %b %Y}: the {t} prices from {a:%d %b %Y} are stale "
+                    f"({count}).")
+        return (f"No 30-day {what} on {as_of:%d %b %Y}: not enough prices since the stale {t} prices of "
+                f"{a:%d %b %Y} to {b:%d %b %Y} ended ({count}).")
+    return f"No 30-day {what} on {as_of:%d %b %Y}: not enough prices ({count})."
+
+
 def vol_gap_sentence(core):
     """Why there is no latest 30-day volatility (compute_core's vol_gap), or '' when there is one. The count, the
     window and the stale run come from the data."""
     g = core.get('vol_gap')
-    if not g:
-        return ""
-    as_of = pd.Timestamp(core['vol_asof'])
-    count = f"{g['n']} of the {g['need']} returns needed in the last {g['days']} trading days"
-    if g['stale']:
-        t, a, b = g['stale'][-1]
-        return (f"No 30-day volatility on {as_of:%d %b %Y}: not enough prices since the stale {t} prices of "
-                f"{a:%d %b %Y} to {b:%d %b %Y} ended ({count}).")
-    return f"No 30-day volatility on {as_of:%d %b %Y}: not enough prices ({count})."
+    return _gap_sentence("volatility", "returns", g, core['vol_asof']) if g else ""
+
+
+def corr_gap_sentence(core):
+    """Why there is no latest 30-day correlation (compute_core's corr_gap), or '' when there is one, in the words
+    of vol_gap_sentence. Written here once for the Risk and Market pages."""
+    g = core.get('corr_gap')
+    return _gap_sentence("correlation", "days with both returns", g, core['vol_asof']) if g else ""
 
 
 # The US-Israeli strikes on Iran that started the war. Before this date the AI input names neither the war
@@ -908,39 +955,108 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
 NEW_YORK = ZoneInfo("America/New_York")
 
 
-def futures_live_from(now=None):
-    """The earliest row date of a NYMEX future (TTF=F, CL=F, BZ=F and their monthly contracts) that can still
-    hold a live price rather than a close: the last weekday before today's New York date. A row of that day or
-    later can be the current session or, after the settlement, the evening electronic session, which Yahoo
-    Finance writes on the row of the day that settled (at 03:17 UTC on 23 October 2026 the 22 October row of the
-    December WTI contract was 100.14 against a settlement of 99.47). A row older than that has a full trading day after it and is a
-    close. `now` is a time (any time zone; naive means UTC), so the rule can be tested without the clock."""
+def new_york_today(now=None):
+    """Today's date in New York (midnight-normalised Timestamp). `now` is a time (any time zone; naive means UTC),
+    so the rules below can be tested without the clock."""
     now = pd.Timestamp.now(tz=NEW_YORK) if now is None else pd.Timestamp(now)
     if now.tzinfo is None:
         now = now.tz_localize("UTC")
-    today_ny = now.tz_convert(NEW_YORK).date()
-    return pd.Timestamp(np.busday_offset(today_ny, -1, roll='forward'))
+    return pd.Timestamp(now.tz_convert(NEW_YORK).date())
 
 
-def futures_row_live(last_day, now=None):
-    """True when a futures row dated `last_day` can still be a live or evening-session price (futures_live_from),
-    False when it is a close. The Risk page's forward curve, its "Data up to" line and last_value_note all use
-    this, so the label is decided in one place."""
-    return pd.Timestamp(last_day).normalize() >= futures_live_from(now)
+def futures_live_from(now=None):
+    """The earliest row date of a NYMEX future (TTF=F, CL=F, BZ=F and their monthly contracts) that is not yet
+    treated as a close: the last weekday before today's New York date (futures_row_state)."""
+    return pd.Timestamp(np.busday_offset(new_york_today(now).date(), -1, roll='forward'))
+
+
+def futures_row_state(day, now=None):
+    """What a futures row dated `day` holds, by today's New York date (new_york_today):
+    'live'      the row is of today's New York date or later: the current session or, after the settlement, the
+                evening electronic session, not the settlement.
+    'unsettled' the row is of the last weekday before today's New York date (futures_live_from): it may not yet be
+                the settlement. Yahoo Finance writes the evening session into the day's row until New York midnight
+                and can rewrite it afterwards (at 03:17 UTC on 23 October 2026, 23:17 on 22 October in New York, the
+                22 October rows of the December WTI and Brent contracts were 100.14 and 113.81 against settlements
+                of 99.47 and 113.17, reported by The Nation (Thailand) on 23 October 2026; after New York midnight
+                Yahoo showed 99.47 and 113.17 and opened 23 October rows for the evening session, but that was seen
+                on three downloads only, so the page does not say either way).
+    'close'     an older row: a full New York day has passed after it.
+    The Risk page's forward curve, its "Data up to" line and last_value_note all use this, so the label is
+    decided in one place."""
+    d = pd.Timestamp(day).normalize()
+    if d >= new_york_today(now):
+        return 'live'
+    return 'unsettled' if d >= futures_live_from(now) else 'close'
+
+
+# The wording of the three states, written once (futures_row_state).
+_LIVE_WHY = ("the current session or the evening electronic session after the settlement, not the settlement")
+_UNSETTLED_WHY = ("Yahoo Finance writes the evening session into the day's row until New York midnight and can "
+                  "rewrite it afterwards")
+
+
+def futures_curve_words(trades, front_day, settled, now=None):
+    """The forward curve's wording for its contracts' last rows (`trades`, the dates of 'Last trade') and the
+    front contract's (`front_day`): dict(state, title, hover, caption). `title` is the phrase on the prices in
+    the chart title, with `settled` (their dates as written there): 'latest prices 22 Oct 2026', 'prices of
+    22 Oct 2026 (may not yet be settlements)' or 'latest closes 22 Oct 2026'; `hover` the help of the front-back
+    spread when both ends are of `front_day`; `caption` the clause on prices in the caption. The state is the one
+    of the latest row (futures_row_state)."""
+    days = sorted({pd.Timestamp(t).normalize() for t in trades})
+    states = {futures_row_state(t, now) for t in days}
+    state = futures_row_state(days[-1], now)
+    front_state = futures_row_state(front_day, now)
+    fd = f"{pd.Timestamp(front_day):%d %b}"
+    title = {'live': f"latest prices {settled}", 'unsettled': f"prices of {settled} (may not yet be settlements)",
+             'close': f"latest closes {settled}"}[state]
+    hover = {'live': f"Latest prices of {fd} (the last row can be the evening electronic session after the "
+                     "settlement, not the settlement).",
+             'unsettled': f"Prices of {fd}, which may not yet be settlements: {_UNSETTLED_WHY}.",
+             'close': f"Both closes of {fd}."}[front_state]
+    if state == 'close':
+        caption = ("at its latest close (for a finished day normally the settlement), so prices can be from "
+                   "different days (see Last trade). ")
+    else:
+        parts = []
+        if 'live' in states:
+            parts.append(f"a row of {new_york_today(now):%d %b} can be {_LIVE_WHY}, so the curve can change within "
+                         "the hour")
+        if 'unsettled' in states:
+            parts.append(f"a row of {futures_live_from(now):%d %b} may not yet be the settlement ({_UNSETTLED_WHY})")
+        caption = ("at its " + ("latest price" if state == 'live' else "last price") + ": " + "; ".join(parts)
+                   + ". Prices can be from different days (see Last trade). ")
+    return dict(state=state, title=title, hover=hover, caption=caption)
+
+
+def ttf_row_late(ttf_last, bz_close, now=None):
+    """The day of the latest NYMEX Brent (BZ=F) row dated before today's New York date when it is later than
+    TTF=F's last row `ttf_last`, else None: then Yahoo's TTF=F row for that day is late, not a holiday (both follow
+    the NYMEX trading calendar). A BZ=F row of today's New York date is not compared: after New York midnight
+    Yahoo opens it for the evening session that has just started, before TTF has traded that day."""
+    days = pd.DatetimeIndex(bz_close.dropna().index).normalize()
+    days = days[days < new_york_today(now)]
+    if len(days) and days.max() > pd.Timestamp(ttf_last).normalize():
+        return days.max()
+    return None
 
 
 def last_value_note(ticker, end_date, last_day, now=None):
-    """The sentence on the last price of `ticker`, whose last row is `last_day`. For a future: when the row can
-    still be live (futures_row_live) it says the value is the latest price, which can be the evening electronic
-    session after the settlement; otherwise ''. For the carbon ETC and other non-futures: a note on the latest
-    close, or '' when the end date is more than three days before today in Berlin (berlin_today, the date the
-    default end date uses). The Risk and Market pages both call this, so the note is written in one place."""
+    """The sentence on the last price of `ticker`, whose last row is `last_day`. For a future, by
+    futures_row_state: 'live', the value is the latest price, which can be the evening electronic session after
+    the settlement; 'unsettled', it may not yet be the settlement; 'close', ''. For the carbon ETC and other
+    non-futures: a note on the latest close, or '' when the end date is more than three days before today in
+    Berlin (berlin_today, the date the default end date uses). The Risk and Market pages both call this, so the
+    note is written in one place."""
     if ticker.endswith("=F"):
-        if not futures_row_live(last_day, now):
-            return ""
-        return (f" The last value, of {pd.Timestamp(last_day):%d %b}, is the latest price: it can be the current "
-                "session or the evening electronic session after the settlement, not the settlement, so it can "
-                "change within the hour.")
+        state = futures_row_state(last_day, now)
+        if state == 'live':
+            return (f" The last value, of {pd.Timestamp(last_day):%d %b}, is the latest price: it can be "
+                    f"{_LIVE_WHY}, so it can change within the hour.")
+        if state == 'unsettled':
+            return (f" The last value, of {pd.Timestamp(last_day):%d %b}, may not yet be the settlement: "
+                    f"{_UNSETTLED_WHY}.")
+        return ""
     if (pd.Timestamp(berlin_today()) - pd.Timestamp(end_date)).days > 3:
         return ""
     if ticker.endswith(".L"):

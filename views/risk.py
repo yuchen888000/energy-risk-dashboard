@@ -107,7 +107,7 @@ overall_corr = core['overall_corr']
 # ─── Section 1: Volatility (one summary for every page: common.vol_summary) ───
 st.subheader("Volatility")
 _vol_asof = core['vol_asof']
-_past_end = end_date < pd.Timestamp.today().date()
+_past_end = end_date < common.berlin_today()
 _vs = common.vol_summary(core, name=selected_commodity, with_roll=True, past_end=_past_end)
 # Neutral heading: no traffic-light colour, so one window cannot decide the reading on its own.
 st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
@@ -123,28 +123,32 @@ _last_px = df_analysis['Price'].dropna().index.max()
 _cmp_own = common.load_close(ctx.compare_ticker, start_date, end_date).dropna()
 _last_cmp = _cmp_own.index.max() if len(_cmp_own) else None   # its own last price, not the last day both have
 # TTF=F follows the NYMEX trading calendar, as BZ=F does: when Brent already has a price for a later day and
-# TTF=F does not, Yahoo's TTF row for that day is late, not a holiday (same check as the Power page).
+# TTF=F does not, Yahoo's TTF row for that day is late, not a holiday. Only Brent rows dated before today's New
+# York date count (common.ttf_row_late): after New York midnight Yahoo opens today's BZ=F row for the evening session.
 _ttf_late = ""
 if not _past_end:
     for _n, _t, _d in ((selected_commodity, commodity['ticker'], _last_px), (compare_label, ctx.compare_ticker, _last_cmp)):
         if _t == "TTF=F" and _d is not None:
-            _bz = common.load_close("BZ=F", (_d - pd.Timedelta(days=7)).date(), pd.Timestamp.today().date()).dropna()
-            if len(_bz) and _bz.index[-1].normalize() > _d.normalize():
+            _bz = common.load_close("BZ=F", (_d - pd.Timedelta(days=7)).date(), common.berlin_today())
+            _late_day = common.ttf_row_late(_d, _bz)
+            if _late_day is not None:
                 _ttf_late = (f" TTF figures end a day earlier than Brent: Yahoo Finance has no TTF=F price for "
-                             f"{_bz.index[-1]:%d %b} in this download, although NYMEX Brent (BZ=F, which usually "
+                             f"{_late_day:%d %b} in this download, although NYMEX Brent (BZ=F, which usually "
                              "follows the same trading calendar) has one.")
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
-           # A futures row of the last weekday before today's New York date or later can still be a live or
-           # evening-session price (common.futures_row_live, the same rule as the forward curve below).
+           # A futures row of today's New York date is a latest price, one of the weekday before may not yet be
+           # the settlement (common.futures_row_state, the same rule as the forward curve below).
            + common.last_value_note(commodity['ticker'], end_date, _last_px)
            + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
            "the series, computed together.")
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
-_corr_30 = df_analysis['Rolling Correlation'].dropna()
+# The 30-day correlation of the last day with a price (common.rolling_corr), or n/a with the reason: an older
+# figure is not shown in its place.
+_corr_now = core['latest_corr']
 _partner = ctx.compare_ticker
 
 mc1, mc2, mc3, mc4 = st.columns(4)
@@ -158,8 +162,10 @@ if len(_corr_pairs):
                help=f"Pearson correlation of daily returns, {_corr_pairs.index.min():%d %b %Y} to "
                     f"{_corr_pairs.index.max():%d %b %Y} ({len(_corr_pairs):,} common days).")
     _corr_note = f"Since {_corr_pairs.index.min():%b %Y}"
-    if len(_corr_30):
-        _corr_note += f"; last 30 days: **{_corr_30.iloc[-1]:.2f}**"
+    if _corr_now is not None:
+        _corr_note += f"; last 30 days: **{_corr_now:.2f}**"
+    else:
+        _corr_note += "; last 30 days: n/a. " + common.corr_gap_sentence(core)
     mc3.caption(_corr_note)
 else:
     mc3.metric(f"Correlation vs {_partner}", "n/a", help="No common days with returns in the selected range.")
@@ -236,10 +242,9 @@ else:
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
-        # 2-1: a row of the last weekday before today's New York date or later can be the current or the
-        # evening electronic session, which Yahoo writes on the settled day's row: a latest price, not a close.
-        _live_curve = common.futures_row_live(last_trade)
-        _px_word = "latest prices" if _live_curve else "latest closes"
+        # A row of today's New York date is a latest price; one of the weekday before may not yet be the
+        # settlement; an older one is a close (common.futures_row_state). All the wording comes from common.
+        _curve_words = common.futures_curve_words(curve['Last trade'], front['Last trade'], settled)
         # A real monthly axis: months with no contract stay empty and the line is not drawn across them.
         labels_fc = list(curve['Delivery'])
         _all_months = pd.date_range(curve['Delivery'].min(), curve['Delivery'].max(), freq='MS')
@@ -359,9 +364,7 @@ else:
             fc3.metric(f"Front − {back_label} ({back['Delivery']:%b %y})", f"{fb_spread:+.2f} {curve_unit}",
                        help=(f"Front month price of {front['Last trade']:%d %b}, {back['Delivery']:%b %y} price of "
                              f"{back['Last trade']:%d %b}: the two ends are from different days." if _mixed
-                             else (f"Latest prices of {front['Last trade']:%d %b} (the last row can be the evening "
-                                   "electronic session after the settlement, not the settlement)." if _live_curve
-                                   else f"Both closes of {front['Last trade']:%d %b}.")))
+                             else _curve_words['hover']))
             if _mixed:
                 fc3.caption(f"Front {front['Last trade']:%d %b}, back {back['Last trade']:%d %b}")
             ax_fc.scatter(labels_fc, curve['Price'], color=commodity['color'], s=30, zorder=2)
@@ -378,7 +381,7 @@ else:
                            ha='center', fontsize=7)
         ax_fc.set_ylabel(curve_unit)
         ax_fc.set_xlabel('Delivery month')
-        ax_fc.set_title(f"{selected_commodity} futures curve, {_px_word} {settled}: {curve_shape.lower()}")
+        ax_fc.set_title(f"{selected_commodity} futures curve, {_curve_words['title']}: {curve_shape.lower()}")
         plt.tight_layout()
         st.pyplot(fig_fc)
 
@@ -393,11 +396,7 @@ else:
             f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
             "days and has not passed its last trading day (exchange rule, holidays not modelled; a contract "
             "on its last trading day is shown), "
-            + (f"at its latest price: a row of {common.futures_live_from():%d %b} or later can be the current "
-               "session or the evening electronic session after the settlement, not the settlement, so the curve "
-               "can change within the hour. Prices can be from different days (see Last trade). " if _live_curve else
-               "at its latest close (for a finished day normally the settlement), so prices can be from different "
-               "days (see Last trade). ")
+            + _curve_words['caption']
             + "Contracts past their last trading day are not shown, even while Yahoo Finance still "
             "lists them; older or missing contracts are left out and nothing is interpolated. "
             f"{n_curve} of 12 contracts available."

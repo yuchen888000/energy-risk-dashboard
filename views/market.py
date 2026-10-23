@@ -1135,10 +1135,13 @@ vol_pctile = (float((np.round(ref['vol'].values, 10) < round(float(latest_vol), 
               if latest_vol is not None else None)
 vol_last = ref['vol'][ref['vol'].index >= _count_from]
 _of = f"of the {len(vol_last)} trading days to {_ref_end:%d %b %Y}"
-corr_now_s = df_analysis['Rolling Correlation'].dropna()
-corr_now = float(corr_now_s.iloc[-1]) if len(corr_now_s) else None
-has_corr = corr_now is not None and len(ref['corr']) >= 250
-if has_corr:
+# The 30-day correlation of the last day with a price (common.rolling_corr, as on the Risk page); None when its
+# window holds fewer than 20 days with both returns, and the caption then says why (common.corr_gap_sentence).
+corr_now = core['latest_corr']
+corr_gap_note = common.corr_gap_sentence(core)
+has_corr_ref = len(ref['corr']) >= 250
+has_corr = corr_now is not None and has_corr_ref
+if has_corr_ref:
     corr_lo, corr_med, corr_hi = np.percentile(ref['corr'], [VOL_LO_PCT, 50, VOL_HI_PCT])
     corr_last = ref['corr'][ref['corr'].index >= _count_from]
 IS_BRENT = commodity['ticker'] == 'BZ=F'
@@ -1258,7 +1261,11 @@ if garch is not None and garch_ref:
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(1 - g_ratio) * 100:.0f}% below the {garch_ref_name} '
                                      f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} {_g_of}.')})
 
-# 3. Correlation outside its own 3-year range.
+# 3. Correlation outside its own 3-year range. With no latest figure the row shows n/a and does not fire.
+if has_corr_ref and not has_corr:
+    n_corr = int(((corr_last > corr_hi) | (corr_last < corr_lo)).sum())
+    checks.append((f"Correlation with {compare_label}", f"30-day corr outside {corr_lo:.2f} to {corr_hi:.2f} "
+                   f"({VOL_LO_PCT}th to {VOL_HI_PCT}th pct)", "n/a", None, f"{n_corr} of {len(corr_last)}"))
 if has_corr:
     corr_out = corr_now > corr_hi or corr_now < corr_lo
     n_corr = int(((corr_last > corr_hi) | (corr_last < corr_lo)).sum())
@@ -1337,6 +1344,7 @@ st.caption(
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
     f"percentile by construction, and the count shows how much of that fell in {_count_span}.{corr_source} Latest values are "
     f"at the last trading day with a price in the selected range ({_asof:%d %b %Y})."
+    + (" " + corr_gap_note if corr_gap_note and has_corr_ref else "")
     + common.last_value_note(commodity['ticker'], end_date, _asof) + " " + garch_fit_note
     + " The Risk page fits its GARCH on the whole selected range, so its forecast can differ. The GARCH counts "
     "use the parameters fitted on the whole window for every past day. Volatility is the standard deviation "
