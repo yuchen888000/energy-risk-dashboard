@@ -112,3 +112,30 @@ def test_gap_sentence():
 def test_day_ranges(days, text):
     index = pd.bdate_range("2026-01-01", "2026-12-31")
     assert common._day_ranges(pd.DatetimeIndex(days), index) == text
+
+
+def _reference(compare_stale_from=None, n=900):
+    """three_year_reference on synthetic series; the comparison series goes stale from row `compare_stale_from`."""
+    idx = pd.bdate_range("2017-11-20", periods=n)
+    close, compare = _walk(idx, 11), _walk(idx, 12)
+    if compare_stale_from is not None:
+        compare.iloc[compare_stale_from:] = compare.iloc[compare_stale_from - 1]
+        compare = compare.mask(common._stale_mask(compare))
+    fallback = pd.DataFrame({'Volatility': common.rolling_vol(close), 'Rolling Correlation': np.nan,
+                             'Returns': common.simple_returns(close)})
+    return common.three_year_reference(close, compare, fallback)
+
+
+def test_correlation_window_named_when_it_ends_earlier():
+    # Like TTF to 30 Jun 2020: the comparison series goes stale 14 rows before the end, so the correlation
+    # values stop earlier and are fewer than the volatility values; both windows are under 3 years.
+    ref = _reference(compare_stale_from=900 - 14, n=900)
+    assert not ref['corr_long'] and not ref['long']
+    assert ref['corr_end'] < ref['vol'].index[-1]
+    assert ref['corr_own']
+
+
+def test_correlation_window_not_named_when_it_is_the_volatility_window():
+    ref = _reference(n=900)
+    assert ref['corr_start'] == ref['start'] and ref['corr_end'] == ref['vol'].index[-1]
+    assert len(ref['corr']) == ref['n'] and not ref['corr_own']

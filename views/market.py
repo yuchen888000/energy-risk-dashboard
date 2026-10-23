@@ -1096,17 +1096,19 @@ else:
     ref_source = (f"{ref['start']:%d %b %Y} to {_ref_end:%d %b %Y}, {_ref_days}: the 3 years up to "
                   "the last day of the selected range")
     ref_name = f"the 3 years to {_ref_end:%d %b %Y}"
-# The correlation needs both series, so a gap in the comparison series pushes its window back too
-# (Brent to 30 Jun 2022: from 14 Mar 2018, across CARB.L's suspension). Named separately only then.
+# The correlation needs both series, so a gap in the comparison series moves its window too (Brent to
+# 30 Jun 2022: from 14 Mar 2018, across CARB.L's suspension; TTF to 30 Jun 2020: 605 values from 09 Jan 2018 to
+# 24 Jun 2020, the last day whose 30 rows still hold 20 pairs after CARB.L went stale on 11 Jun). Named separately
+# whenever its first day, last day or number of values differs from the volatility window's (three_year_reference's
+# corr_own), in one phrase used everywhere. A day with a 30-day correlation need not have both returns itself.
 corr_short, corr_name, corr_source = ref_short, ref_name, ""
-if ref['corr_long'] and not ref['fallback'] and ref['corr_start'] != ref['start']:
+if ref['corr_own']:
     _cn = len(ref['corr'])
     corr_short = f"{_cn}-day"
-    corr_name = (f"the {_cn} trading days with a 30-day correlation from {ref['corr_start']:%d %b %Y} to "
-                 f"{ref['corr_end']:%d %b %Y}" + long_window_note(ref['corr_stale']))
-    corr_source = (f" The correlation check uses its own window: {ref['corr_start']:%d %b %Y} to "
-                   f"{ref['corr_end']:%d %b %Y}, {_cn} trading days with a 30-day correlation"
-                   + long_window_note(ref['corr_stale']) + ".")
+    corr_name = (f"the {_cn} days with a 30-day correlation, {ref['corr_start']:%d %b %Y} to "
+                 f"{ref['corr_end']:%d %b %Y}"
+                 + (long_window_note(ref['corr_stale']) if ref['corr_long'] else ""))
+    corr_source = f" The correlation check uses its own window: {corr_name}."
 
 
 def garch_fit_sentence():
@@ -1171,8 +1173,8 @@ if commodity['ticker'] == 'TTF=F' and len(tail_days):
     ttf_flagged = [d for d in tail_days.index if d in _exp]
 
 if IS_BRENT:
-    roll_note = (" Brent roll days (the first trading day of each month and the last trading day of "
-                 "December, when the ICE front contract expires and the continuous series switches "
+    roll_note = (" Brent roll days (the first trading day of each month except January and the last trading "
+                 "day of December, when the ICE front contract expires and the continuous series switches "
                  f"contract) are excluded from the daily-loss check and its {ref_short} VaR99.")
 elif commodity['ticker'] == 'TTF=F':
     roll_note = (" TTF expiry days are not removed: a flagged day on or just after a front-month expiry "
@@ -1339,6 +1341,15 @@ else:
     st.info(f"None of the {len(checks)} checks fires on the latest data. They cover only volatility, the GARCH "
             "forecast, one correlation and daily losses; they say nothing about supply, storage, positions or news.")
 
+# What the volatility line above the table compares the latest figure with: the pre-war level only when it gives a
+# pre-war multiple (none for an end date before the reference quarter is complete), nothing when it has no figure.
+if _vs['ctx'] is None:
+    _vs_against = ""
+elif _vs['ctx']['prewar_ratio'] is None:
+    _vs_against = "; the volatility line above the table places it against the whole history instead"
+else:
+    _vs_against = ("; the volatility line above the table places it against the pre-war level and the whole "
+                   "history instead")
 st.caption(
     f"Reference window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
@@ -1349,8 +1360,7 @@ st.caption(
     + " The Risk page fits its GARCH on the whole selected range, so its forecast can differ. The GARCH counts "
     "use the parameters fitted on the whole window for every past day. Volatility is the standard deviation "
     "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether the "
-    f"latest day is unusual for the {ref3y_span} before it; the volatility line above the table places it against the "
-    "pre-war level and the whole history instead. " + _vs['detail']
+    f"latest day is unusual for the {ref3y_span} before it" + _vs_against + ". " + _vs['detail']
     + (" " + _vs['roll'] if _vs['roll'] else "") + roll_note + corr_close_note)
 
 
@@ -1415,23 +1425,26 @@ def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, 
 # above (or falls below) a level it is already above (below) is dropped. Deterministic rules:
 # 1. "ann." is written out as "annualised" first, so the abbreviation the page itself uses
 #    ("51% ann. (3.19% daily)") does not end a sentence; then the text is split into sentences;
-# 2. only sentences with a forward-looking cue (watch, monitor, whether, if, would, could, next,
-#    coming, following, ahead) are tested;
+# 2. only sentences with a forward-looking cue (watch, monitor, whether, if, should, would, could, next,
+#    coming, following, ahead) are tested ("Should volatility rise above ..." included);
 # 3. for every crossing verb (pushes, breaks, crosses, rises, climbs, moves, returns, jumps, exceeds, tops,
 #    surpasses, falls, drops, slips, dips, sinks, eases, retreats, declines) the numbers in the next 80 characters are
 #    read: the first one, and the next one if it follows in brackets (the other scale of the same
-#    level), with a minus sign directly before it, also at the end of a sentence ("above -0.21.").
+#    level), with a minus sign directly before it (hyphen, U+2212 or U+2013), also at the end of a sentence
+#    ("above -0.21.").
 #    A percentage (with or without decimals) is a volatility, annualised if
 #    "annualised" (or "annualized", "annual") follows it and daily if "daily" follows it, either if
 #    neither does; a decimal number without "%" is a correlation. The move is downward if "below",
 #    "under", "down", "lower" or a falling verb appears between the verb and the first number,
 #    otherwise upward;
-# 4. the subject is the first of GARCH/forecast, correlation or volatility named between the cue and
-#    the verb (if none, every subject is tried);
+# 4. the subject is the one of GARCH/forecast, correlation or volatility named nearest before the verb, after
+#    the cue ("whether the correlation stays near 0.39 while volatility rises above ..." is about volatility;
+#    "the GARCH forecast of volatility" is the forecast); if none, every subject is tried;
 # 5. a number matches a level when it equals the level rounded to the same decimals, an annualised
 #    number against the level x sqrt(252); the sentence is dropped if the current value is already
 #    above that level for an upward move, or already below it for a downward move.
-_FORWARD_CUE = re.compile(r"\b(?:watch\w*|monitor\w*|whether|if|would|could|next|coming|following|ahead)\b", re.I)
+_FORWARD_CUE = re.compile(r"\b(?:watch\w*|monitor\w*|whether|if|should|would|could|next|coming|following|ahead)\b",
+                          re.I)
 # Upward verbs: push, break ("breaks above"), cross, climb, rise, move, return, jump, spike, exceed, top ("tops";
 # not the bare noun "top"), surpass. Downward verbs (also in _DOWNWARD): fall ("falls through"), drop ("drops
 # below"), slip, dip, sink, ease, retreat, decline.
@@ -1444,20 +1457,27 @@ _DOWNWARD = re.compile(
     r"\b(?:below|under|beneath|down|lower|fall(?:s|ing)?|drop(?:s|ping)?|slip(?:s|ping)?|dip(?:s|ping)?"
     r"|sink(?:s|ing)?|eas(?:e|es|ing)|retreat(?:s|ing)?|declin(?:e|es|ing))\b", re.I)
 # A number: a percentage (integer or decimal) or a decimal; bare integers ("ten days", "10 days") are not levels.
-# A minus sign (hyphen or U+2212) directly before it is read, unless a letter or digit precedes the sign ("2021-22").
+# A minus sign (hyphen, U+2212 or U+2013, which a model may write for minus) directly before it is read, unless a
+# letter or digit precedes the sign ("2021-22").
 # The number may end a sentence: a full stop after it counts as a decimal point only when a digit follows.
-_NUMBER = re.compile(r"(?:(?<![\w.])([-\u2212])|(?<![\d.]))(\d+)(?:\.(\d+))?(?!\d)(?!\.\d)(\s*%)?")
+_NUMBER = re.compile(r"(?:(?<![\w.])([-\u2212\u2013])|(?<![\d.]))(\d+)(?:\.(\d+))?(?!\d)(?!\.\d)(\s*%)?")
 _ANN_ABBR = re.compile(r"\bann\.", re.I)
 _ANNUAL_AFTER = re.compile(r"\s*(?:annuali[sz]ed|annual)\b", re.I)
 _DAILY_AFTER = re.compile(r"\s*daily\b", re.I)
-_SUBJECTS = [('garch', re.compile(r"\b(?:GARCH|forecast)\b", re.I)),
+# "GARCH volatility" and "forecast of volatility" are the forecast: the GARCH pattern takes the word volatility
+# that follows it, so that word is not read as a second subject.
+_SUBJECTS = [('garch', re.compile(r"\b(?:GARCH|forecast)(?:\s+(?:of\s+)?(?:volatility|vol)\b)?\b", re.I)),
              ('corr', re.compile(r"\bcorrelation\b", re.I)),
              ('vol', re.compile(r"\b(?:volatility|vol)\b", re.I))]
 
 
 def _subject(text):
-    found = [(m.start(), name) for name, p in _SUBJECTS for m in [p.search(text)] if m]
-    return min(found)[1] if found else None
+    """The subject named last in `text` (the text before the verb, so the one nearest the verb), or None."""
+    found = [(m.start(), m.end(), name) for name, p in _SUBJECTS for m in p.finditer(text)]
+    garch = [(a, b) for a, b, name in found if name == 'garch']
+    found = [(a, name) for a, b, name in found
+             if name == 'garch' or not any(ga <= a and b <= gb for ga, gb in garch)]
+    return max(found)[1] if found else None
 
 
 def _numbers(window, start):

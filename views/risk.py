@@ -138,8 +138,8 @@ if not _past_end:
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
-           # A futures row of today's New York date is a latest price, one of the weekday before may not yet be
-           # the settlement (common.futures_row_state, the same rule as the forward curve below).
+           # A futures row of today's New York date is a latest price, one of the day before (Monday to Thursday)
+           # may not yet be the settlement (common.futures_row_state, the same rule as the forward curve below).
            + common.last_value_note(commodity['ticker'], end_date, _last_px)
            + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
            "the series, computed together.")
@@ -242,8 +242,9 @@ else:
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
-        # A row of today's New York date is a latest price; one of the weekday before may not yet be the
-        # settlement; an older one is a close (common.futures_row_state). All the wording comes from common.
+        # A row of today's New York date is a latest price; one of the day before (Monday to Thursday) may not
+        # yet be the settlement; an older one is a close (common.futures_row_state). All the wording comes from
+        # common.
         _curve_words = common.futures_curve_words(curve['Last trade'], front['Last trade'], settled)
         # A real monthly axis: months with no contract stay empty and the line is not drawn across them.
         labels_fc = list(curve['Delivery'])

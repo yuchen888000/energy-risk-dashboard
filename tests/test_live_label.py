@@ -1,6 +1,7 @@
 """Offline test of the three wordings of a futures row (common.futures_row_state): 'live' (a row of today's New
-York date: the latest price, not the settlement), 'unsettled' (a row of the last weekday before it: may not yet be
-the settlement) and 'close' (older). Used by the Risk page's forward curve (common.futures_curve_words), its "Data
+York date: the latest price, not the settlement), 'unsettled' (a row of the day before it, when that day is Monday
+to Thursday: may not yet be the settlement) and 'close' (older, or a Friday row from Saturday on: CME Globex trades
+from Sunday to Friday, 18:00 to 17:00 ET the next day, so nothing trades from Friday 17:00 to Sunday 18:00). Used by the Risk page's forward curve (common.futures_curve_words), its "Data
 up to" line and common.last_value_note (Risk and Market pages); also the check that TTF=F's last row is late
 against NYMEX Brent (common.ttf_row_late).
 
@@ -43,12 +44,34 @@ def ny(text):
     (ny("2026-10-23 03:00"), OCT22, 'unsettled'),
     (ny("2026-10-23 03:00"), OCT23, 'live'),
     (ny("2026-10-23 03:00"), OCT21, 'close'),
-    # Sunday 25 Oct: Friday's row is the last weekday before today; Thursday's is a close.
-    (ny("2026-10-25 12:00"), OCT23, 'unsettled'),
+    # Round 4 of 2026-10-23: a Friday row. Friday 17:30 New York: the evening session of Friday is over at 17:00
+    # and the row is of today's date, so it is still the latest price.
+    (ny("2026-10-23 17:30"), OCT23, 'live'),
+    # From Saturday on Friday's row is a close: no session from Friday 17:00 to Sunday 18:00.
+    (ny("2026-10-24 00:30"), OCT23, 'close'),
+    (ny("2026-10-24 12:00"), OCT23, 'close'),
+    (ny("2026-10-25 12:00"), OCT23, 'close'),
     (ny("2026-10-25 12:00"), OCT22, 'close'),
-    # Monday 26 Oct 03:00: Friday's row still is the last weekday before today.
-    (ny("2026-10-26 03:00"), OCT23, 'unsettled'),
+    # Sunday 19:00: the evening session has opened. Friday's row is still a close; a new row of Sunday's or
+    # Monday's date is the latest price (the existing rule: today's New York date or later).
+    (ny("2026-10-25 19:00"), OCT23, 'close'),
+    (ny("2026-10-25 19:00"), pd.Timestamp("2026-10-25"), 'live'),
+    (ny("2026-10-25 19:00"), pd.Timestamp("2026-10-26"), 'live'),
+    # Monday 01:00 and 15:00: Friday's row is a close, Monday's row the latest price.
+    (ny("2026-10-26 01:00"), OCT23, 'close'),
+    (ny("2026-10-26 01:00"), pd.Timestamp("2026-10-26"), 'live'),
+    (ny("2026-10-26 15:00"), OCT23, 'close'),
+    (ny("2026-10-26 15:00"), pd.Timestamp("2026-10-26"), 'live'),
+    # Tuesday 03:00: Monday's row is of the day before, Monday to Thursday, so it may not yet be the settlement.
+    (ny("2026-10-27 03:00"), pd.Timestamp("2026-10-26"), 'unsettled'),
     (ny("2026-10-27 03:00"), OCT23, 'close'),
+    # US Thanksgiving, Thu 26 Nov 2026 (holidays are not modelled): before it, Wednesday's row on Thursday is of
+    # the day before; after it, on Friday, Wednesday's row is a close and a Thursday row, if Yahoo writes one, is
+    # of the day before; on Saturday Friday's row is a close.
+    (ny("2026-11-26 03:00"), pd.Timestamp("2026-11-25"), 'unsettled'),
+    (ny("2026-11-27 12:00"), pd.Timestamp("2026-11-25"), 'close'),
+    (ny("2026-11-27 12:00"), pd.Timestamp("2026-11-26"), 'unsettled'),
+    (ny("2026-11-28 12:00"), pd.Timestamp("2026-11-27"), 'close'),
     # A past end date.
     (ny("2026-10-23 03:00"), pd.Timestamp("2020-12-31"), 'close'),
 ])
@@ -59,7 +82,11 @@ def test_futures_row_state(now, row, state):
 def test_threshold_dates():
     assert common.futures_live_from(ny("2026-10-22 15:00")) == OCT21
     assert common.futures_live_from(ny("2026-10-23 00:30")) == OCT22
-    assert common.futures_live_from(ny("2026-10-25 12:00")) == OCT23
+    # Saturday to Monday nothing is of the day before: the threshold is today's New York date.
+    assert common.futures_live_from(ny("2026-10-24 12:00")) == pd.Timestamp("2026-10-24")
+    assert common.futures_live_from(ny("2026-10-25 12:00")) == pd.Timestamp("2026-10-25")
+    assert common.futures_live_from(ny("2026-10-26 01:00")) == pd.Timestamp("2026-10-26")
+    assert common.futures_live_from(ny("2026-10-27 01:00")) == pd.Timestamp("2026-10-26")
     assert common.new_york_today(pd.Timestamp("2026-10-23 03:17")) == OCT22
 
 
@@ -78,6 +105,24 @@ UNSETTLED = (" The last value, of 22 Oct, may not yet be the settlement: Yahoo F
 ])
 def test_note(now, note):
     assert common.last_value_note("CL=F", OCT22.date(), OCT22, now) == note
+
+
+@pytest.mark.parametrize("now, note", [
+    (ny("2026-10-23 17:30"), LIVE.replace("22 Oct", "23 Oct")),
+    (ny("2026-10-24 12:00"), ""),
+    (ny("2026-10-25 12:00"), ""),
+    (ny("2026-10-25 19:00"), ""),
+    (ny("2026-10-26 01:00"), ""),
+    (ny("2026-10-26 15:00"), ""),
+])
+def test_note_friday_row(now, note):
+    assert common.last_value_note("CL=F", OCT23.date(), OCT23, now) == note
+
+
+def test_curve_words_friday_row_on_sunday():
+    w = _curve(ny("2026-10-25 12:00"), ["2026-10-23"] * 3)
+    assert w['state'] == 'close' and w['title'] == "latest closes 22 Oct 2026"
+    assert w['hover'] == "Both closes of 23 Oct."
 
 
 def test_note_unsettled_says_neither_way():

@@ -239,8 +239,8 @@ _trade_day = pd.Timestamp(np.busday_offset(day.date(), -1, roll="backward"))
 def _gas_late(ttf_day, trade_day, bz_close, now=None):
     """(day, recent): the latest day up to `trade_day` on which NYMEX Brent has a price and TTF=F, whose last price
     before the delivery day is of `ttf_day`, does not (common.ttf_row_late, the Risk page's rule), else None; and
-    whether that price can still arrive, i.e. the day is the last weekday before today's New York date
-    (common.futures_live_from). For an older day the missing price will not come."""
+    whether that price can still arrive, i.e. the day is the day before today's New York date, Monday to Thursday
+    (common.futures_live_from). For an older day, or a Friday from Saturday on, the missing price will not come."""
     trade_day = pd.Timestamp(trade_day).normalize()
     if pd.Timestamp(ttf_day).normalize() >= trade_day:
         return None, False
@@ -292,8 +292,8 @@ def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=Fal
 
 
 # How a TTF price is labelled by its row's date in New York (common.futures_row_state, the Risk page's rule):
-# today's New York date or later is the latest price, the weekday before may not yet be the settlement, older
-# rows are closes. The headline, the CSV column and the gas-purchase label all use these words.
+# today's New York date or later is the latest price, the day before (Monday to Thursday) may not yet be the
+# settlement, older rows and Friday's from Saturday on are closes. The headline, the CSV column and the gas-purchase label all use these words.
 _PRICE_TYPE = {"live": "latest price, not the settlement", "unsettled": "may not yet be the settlement",
                "close": "close"}
 
@@ -506,8 +506,9 @@ st.download_button("Download CSV", data=export.to_csv(index=False), file_name="c
                    help=f"Daily data behind the page ({len(export):,} delivery business days), including the dates "
                         "of the TTF price and EUA auction used for each day, so every figure can be recomputed. "
                         "The TTF price type follows the row's date in New York: a price of today's New York date is "
-                        "the latest price, not the settlement; one of the weekday before may not yet be the "
-                        f"settlement ({common._UNSETTLED_WHY}); older ones are closes.")
+                        "the latest price, not the settlement; one of the day before, Monday to Thursday, may not yet "
+                        f"be the settlement ({common._UNSETTLED_WHY}); older ones, and Friday's from Saturday on, "
+                        "are closes.")
 
 # ─── Risk: day-on-day changes ───
 st.subheader("Spread Risk")

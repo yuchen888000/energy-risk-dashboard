@@ -58,6 +58,16 @@ MUST_DROP = [
     ("Watch whether the correlation breaks above 0.30 in the coming days.", LEVELS),
     ("Watch whether the correlation drops below -0.43 over the next ten days.", LEVELS_CORR_LOW),
     ("Watch whether the correlation with carbon falls through -0.21.", LEVELS_WTI_1114),
+    # round 4 of 2026-10-23: "should" is a forward-looking cue
+    ("Should volatility rise above 28% annualised, the calm reading ends.", LEVELS),
+    ("Should the correlation climb above 0.30, the two markets move more closely together.", LEVELS),
+    # the subject is the one nearest the verb, not the first one named
+    ("Watch whether the correlation with Brent stays near 0.39 while volatility rises above 28% annualised.",
+     LEVELS),
+    ("Watch whether volatility stays near 51% annualised while the correlation rises above 0.30.", LEVELS),
+    # a minus sign written as U+2013 (an en dash) is read as a minus sign
+    ("Watch whether the correlation rises above \u20130.43 in the next ten days.", LEVELS),
+    ("Watch whether the correlation with carbon falls below \u20130.21.", LEVELS_WTI_1114),
 ]
 # The correlation above the top of its range.
 LEVELS_CORR_HIGH = [("corr", 0.79, 0.85), ("corr", -0.43, 0.85)]
@@ -85,6 +95,16 @@ MUST_KEEP = [
     ("Watch whether the correlation, now above the top of its range of 0.79, falls back.", LEVELS_CORR_HIGH),
     # a year range is not a negative number
     ("Watch whether volatility, low against the 2021-22 crisis, stays below 103% annualised.", LEVELS),
+    # round 4 of 2026-10-23: the same three rules where the move is still to come
+    ("Should volatility rise above 103% annualised (6.49% daily), the spike check fires.", LEVELS),
+    ("Should volatility fall back below 28% annualised, the calm check fires.", LEVELS),
+    ("Watch whether volatility stays near 51% annualised while the correlation rises above 0.79.", LEVELS),
+    # nearest subject: the GARCH forecast of volatility is the forecast, whose 4.54% daily level is not reached
+    ("Watch whether the GARCH forecast of volatility rises above 4.54% daily.", LEVELS),
+    ("Watch whether the correlation rises above \u20130.43 in the next ten days.", LEVELS_CORR_LOW),
+    ("Watch whether the correlation falls below \u20130.43 in the next ten days.", LEVELS),
+    # an en dash between two years or two numbers is not a minus sign
+    ("Watch whether volatility, low against the 2021\u201322 crisis, stays below 103% annualised.", LEVELS),
 ]
 
 
@@ -107,3 +127,16 @@ def test_whole_text_drops_only_the_crossed_sentence():
     assert dropped == ["Watch whether the correlation rises above 0.30."]
     assert kept.startswith("Volatility is 51% annualised (3.19% daily), close to the 3-year average.")
     assert kept.endswith("lower than today.")
+
+
+def test_en_dash_minus_reads_as_negative():
+    # The en dash case the audit found: read as +0.43 it would not match the level -0.43.
+    kept, dropped = drop("Watch whether the correlation rises above \u20130.43.", LEVELS)
+    assert kept == "" and len(dropped) == 1
+
+
+def test_nearest_subject_over_first_named():
+    s = "Watch whether the correlation with Brent stays near 0.39 while volatility rises above 28% annualised."
+    assert _post["_subject"](s[:s.index("rises")]) == "vol"
+    assert _post["_subject"]("Watch whether the GARCH forecast of volatility ") == "garch"
+    assert _post["_subject"]("Watch whether the correlation ") == "corr"

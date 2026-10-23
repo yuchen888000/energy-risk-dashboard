@@ -126,3 +126,19 @@ def test_check_window_short_history_and_days_without_volatility():
     # days after the gap with no 30-day volatility are days with a price but not volatility values
     assert ref['rows'] > ref['n']
     assert ref['vol'].index.isin(ref['days']).all()
+
+
+@pytest.mark.parametrize("past_end, today, whose", [
+    # the last 30-day volatility is of 22 Oct and today is 23 Oct (TTF and carbon most mornings): dated
+    (False, "2026-10-23", "The percentile ranks the latest figure (22 Oct) among"),
+    # the last figure is of today
+    (False, "2026-10-22", "The percentile ranks today's figure among"),
+    # a past end date: the span already names the date
+    (True, "2026-10-23", "The percentile ranks the latest figure among"),
+])
+def test_percentile_sentence_names_whose_figure(past_end, today, whose):
+    close = _series(n_after=40, start="2018-01-01")
+    core = _core(close, 2.5, ticker="TTF=F")
+    core.update(vol_asof=pd.Timestamp("2026-10-22"), vol_ctx=_ctx("2026-10-22", 1.85, True))
+    vs = common.vol_summary(core, name="TTF", past_end=past_end, today=pd.Timestamp(today))
+    assert whose in vs['detail'] and whose in vs['ai']

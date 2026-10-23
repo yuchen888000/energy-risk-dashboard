@@ -597,7 +597,9 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     the volatility window spans more than 3 years and 30 days, and `stale` then lists the stale runs inside it
     ((ticker, first, last), from the argument `stale`, (ticker, stale mask of `price`)); `corr_start`,
     `corr_end`, `corr_long` and `corr_stale` say the same of the correlation window, which also loses the stale
-    days of the comparison series (`compare_stale`).
+    days of the comparison series (`compare_stale`). `corr_own` is True when the correlation window's first day,
+    last day or number of values differs from the volatility window's (its values, not its rows), so the page
+    names it separately.
     """
     df = pd.DataFrame({'Price': price, 'R': simple_returns(price), 'V': rolling_vol(price),
                        'C': rolling_corr(price, compare)}).dropna(subset=['Price'])
@@ -616,7 +618,8 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     out = dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=days[-1], n=len(vol),
                mean=float(vol.mean()), std=float(vol.std()), fallback=used_fallback,
                rows=len(days), days=days, short=(not used_fallback and len(vol) < CHECK_WINDOW),
-               long=False, stale=[], corr_start=None, corr_end=None, corr_long=False, corr_stale=[])
+               long=False, stale=[], corr_start=None, corr_end=None, corr_long=False, corr_stale=[],
+               corr_own=False)
     if not used_fallback:
         out.update(long=_long_span(out['start'], out['end']))
         if out['long']:
@@ -624,6 +627,11 @@ def three_year_reference(price, compare, fallback, stale=None, compare_stale=Non
     if len(corr):
         out.update(corr_start=corr.index[0], corr_end=corr.index[-1])
         if not used_fallback:
+            # The correlation window is named on its own whenever its first day, last day or number of values
+            # differs from the volatility window's (TTF to 30 Jun 2020: 605 values from 09 Jan 2018 to 24 Jun 2020,
+            # after CARB.L went stale on 11 Jun, against 656 volatility values from 20 Nov 2017 to 30 Jun 2020).
+            out['corr_own'] = (corr.index[0] != vol.index[0] or corr.index[-1] != vol.index[-1]
+                               or len(corr) != len(vol))
             out['corr_long'] = _long_span(corr.index[0], corr.index[-1])
             if out['corr_long']:
                 out['corr_stale'] = _stale_runs([stale, compare_stale], corr.index[0], corr.index[-1])
@@ -862,7 +870,7 @@ def corr_gap_sentence(core):
 _STRIKES = pd.Timestamp("2026-02-28")
 
 
-def vol_summary(core, name=None, with_roll=False, past_end=False):
+def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     """The single source of every volatility statement on the Risk and Market pages and in the AI input.
 
     Everything comes from `core` (compute_core): the latest 30-day volatility, its multiple of the pre-war
@@ -878,7 +886,9 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
     the strikes of 28 Feb 2026 it names neither the strikes nor a war (the reference quarter is "the Oct to Dec
     2025 level"), and when the quarter is not complete by then it leaves the quarter out altogether. The page
     keeps its own wording ("no pre-war reference"). `prewar_ai` is the reference's name for the prompt ('' when
-    there is none)."""
+    there is none). `today` (default berlin_today(), the date the default end date uses) only decides whether the
+    latest figure is today's: when the last 30-day volatility is of an earlier day (TTF and carbon most mornings),
+    the percentile sentence names its date."""
     as_of = pd.Timestamp(core['vol_asof'])
     ctx = core['vol_ctx']
     window_returns = core['vol_window']
@@ -939,7 +949,11 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
         events.append(f"the 2021-22 crisis up to {as_of:%b %Y}")
     if as_of >= _WAR_START:
         events.append("the 2026 war")
-    whose = "the latest figure" if past_end else "today's figure"
+    # Whose figure the percentile ranks: with a past end date the span already names the date; otherwise the
+    # latest figure is today's only when it is of today's date.
+    today = pd.Timestamp(berlin_today() if today is None else today).normalize()
+    whose = ("the latest figure" if past_end else
+             f"the latest figure ({as_of:%d %b})" if as_of.normalize() < today else "today's figure")
     listed = (", ".join(events[:-1]) + " and " + events[-1]) if len(events) > 1 else "".join(events)
     ranks = (f"The percentile ranks {whose} among every 30-day volatility {span}"
              + (f", a history that includes {listed}" if events else "")
@@ -966,22 +980,30 @@ def new_york_today(now=None):
 
 def futures_live_from(now=None):
     """The earliest row date of a NYMEX future (TTF=F, CL=F, BZ=F and their monthly contracts) that is not yet
-    treated as a close: the last weekday before today's New York date (futures_row_state)."""
-    return pd.Timestamp(np.busday_offset(new_york_today(now).date(), -1, roll='forward'))
+    treated as a close (futures_row_state): the day before today's New York date when that day is Monday to
+    Thursday, else today's New York date itself. A Friday row is a close from Saturday: CME Globex trades these
+    contracts from Sunday to Friday, 18:00 to 17:00 ET the next day, so nothing trades from Friday 17:00 to
+    Sunday 18:00 and no evening session is written into Friday's row after Friday ends in New York."""
+    today = new_york_today(now)
+    before = today - pd.Timedelta(days=1)
+    return before if before.dayofweek <= 3 else today
 
 
 def futures_row_state(day, now=None):
     """What a futures row dated `day` holds, by today's New York date (new_york_today):
     'live'      the row is of today's New York date or later: the current session or, after the settlement, the
                 evening electronic session, not the settlement.
-    'unsettled' the row is of the last weekday before today's New York date (futures_live_from): it may not yet be
-                the settlement. Yahoo Finance writes the evening session into the day's row until New York midnight
+    'unsettled' the row is of the day before today's New York date and that day is Monday to Thursday
+                (futures_live_from): it may not yet be the settlement. Yahoo Finance writes the evening session into the day's row until New York midnight
                 and can rewrite it afterwards (at 03:17 UTC on 23 October 2026, 23:17 on 22 October in New York, the
                 22 October rows of the December WTI and Brent contracts were 100.14 and 113.81 against settlements
                 of 99.47 and 113.17, reported by The Nation (Thailand) on 23 October 2026; after New York midnight
                 Yahoo showed 99.47 and 113.17 and opened 23 October rows for the evening session, but that was seen
                 on three downloads only, so the page does not say either way).
-    'close'     an older row: a full New York day has passed after it.
+    'close'     an older row: a full New York day has passed after it, or it is of a Friday and today's New York
+                date is Saturday or later (CME Globex: Sunday to Friday, 18:00 to 17:00 ET the next day, so there
+                is no session from Friday 17:00 to Sunday 18:00; a new row opened by the Sunday evening session is
+                of today's New York date or later and so is 'live').
     The Risk page's forward curve, its "Data up to" line and last_value_note all use this, so the label is
     decided in one place."""
     d = pd.Timestamp(day).normalize()
