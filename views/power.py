@@ -15,7 +15,8 @@ import power_data
 
 # Efficiencies on a higher heating value (HHV) basis, as S&P Global Platts publishes its German
 # clean spark spreads: 45% and 50% for all locations, plus 60% for the UK, Germany and Italy
-# (Platts European Electricity specifications, June 2026, p.14). 50% is the central case.
+# (Platts European Electricity specifications: June 2026 edition p.14, October 2026 edition p.15, same text).
+# 50% is the central case.
 EFFICIENCY = 0.50
 EFFICIENCIES = (0.45, 0.50, 0.60)
 # Emission intensity of natural gas on the same HHV basis as TTF prices, which are quoted per MWh
@@ -50,11 +51,13 @@ with st.sidebar.expander("Methodology: Power page"):
     - **Carbon**: EUA primary-auction clearing price from EEX, €/tCO2.
     - **Timing**: a day's power is sold in the day-ahead auction held at 12:00 the day before
       delivery, every day of the year (Monday's power on Sunday). Gas and carbon do not trade at
-      weekends, so each delivery day is matched with the last TTF close and EUA auction on a
-      weekday **before** it: Friday's prices for Monday. For Tuesday to Friday that is the
-      auction day itself: the EUA auction result comes out at about 11:00, before the power
-      auction, but the TTF close comes after it, so the gas price is the day's close, not the
-      price a bidder saw at 12:00.
+      weekends, so each delivery day is matched with the last TTF close on a weekday **before**
+      it (Friday's for Monday) and the last EUA auction before it. For Tuesday to Friday the gas
+      price is the close of the power-auction day itself, which comes after the 12:00 auction, so
+      it is not the price a bidder saw at 12:00. EEX does not hold an EUA auction on every weekday
+      (in 2026, for example, Wednesdays have one only every other week), so carbon is from the
+      power-auction day when that day has an auction (result at about 11:00, before the power
+      auction) and otherwise from the last auction before it; the headline says which.
     - **Clean spark spread** = power − gas / efficiency − ({GAS_EF:.5f} / efficiency) × EUA,
       efficiencies 45%, 50% and 60% (HHV), as S&P Global Platts publishes for Germany. A gross
       margin per MWh before start-up, other variable and fixed costs.
@@ -247,13 +250,34 @@ else:
     _lag_txt = (f" **Gas is from an earlier day than that:** Yahoo Finance's `TTF=F` has no price for "
                 f"{_trade_day:%a %d %b %Y}, although NYMEX Brent (`BZ=F`, normally the same trading days) has one, "
                 f"so the previous close ({latest['TTF date']:%a %d %b}) is used.")
+# EEX does not auction EUAs on every weekday, and TTF=F has no price on NYMEX holidays. When a price is not from the
+# last weekday before the delivery day, say so and name the weekdays without one (from the data).
+def _days_txt(first_after, last):
+    d = pd.bdate_range(first_after.normalize() + pd.Timedelta(days=1), last)
+    return (f"{d[0]:%a %d %b}" if len(d) == 1 else f"{d[0]:%a %d %b} or {d[1]:%a %d %b}" if len(d) == 2 else
+            f"any weekday from {d[0]:%a %d %b} to {d[-1]:%a %d %b}")
+
+
+_eua_day, _ttf_day = latest["EUA date"].normalize(), latest["TTF date"].normalize()
+_why_gas = ("Monday's power is auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday the gas price is "
+            "from the day of the 12:00 power auction itself, and the TTF close comes after the auction, so it is not "
+            "the price a bidder saw at 12:00.")
+if _eua_day >= _trade_day:
+    _from_txt = (f"Both are taken from the last weekday before this delivery day, {_trade_day:%a %d %b}. Monday's "
+                 "power is auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday it is the day of the "
+                 "12:00 power auction itself, when the EUA auction result (about 11:00) is already out but the TTF "
+                 "close comes later, so the gas price is not the one a bidder saw at 12:00.")
+elif _eua_day < _ttf_day:
+    _from_txt = (f"Gas is taken from the last weekday before this delivery day, {_trade_day:%a %d %b}, and carbon "
+                 f"from the last auction before it (no auction on {_days_txt(_eua_day, _trade_day)}). " + _why_gas)
+else:
+    # Carbon not from the trade day and gas not newer than carbon: neither is from the last weekday before delivery.
+    _from_txt = (f"Neither is from the last weekday before this delivery day, {_trade_day:%a %d %b}: this page's data "
+                 f"has no EUA auction on {_days_txt(_eua_day, _trade_day)} and no TTF close on "
+                 f"{_days_txt(_ttf_day, _trade_day)}, so the last earlier ones are used. " + _why_gas)
 st.caption(f"Gas: {_hl_contract}, {'latest price' if _is_today else 'close'} of {latest['TTF date']:%a %d %b} "
            f"({latest['TTF']:.2f} €/MWh); not day-ahead gas, see Caveats. Carbon: EEX auction of "
-           f"{latest['EUA date']:%a %d %b} ({latest['EUA']:.2f} €/t). Both are taken from the last weekday before "
-           f"this delivery day, {_trade_day:%a %d %b}. Monday's power is auctioned on Sunday, so Friday's prices are "
-           "used; for Tuesday to Friday it is the day of the 12:00 power auction itself, when the EUA auction result "
-           "(about 11:00) is already out but the TTF close comes later, so the gas price is not the one a bidder saw "
-           "at 12:00." + _lag_txt)
+           f"{latest['EUA date']:%a %d %b} ({latest['EUA']:.2f} €/t). " + _from_txt + _lag_txt)
 
 last_year = df[df.index > day - pd.DateOffset(years=1)]
 has_year = df.index[0] <= day - pd.DateOffset(years=1)
@@ -540,7 +564,7 @@ if sp_css is not None:
         "several windows tie, the latest is taken. The figures are in €/MWh and €, not divided by the price level: "
         "the power price is given only as background. Stress-period figures borrow the Basel method (bank capital "
         "rules): Basel picks the 12 months of largest loss for the current portfolio, equally weighted, searching "
-        "back to 2007, with a 10-day horizon and liquidity scaling (BCBS MAR33.7); here the measure is the 1-day "
+        "back to 2007, with a 10-day horizon and liquidity scaling (BCBS MAR33.4, MAR33.7); here the measure is the 1-day "
         "1-in-20 fall, the search starts with the power data in 2020, and the window rule is the Risk page's."
     )
 else:
@@ -566,8 +590,9 @@ st.caption(
 )
 st.caption(
     "**Caveats.** Power is the day-ahead price, while gas is the TTF front-month future, so the tenors "
-    "don't match; S&P Global Platts computes its German day-ahead spreads from its own TTF day-ahead "
-    "assessments (S&P Global subscriber note, 31 Mar 2026), which are not freely available. Platts prices "
+    "don't match. S&P Global Platts calculates its German spark spreads using its own TTF assessments, which are "
+    "not freely available; a change to its day-ahead and weekend assessments in March 2026 affected 12 day-ahead "
+    "spread codes (S&P Global subscriber note, 31 Mar 2026). Platts prices "
     "carbon with its EUA assessment of the nearest December contract; this page uses the EEX primary "
     "auction (spot) instead. Efficiencies are on a higher heating value basis "
     "(50% HHV is roughly 55% on a lower heating value basis). German plants buy gas at the THE hub, "
@@ -580,8 +605,15 @@ st.caption(
 # ─── Gas purchase timing: buy next month's gas now or in a week (gas leg only) ───
 st.subheader("Buy Next Month's Gas Now, or in a Week? (gas leg only)")
 _WAIT_DAYS = 5
-_MIN_FIT = 250   # daily returns a monthly contract needs on this date range to have its own GARCH fit
+_MIN_FIT = 250   # daily returns a monthly contract needs in the fit window to have its own GARCH fit
+_MIN_CMP = 20    # daily returns on common days needed to compare TTF=F's and a contract's volatility
+_SAME_VOL = 0.05  # volatilities within 5% of each other are "about the same"
 ttf_last_date = ttf.index[-1]
+# GARCH fit window: it does not shrink with a later start date. It starts 10 days before 1 Jan 2020 (the default
+# start date) or before the start date if that is earlier, as the page's TTF data does, and ends at the end date;
+# all prices come from the shared download.
+_fit_from = min(pd.Timestamp(start_date), pd.Timestamp(common.DEFAULT_START)) - pd.Timedelta(days=10)
+_ttf_fit = common.load_close("TTF=F", _fit_from.date(), end_date).dropna()
 # The decision day is the end date (the last weekday on or before it), even when its TTF price is not out yet.
 _decide = max(pd.Timestamp(np.busday_offset(end_date, 0, roll="backward")), ttf_last_date.normalize())
 _wait_day = pd.Timestamp(np.busday_offset(_decide.date(), _WAIT_DAYS))
@@ -590,7 +622,7 @@ _front_exp = common.contract_expiry("TTF", _front["delivery"])
 # The front contract stops trading before the plant could buy in a week: switch to the next contract that
 # is still trading on the wait day (contract_expiry, holidays not modelled).
 _switch = _wait_day.normalize() > _front_exp.normalize()
-_batch = common.shared_download("TTF=F", start_date - pd.Timedelta(days=10))
+_batch = common.shared_download("TTF=F", _fit_from)
 _c = pd.Series(dtype=float)
 if _switch:
     _next = pd.Timestamp(_front["delivery"]) + pd.DateOffset(months=1)
@@ -600,7 +632,7 @@ if _switch:
     contract = common.contract_symbol("TTF", delivery_month)
     if contract in _batch:
         _c = _batch[contract].dropna()
-        _c = _c[(_c.index >= pd.Timestamp(start_date) - pd.Timedelta(days=10)) & (_c.index <= ttf_last_date)]
+        _c = _c[(_c.index >= _fit_from) & (_c.index <= ttf_last_date)]
         _c = _c.mask(common._stale_mask(_c)).dropna()
     if _c.empty or (ttf_last_date - _c.index[-1]).days > _TTF_MAX_AGE:
         _mode = "none"      # no recent price for the next contract
@@ -652,9 +684,11 @@ if _switch:
                f"{'stopped' if _front_exp.normalize() < _decide else 'stops'} trading on "
                f"{_front_exp:%a %d %b %Y} (its last trading day by the exchange rule, holidays not modelled), "
                f"before {_wait_day:%a %d %b}, {_WAIT_DAYS} business days after {_decide:%a %d %b}: the plant cannot "
-               f"wait a week to buy {_front['delivery']:%B} gas on it. This section therefore uses the next contract "
-               f"still trading then, TTF {delivery_month:%b %y} (`{contract}`): its price, delivery month, days and "
-               "hours.")
+               f"wait a week to buy {_front['delivery']:%B} gas on it. Once that contract has stopped trading, "
+               f"{_front['delivery']:%B} gas can still be bought for shorter delivery periods, such as the TTF day, "
+               "weekend and within-day spot contracts EEX lists (EEX contract specifications 0105a, section 1.2.4.1), "
+               "but this page has no prices for them. This section therefore uses the next contract still trading "
+               f"then, TTF {delivery_month:%b %y} (`{contract}`): its price, delivery month, days and hours.")
 st.write(f"The plant buys the gas for {month_label} on the TTF {delivery_month:%b %y} contract"
          + (" (the front month)" if not _switch else "") + f". If it waits {_WAIT_DAYS} business days instead of "
          f"buying on {_decide:%a %d %b}, how much could that gas cost? This is the gas leg alone: a plant that "
@@ -667,7 +701,7 @@ if _mode == "none":
                "data, so no range is shown: the page downloads the monthly contracts from two months before today to "
                "five months after, and Yahoo Finance no longer lists expired ones.")
 else:
-    fit_series = _c if _mode == "own" else ttf
+    fit_series = _c if _mode == "own" else _ttf_fit
     price_now = float(_c.iloc[-1]) if _mode in ("own", "approx") else float(ttf.iloc[-1])
     price_date = _c.index[-1] if _mode in ("own", "approx") else ttf_last_date
     _horizon = max(_WAIT_DAYS, int(np.busday_count(price_date.date(), _wait_day.date())))
@@ -680,7 +714,7 @@ if wait is not None:
     scale = price_now / wait["price_now"]
     lo, hi = wait["lo"][-1] * scale, wait["hi"][-1] * scale
     bill_now = gas_mwh * price_now
-    bill_lo, bill_hi = gas_mwh * _half(lo), gas_mwh * _half(hi)
+    bill_lo, bill_hi = gas_mwh * lo, gas_mwh * hi   # unrounded quantiles; rounded only for display
     fit_start = fit_series.dropna().index[0]
 
     w1, w2, w3 = st.columns(3)
@@ -735,28 +769,43 @@ if wait is not None:
     plt.tight_layout()
     st.pyplot(fig_w)
 
-    # Volatility of TTF=F and of the contract over the same recent days, from the same download (data, not a rule).
-    _both = (np.log(_batch[["TTF=F", contract]].loc[:ttf_last_date]).diff().dropna().tail(_LOOKBACK)
-             if _switch and contract in _batch else pd.DataFrame())
-    _cmp = (f" Over the last {len(_both)} trading days on which both have a price, `TTF=F` moved "
-            f"{_both['TTF=F'].std() * common.ANNUAL * 100:.0f}% annualised and `{contract}` "
-            f"{_both[contract].std() * common.ANNUAL * 100:.0f}%." if len(_both) >= 20 else "")
+    # Volatility of TTF=F and of the contract on the same days of the fit window, from the same download (data,
+    # not a rule): log returns on the days on which both have a price.
+    _both = (np.log(pd.DataFrame({"TTF=F": _ttf_fit, contract: _c}).dropna()).diff().dropna()
+             if _switch and len(_c) else pd.DataFrame())
+    _fit_note = (" The fit window does not shrink with a later start date: it starts 10 days before 1 Jan 2020, or "
+                 "before the start date if that is earlier (as the page's TTF data does), and ends at the end date.")
     if _mode == "own":
+        _recent = _both.tail(_LOOKBACK)
+        _cmp = (f" Over the last {len(_recent)} trading days on which both have a price, `TTF=F` moved "
+                f"{_recent['TTF=F'].std() * common.ANNUAL * 100:.0f}% annualised and `{contract}` "
+                f"{_recent[contract].std() * common.ANNUAL * 100:.0f}%." if len(_recent) >= _MIN_CMP else "")
         _method = (f"GARCH(1,1) with Student-t shocks fitted on the daily log returns of `{contract}` itself from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}, not on `TTF=F`, which still follows the "
                    "expiring contract and jumps when it rolls." + _cmp + " In its earlier years the contract was "
-                   "further from delivery than it is now.")
+                   "further from delivery than it is now." + _fit_note)
     elif _mode == "approx":
-        _method = (f"Approximation: `{contract}` has fewer than {_MIN_FIT} daily returns on this date range, too few "
-                   "for its own fit, so the range is the one fitted on `TTF=F` (the expiring front month, roll jumps "
-                   f"included, {fit_start:%d %b %Y} to {wait['date']:%d %b %Y}) applied to this contract's price. It "
-                   "is not this contract's own volatility." + _cmp
-                   + (" With `TTF=F` the more volatile of the two here, the range is likely too wide."
-                      if len(_both) >= 20 and _both['TTF=F'].std() > _both[contract].std() else ""))
+        # Compared on the same days of the same fit window, so the direction is the one this sample shows.
+        if len(_both) >= _MIN_CMP:
+            _v_f, _v_c = (_both[c].std() * common.ANNUAL * 100 for c in ("TTF=F", contract))
+            _verdict = ("about the same" if abs(_v_f / _v_c - 1) < _SAME_VOL else
+                        "so with `TTF=F` the more volatile, the range is likely too wide" if _v_f > _v_c else
+                        "so with `TTF=F` the less volatile, the range is likely too narrow")
+            _cmp = (f" On the {len(_both)} days of the fit window on which both have a price ({_both.index[0]:%d %b %Y} "
+                    f"to {_both.index[-1]:%d %b %Y}), `TTF=F` moved {_v_f:.0f}% annualised and `{contract}` "
+                    f"{_v_c:.0f}%, " + _verdict + ".")
+        else:
+            _cmp = (f" With only {len(_both)} daily returns of both on the same days, fewer than {_MIN_CMP}, the page "
+                    "cannot say whether the range is too wide or too narrow.")
+        _method = (f"Approximation: `{contract}` has {max(len(_c) - 1, 0)} daily returns in the fit window "
+                   f"({_c.index[0]:%d %b %Y} to {_c.index[-1]:%d %b %Y}), fewer than the {_MIN_FIT} needed for its own "
+                   "fit, so the range is the one fitted on `TTF=F` (the expiring front month, roll jumps included, "
+                   f"{fit_start:%d %b %Y} to {wait['date']:%d %b %Y}) applied to this contract's price. It is not this "
+                   "contract's own volatility." + _cmp + _fit_note)
     else:
         _method = (f"GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}. Monthly roll jumps in `TTF=F` feed into the "
-                   "fitted volatility.")
+                   "fitted volatility." + _fit_note)
     st.caption(
         "**This is the risk of waiting, not a forecast of direction.** The model has no view on whether "
         "TTF goes up or down: its mean return is set to zero, so the range is centred on the last price. "

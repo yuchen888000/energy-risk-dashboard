@@ -211,11 +211,18 @@ def _slice(close, start, end):
     return close[(close.index >= pd.Timestamp(start)) & (close.index <= pd.Timestamp(end))]
 
 
+def _download_day():
+    """The `today` of the shared download (_download_batch): the Berlin date (berlin_today), the same day the
+    default end date and the Power page use. shared_download and compute_core both call this, so they always
+    hit the same cached download, whatever time zone the server runs in."""
+    return berlin_today()
+
+
 def shared_download(ticker, start):
     """The shared download (_download_batch) that load_close(ticker, start, ...) reads: the continuous series
     and, for TTF=F, CL=F and BZ=F, the monthly contracts of _batch_contracts. A page that needs a monthly
     contract next to the continuous series calls this, so both come from the same download."""
-    return _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), dt.date.today())
+    return _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), _download_day())
 
 
 def _raw_close(ticker, start, end):
@@ -306,7 +313,7 @@ def compute_core(ticker, compare_ticker, start, end):
     never come from two different downloads, even after the download cache expires. Returns None when fewer
     than 30 overlapping observations are available.
     """
-    today = dt.date.today()
+    today = _download_day()
     batch = _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), today)
     raw = batch[ticker] if ticker in batch else pd.Series(dtype=float)
     price = _slice(raw, start, end)
