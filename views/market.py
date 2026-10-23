@@ -18,7 +18,7 @@ import requests as req
 import streamlit as st
 
 import common
-from country_data import (EU27, MODES, available_years, dependency_key, load_country_data,
+from country_data import (EU27, MODES, available_years, dependency_key, is_provisional, load_country_data,
                           measure_column, mentions_country)
 
 nltk.download('vader_lexicon', quiet=True)
@@ -33,6 +33,10 @@ CARBON_TICKER = ctx.carbon["ticker"]
 
 NEWS_DAYS = 7          # headlines older than this are not "current"
 PER_FEED_CAP = 4       # at most this many headlines from one feed, so no single feed dominates
+# Google News edition: UK English, set explicitly (language, country and edition), so the feeds are not
+# left to Google's default edition.
+GN_EDITION = "hl=en-GB&gl=GB&ceid=GB:en"
+GN_CAP = 100           # Google News returns at most this many entries per RSS query
 CHECK_DAYS = 252       # base rates of the statistical checks: the last 252 trading days
 VOL_LO_PCT, VOL_HI_PCT = 5, 95       # volatility and correlation checks: percentiles of the last 3 years
 GARCH_HI, GARCH_LO = 1.30, 0.70      # GARCH forecast vs the 3-year average 30-day volatility
@@ -47,33 +51,42 @@ with st.sidebar.expander("Methodology: Market page"):
       env_air_gge, nama_10_gdp), no hand-entered value and no composite score. For gas
       and oil, countries are ranked by net imports of that fuel as a share of all their
       energy: the fuel's share of gross available energy times its import dependency.
-      For carbon, by greenhouse-gas emissions per euro of GDP at 2020 prices. Storage,
-      supplier concentration and LNG capacity are not included.
+      For carbon, by greenhouse-gas emissions per euro of GDP at 2020 prices. Values Eurostat
+      flags as provisional are marked (p). Storage, supplier concentration and LNG capacity
+      are not included.
     - **Headline tone**: headlines from the last 7 days, at most 4 per feed, duplicates
       removed and the publisher name stripped before scoring. Scored with FinBERT
       (ProsusAI/finbert via the Hugging Face Inference API) when it is available, otherwise
       with FinVADER: VADER with the SentiBigNomics and Henry financial word lists, which per
       its authors scores better than VADER on Financial PhraseBank. FinBERT needs a Hugging
       Face token with inference credits; without a working token FinVADER is what runs, and
-      the page names the model used. Both are trained on company news: the score is the tone
-      of the wording, not a price direction.
-    - **Which headlines count**: a commodity keyword in the headline; for TTF an explicit
-      natural-gas term (natural gas, LNG, TTF, gas storage, gas supply, Gazprom, Equinor and
-      similar) or "gas" with a European place name. Dropped: US retail fuel stories ("gas
-      prices" at the pump), US-domestic stories with no link to Europe, and pages that are
-      not news (exchange product pages, bare report titles).
-    - **30-day tone trend**: Google News headlines from the last 30 days, same filter, scored
-      with FinVADER; the average is over all headlines, with the daily count shown.
+      the page names the model used. FinBERT is fine-tuned on sentences from financial news
+      (Financial PhraseBank); FinVADER uses finance word lists. Either way the score is the
+      tone of the wording, not a price direction.
+    - **Which headlines count**: a commodity keyword in the headline ("barrel" only as a price
+      unit: "a barrel", "per barrel", "barrels a day"); for TTF an explicit natural-gas term
+      (natural gas, LNG, TTF, gas storage, gas supply, Gazprom, Equinor and similar) or "gas"
+      with a European place name. Dropped: US retail fuel stories ("gas prices" at the pump),
+      share tips ("stocks to watch", "investors should", shares rising or falling), pages that
+      are not news (exchange product pages, bare report titles), and, except for WTI,
+      US-domestic stories with no link to Europe. WTI is a NYMEX contract, so US inventory
+      and production stories are kept for it.
+    - **Recent tone trend**: Google News (UK edition) headlines requested for the last 30
+      days, same filter, scored with FinVADER; the average is over all headlines, with the
+      daily count shown. Google News returns at most 100 headlines per query, so the page
+      states the dates the headlines actually cover.
     - **Statistical checks**: volatility above the 95th or below the 5th percentile of the
-      last 3 years, GARCH 10-day forecast 30% above or below the 3-year average volatility
-      (the GARCH model for this check is fitted on the same 3 years), 30-day correlation
-      outside its 3-year 5th to 95th percentile range, and daily losses beyond 2x the
-      3-year 99% VaR (Brent roll days excluded). Each check shows on how many of the last
-      252 trading days it fired.
+      3 years (750 trading days) up to the end date, GARCH 10-day forecast 30% above or below
+      the average 30-day volatility of those 3 years (the GARCH model for this check is fitted
+      on the same 3 years), 30-day correlation outside its 5th to 95th percentile range of
+      those 3 years, and daily losses beyond 2x their 99% VaR (Brent roll days excluded).
+      Nothing after the end date is used. Each check shows on how many of the 252 trading
+      days up to the end date it fired.
     - **AI interpretation** (optional): the statistics on this page summarised in three
-      sentences by Claude via the Anthropic API. It sees no fundamentals. A sentence that
-      asks the reader to watch for a level the data has already passed is removed before
-      display.
+      sentences by Claude via the Anthropic API. It sees no fundamentals. A fixed rule removes
+      a sentence that asks the reader to watch whether a value moves past a level it is
+      already past, when the level is written as on this page (annualised or daily
+      volatility, or a correlation, to the page's rounding); other wordings are not caught.
     """)
 
 st.title("Market Intelligence")
@@ -88,17 +101,20 @@ df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
 returns_clean = core['returns_clean']
 var_95 = core['var_95']              # last 250 trading days
-ref3y = core['ref3y']   # the last 3 years of 30-day volatility, the window of this page's checks
+# The 3 years (common.CHECK_WINDOW trading days) up to the end date, from compute_core's download: the window
+# of this page's checks. Nothing after the end date is used, so a past end date is judged as it stood then.
+ref3y = core['ref3y']
+_past_end = end_date < pd.Timestamp.today().date()
 
 # Reference level for the GARCH check: the 3-year average 30-day volatility, the same window
-# as the volatility check, so it does not move with the sidebar dates.
+# as the volatility check, so it does not move with the sidebar start date.
 garch_ref = ref3y['mean']
 garch_ref_name = "3-year average 30-day volatility"
-# The GARCH model for the check is fitted on the same 3 years (the last CHECK_WINDOW trading
-# days). Fitted on the whole sidebar range (from 2020, with the 2021-22 crisis), the model's
-# long-run level sits well above the 3-year average (TTF on 16 Oct 2026: 6.8% against 3.5%), so the
-# forecast is pulled towards a level from a different period than its reference.
-garch_returns = returns_clean.tail(common.CHECK_WINDOW)
+# The GARCH model for the check is fitted on the returns of the same 3 years. Fitted on the whole
+# sidebar range (from 2020, with the 2021-22 crisis), the model's long-run level sits well above
+# the 3-year average (TTF on 16 Oct 2026: 6.8% against 3.5%), so the forecast would be pulled
+# towards a level from a different period than its reference.
+garch_returns = ref3y['rets']
 garch = common.fit_garch(garch_returns)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
 
@@ -317,6 +333,23 @@ def is_non_news(headline):
     return any(p.search(headline) for p in _NON_NEWS)
 
 
+# Share tips and stock picks: the tone of "3 European Gas Stocks Investors Should Watch" is about equities,
+# not about the commodity. A headline about shares rising or falling is a company story too.
+_SHARE_MOVE = ("rise|rises|rose|fall|falls|fell|jump|jumps|jumped|slide|slides|slid|drop|drops|dropped"
+               "|surge|surges|surged|climb|climbs|climbed|tumble|tumbles|tumbled|gain|gains|gained"
+               "|sink|sinks|sank|soar|soars|soared|slump|slumps|slumped|plunge|plunges|plunged")
+_STOCK_TIP = [
+    re.compile(r"\b(?:stocks?|shares?|equities)\s+to\s+(?:watch|buy|own|consider|sell)\b", re.I),
+    re.compile(r"\binvestors?\s+should\b", re.I),
+    re.compile(r"\b(?:\d+|three|four|five|top|best|cheap|dividend)\s+(?:[A-Za-z-]+\s+){0,3}stocks\b", re.I),
+    re.compile(r"\bshares\s+(?:" + _SHARE_MOVE + r")\b", re.I),
+]
+
+
+def is_stock_tip(headline):
+    return any(p.search(headline) for p in _STOCK_TIP)
+
+
 def is_us_retail_fuel(headline):
     """"Gas prices" with a US pump-price marker. "Gasoline" or "pump" alone does not count when
     the headline is about Europe ("gas prices, but also gasoline and diesel ... across the EU")."""
@@ -332,29 +365,33 @@ def is_gas_headline(headline):
                 or (_GAS_WORD.search(headline) and _EUROPE_GEO.search(headline)))
 
 
-def drop_reason(headline, keyword_re, gas=False):
-    """Why a headline is not used ("" if it is kept). The same rules for every feed."""
+def drop_reason(headline, keyword_re, gas=False, keep_us=False):
+    """Why a headline is not used ("" if it is kept). The same rules for every feed. `keep_us` (WTI) keeps
+    US-domestic stories: WTI is a NYMEX contract, so US inventory and production news bears on it."""
     if is_non_news(headline):
         return "not a news story (product or report-title page)"
     if is_us_retail_fuel(headline):
         return "US retail fuel prices"
+    if is_stock_tip(headline):
+        return "share tip or stock story"
     if gas:
         if not is_gas_headline(headline):
             return "no explicit natural-gas term"
     elif not keyword_re.search(headline):
         return "no commodity keyword"
-    if is_us_domestic(headline):
+    if not keep_us and is_us_domestic(headline):
         return "US-domestic, no link to Europe"
     return ""
 
 
-def is_relevant(headline, keyword_re, gas=False):
+def is_relevant(headline, keyword_re, gas=False, keep_us=False):
     """Keep a headline only if drop_reason finds nothing against it."""
-    return drop_reason(headline, keyword_re, gas) == ""
+    return drop_reason(headline, keyword_re, gas, keep_us) == ""
 
 
 commodity_kw_re = _word_pattern(commodity['keywords'])
 IS_GAS = commodity['ticker'] == 'TTF=F'
+KEEP_US = commodity['ticker'] == 'CL=F'   # WTI: US-domestic stories are kept
 
 
 
@@ -419,7 +456,9 @@ else:
         selected_year = country_years[0]
     st.caption(f"Years {country_years[0]} to {country_years[-1]}: every year from {country_years[0]} for which "
                "Eurostat publishes the EU-27 value of this measure. Last Eurostat updates: "
-               + ", ".join(f"{k} {v}" for k, v in country_updated.items() if v) + ".")
+               + ", ".join(f"{k} {v}" for k, v in country_updated.items() if v) + ". (p): Eurostat flags the "
+               "value as provisional; a measure computed from a provisional input is marked too, and a country "
+               "marked (p) has a provisional ranking measure.")
 
     yr_df = country_df[country_df['Year'] == selected_year]
     eu = yr_df[yr_df['Country'] == EU27].iloc[0]
@@ -446,7 +485,8 @@ else:
         st.caption(
             f"Gross available energy is all energy a country has available (production + imports - exports "
             f"+ stock changes), from Eurostat nrg_bal_c in ktoe; import dependency is Eurostat nrg_ind_id "
-            f"(net imports ÷ gross available {M['fuel']}). The product tells how much of a country's total "
+            f"(net imports ÷ gross available energy of that fuel; Eurostat's fuel label: \"{M['fuel']}\"). "
+            f"The product of share and dependency tells how much of a country's total "
             f"energy supply is {fuel} bought abroad, so a country that imports all its {fuel} but uses little "
             f"of it ranks low. Dependency is shown as published: below 0% means a net exporter, above 100% "
             f"means imports also refilled stocks. In the product a net exporter counts as 0.")
@@ -479,6 +519,11 @@ else:
             "aviation, maritime), free allocation and carbon leakage. A broad indicator of how carbon-intensive "
             "an economy is, not the cost of EUAs to it.")
 
+    # Display column -> load_country_data column, for the provisional flags.
+    _col_source = {M['measure']: mcol, 'Renewable share (%)': 'ren',
+                   'Total energy import dependency (%)': 'dep_total'}
+    if country_mode in ('gas', 'oil'):
+        _col_source.update({M['share']: f'{country_mode}_share', M['dep']: f'dep_{country_mode}'})
     cr_df = pd.DataFrame(cols)
     cr_df.index = cr_df.index + 1   # rank
     cr_df.index.name = 'Rank'
@@ -499,6 +544,15 @@ else:
             _num_cols = [c for c in cr_df.columns if c not in ('Country', M['measure'])]
             cr_df[_num_cols] = cr_df[_num_cols].apply(pd.to_numeric, errors='coerce')
             cr_view = cr_df.style.format("{:.1f}", subset=_num_cols + [M['measure']], na_rep="n/a")
+            # Provisional values (Eurostat flag "p") get "(p)" in the display only: the cells stay numeric,
+            # so sorting, the ranking and the CSV are unchanged. The ranking column is a progress bar, whose
+            # number format overrides the styler, so its flag is shown next to the country name.
+            for _c in _num_cols + ['Country']:
+                _src = _col_source[M['measure'] if _c == 'Country' else _c]
+                _rows = [i for i, (_, r) in zip(cr_df.index, ranked.iterrows()) if is_provisional(r, _src)]
+                if _rows:
+                    cr_view = cr_view.format("{} (p)" if _c == 'Country' else "{:.1f} (p)",
+                                             subset=pd.IndexSlice[_rows, [_c]], na_rep="n/a")
             # Tall enough to show every country without scrolling (35 px per row plus the header).
             st.dataframe(cr_view, width="stretch", height=(len(cr_df) + 1) * 35 + 3, column_config=col_cfg)
 
@@ -513,27 +567,32 @@ else:
             row = ranked[ranked['Country'] == selected_country].iloc[0]
             rank = int(cr_df.index[cr_df['Country'] == selected_country][0])
             st.markdown(f"### {selected_country} ({selected_year})")
-            st.metric(M['measure'], f"{row[mcol]:.1f}", help=f"Rank {rank} of {n_ranked}; EU-27 "
-                      f"{eu[mcol]:.1f}.")
+            _p = " (p)" if is_provisional(row, mcol) else ""
+            st.metric(M['measure'], f"{row[mcol]:.1f}{_p}", help=f"Rank {rank} of {n_ranked}; EU-27 "
+                      f"{eu[mcol]:.1f}{' (p)' if is_provisional(eu, mcol) else ''}."
+                      + (" (p): provisional in Eurostat." if _p else ""))
             st.caption(f"Rank {rank} of {n_ranked} countries with data.")
 
-            def _fmt(v, f="{:.1f}"):
-                return "n/a" if v is None or pd.isna(v) else f.format(v)
+            def _fmt(col, f="{:.1f}"):
+                v = row[col]
+                if v is None or pd.isna(v):
+                    return "n/a"
+                return f.format(v) + (" (p)" if is_provisional(row, col) else "")
             if country_mode in ('gas', 'oil'):
                 fuel = country_mode
                 detail_rows = [
-                    (M['share'], _fmt(row[f'{fuel}_share'])),
-                    (M['dep'], _fmt(row[f'dep_{fuel}'])),
-                    (f"Gross available {fuel} (ktoe)", _fmt(row[f'gae_{fuel}'], "{:,.0f}")),
-                    ("Gross available energy, all (ktoe)", _fmt(row['gae_total'], "{:,.0f}")),
-                    ("Total energy import dependency (%)", _fmt(row['dep_total'])),
-                    ("Renewable share (%)", _fmt(row['ren'])),
+                    (M['share'], _fmt(f'{fuel}_share')),
+                    (M['dep'], _fmt(f'dep_{fuel}')),
+                    (f"Gross available {fuel} (ktoe)", _fmt(f'gae_{fuel}', "{:,.0f}")),
+                    ("Gross available energy, all (ktoe)", _fmt('gae_total', "{:,.0f}")),
+                    ("Total energy import dependency (%)", _fmt('dep_total')),
+                    ("Renewable share (%)", _fmt('ren')),
                 ]
             else:
                 detail_rows = [
-                    ("GHG emissions excl. LULUCF (kt CO2e)", _fmt(row['ghg'], "{:,.0f}")),
-                    ("GDP, 2020 prices (M€)", _fmt(row['gdp_clv'], "{:,.0f}")),
-                    ("Renewable share (%)", _fmt(row['ren'])),
+                    ("GHG emissions excl. LULUCF (kt CO2e)", _fmt('ghg', "{:,.0f}")),
+                    ("GDP, 2020 prices (M€)", _fmt('gdp_clv', "{:,.0f}")),
+                    ("Renewable share (%)", _fmt('ren')),
                 ]
             # A two-column table wraps inside the narrow panel, where side-by-side metrics overlap.
             st.markdown("| Eurostat input | Value |\n|---|---:|\n"
@@ -545,7 +604,8 @@ else:
         shade = plt.cm.Blues(0.3 + 0.7 * vals / vals.max()) if vals.max() > 0 else 'steelblue'
         ax_cr.barh(range(n_ranked), vals, color=shade, height=0.7)
         ax_cr.set_yticks(range(n_ranked))
-        ax_cr.set_yticklabels(cr_df['Country'], fontsize=9)
+        ax_cr.set_yticklabels([c + (" (p)" if is_provisional(r, mcol) else "")
+                               for c, (_, r) in zip(cr_df['Country'], ranked.iterrows())], fontsize=9)
         ax_cr.axvline(x=eu[mcol], color='black', linewidth=1, linestyle='--', alpha=0.6,
                       label=f'EU-27: {eu[mcol]:.1f}')
         ax_cr.set_xlabel(M['measure'])
@@ -615,7 +675,7 @@ else:
         # Per-country news tone: same models and caveats as the headline tone section below.
         st.write(f"**{selected_country}: tone of recent energy headlines**")
         _country_q = quote_plus(f"{selected_country} energy {commodity['news_term']}")
-        country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:{NEWS_DAYS}d&hl=en"
+        country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:{NEWS_DAYS}d&{GN_EDITION}"
         country_rows, _seen_c = [], set()
         try:
             country_feed = feedparser.parse(country_rss_url)
@@ -632,7 +692,8 @@ else:
                 if dedup_key(headline) in _seen_c:
                     continue
                 if (_energy_re.search(headline) and mentions_country(headline, selected_country)
-                        and not is_non_news(headline) and not is_us_retail_fuel(headline)):
+                        and not is_non_news(headline) and not is_us_retail_fuel(headline)
+                        and not is_stock_tip(headline)):
                     country_rows.append((headline, publisher))
                     _seen_c.add(dedup_key(headline))
                 if len(country_rows) >= 5:
@@ -661,9 +722,9 @@ _when = f"+when:{NEWS_DAYS}d"
 rss_feeds = {
     "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
     "OilPrice": "https://oilprice.com/rss/main",
-    f"Google ({selected_commodity})": f"https://news.google.com/rss/search?q={commodity['rss_query']}{_when}&hl=en",
-    "Google EU Energy": f"https://news.google.com/rss/search?q=European+energy+market{_when}&hl=en",
-    "Google EU Carbon": f"https://news.google.com/rss/search?q=EU+carbon+ETS{_when}&hl=en",
+    f"Google ({selected_commodity})": f"https://news.google.com/rss/search?q={commodity['rss_query']}{_when}&{GN_EDITION}",
+    "Google EU Energy": f"https://news.google.com/rss/search?q=European+energy+market{_when}&{GN_EDITION}",
+    "Google EU Carbon": f"https://news.google.com/rss/search?q=EU+carbon+ETS{_when}&{GN_EDITION}",
 }
 _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
 _cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=NEWS_DAYS)
@@ -692,8 +753,8 @@ for feed_name, url in rss_feeds.items():
             pub = published_at(entry)
             if pub is None or pub < _cutoff:
                 continue
-            # Same test for every feed: a commodity keyword in the headline, no US-domestic story.
-            if not is_relevant(text, commodity_kw_re, gas=IS_GAS):
+            # Same test for every feed: a commodity keyword in the headline, no US-domestic story (except WTI).
+            if not is_relevant(text, commodity_kw_re, gas=IS_GAS, keep_us=KEEP_US):
                 continue
             news_rows.append({'Headline': text, 'Publisher': publisher or feed_name.split(' (')[0],
                               'Feed': feed_name, 'Published (UTC)': pub.strftime('%Y-%m-%d %H:%M'),
@@ -721,9 +782,9 @@ else:
     n_pos, n_neg, n_neut = ((sent_df['Label'] == lab).sum() for lab in ('Positive', 'Negative', 'Neutral'))
 
     st.markdown(f"#### Average tone: {tone_label(avg_score)} ({avg_score:+.3f})")
-    st.caption("The score is the tone of the wording, from models trained on company news (FinBERT on "
-               "Financial PhraseBank, where annotators judged news for a company's share price; FinVADER is a "
-               "finance word list). It is not a price direction and not bullish or bearish: \"gas prices "
+    st.caption("The score is the tone of the wording: FinBERT is fine-tuned on sentences from financial news "
+               "(Financial PhraseBank, where annotators judged news for a company's share price); FinVADER uses "
+               "finance word lists. It is not a price direction and not bullish or bearish: \"gas prices "
                "surge\" can score negative although it describes a price rise. Between -0.05 and +0.05 is neutral.")
 
     sc1, sc2, sc3, sc4 = st.columns(4)
@@ -771,52 +832,83 @@ else:
     if top_pos.empty and top_neg.empty:
         st.info("All current headlines score as neutral wording.")
 
-# ─── Section 2b: 30-day tone trend ───
-st.subheader("Headline Tone, Last 30 Days")
-st.write(f"Daily tone of {selected_commodity}-related energy headlines over the past 30 days (the filter drops "
-         "US domestic stories; it does not require a European subject)")
-
-
-@st.cache_data(ttl=7200, show_spinner="Fetching 30-day news history...")
-def get_sentiment_trend(rss_query, news_term, keywords, gas):
-    """Headlines of the last 30 days from two Google News queries, de-duplicated across the
-    queries, publisher suffix removed, filtered with the same rules as the current headlines,
-    each scored with FinVADER. One row per headline."""
+# ─── Section 2b: recent tone trend ───
+@st.cache_data(ttl=7200, show_spinner="Fetching recent news history...")
+def _trend_query(q, keywords, gas, keep_us):
+    """One Google News query for the last 30 days: (rows, meta). Rows are the headlines kept by the same
+    filter as the current headlines, publisher suffix removed, each scored with FinVADER, with their
+    de-duplication key. Google News returns at most GN_CAP entries per query, so meta gives how many it
+    returned and the date of its oldest entry (Berlin calendar day), where its coverage really starts.
+    Raises when Google News does not answer or returns nothing, so a failed query is not cached."""
+    feed = feedparser.parse(f"https://news.google.com/rss/search?q={q}+when:30d&{GN_EDITION}")
+    if getattr(feed, 'status', 200) != 200 or not feed.entries:
+        raise RuntimeError("no headlines from Google News")
     keyword_re = _word_pattern(keywords)
-    rows, seen = [], set()
-    for trend_url in [
-        f"https://news.google.com/rss/search?q={rss_query}+when:30d&hl=en",
-        f"https://news.google.com/rss/search?q=European+energy+{news_term}+when:30d&hl=en",
-    ]:
-        try:
-            feed = feedparser.parse(trend_url)
-        except Exception:
+    entries = feed.entries[:GN_CAP]
+    pubs = [t for t in (published_at(e) for e in entries) if t is not None]
+    meta = dict(query=q.replace('+', ' '), n=len(entries), capped=len(feed.entries) >= GN_CAP, failed=False,
+                earliest=(min(pubs).tz_convert('Europe/Berlin').tz_localize(None).normalize() if pubs else None))
+    rows = []
+    for entry in entries:
+        source = entry.get('source', {}).get('title', '')
+        text = headline_text(entry.get('title', ''), source)
+        key = dedup_key(text)
+        pub = published_at(entry)
+        if not key or pub is None or not is_relevant(text, keyword_re, gas=gas, keep_us=keep_us):
             continue
-        for entry in feed.entries[:100]:
-            source = entry.get('source', {}).get('title', '')
-            text = headline_text(entry.get('title', ''), source)
-            key = dedup_key(text)
-            if not key or key in seen or not is_relevant(text, keyword_re, gas=gas):
-                continue
-            pub = published_at(entry)
-            if pub is None:
-                continue
-            rows.append({'Date': pub.tz_convert('Europe/Berlin').tz_localize(None).normalize(), 'Headline': text,
-                         'Publisher': source, 'Score': finvader_score(text)})
-            seen.add(key)
+        rows.append({'Date': pub.tz_convert('Europe/Berlin').tz_localize(None).normalize(), 'Headline': text,
+                     'Publisher': source, 'Score': finvader_score(text), 'key': key})
+    return rows, meta
+
+
+def get_sentiment_trend(rss_query, news_term, keywords, gas, keep_us):
+    """Headlines requested for the last 30 days from two Google News queries (_trend_query), de-duplicated
+    across the queries. Returns (one row per headline or None, one meta dict per query)."""
+    rows, seen, meta = [], set(), []
+    for q in (rss_query, f"European+energy+{news_term}"):
+        try:
+            q_rows, q_meta = _trend_query(q, keywords, gas, keep_us)
+        except Exception:
+            meta.append(dict(query=q.replace('+', ' '), n=0, capped=False, failed=True, earliest=None))
+            continue
+        meta.append(q_meta)
+        for r in q_rows:
+            if r['key'] not in seen:
+                seen.add(r['key'])
+                rows.append({k: v for k, v in r.items() if k != 'key'})
     if not rows:
-        return None
-    return pd.DataFrame(rows).sort_values('Date').reset_index(drop=True)
+        return None, meta
+    return pd.DataFrame(rows).sort_values('Date').reset_index(drop=True), meta
 
 
-trend_hl = get_sentiment_trend(commodity['rss_query'], commodity['news_term'], tuple(commodity['keywords']),
-                               IS_GAS)
+trend_hl, trend_meta = get_sentiment_trend(commodity['rss_query'], commodity['news_term'],
+                                           tuple(commodity['keywords']), IS_GAS, KEEP_US)
 avg_30d = None
+trend_label = "recent"     # "N-day", from the dates the headlines actually cover
+_filter_note = ("US stories are kept for WTI, and the filter does not require a European subject" if KEEP_US else
+                "the filter drops US domestic stories; it does not require a European subject")
+today_ts = pd.Timestamp.now(tz='Europe/Berlin').tz_localize(None).normalize()   # Berlin calendar days
 
 if trend_hl is not None and trend_hl['Date'].nunique() > 3:
     daily = trend_hl.groupby('Date')['Score'].agg(['mean', 'size'])
     avg_30d = float(trend_hl['Score'].mean())   # every headline counts once
-    today_ts = pd.Timestamp.now(tz='Europe/Berlin').tz_localize(None).normalize()   # Berlin calendar days
+    _first, _last = trend_hl['Date'].min(), trend_hl['Date'].max()
+    _n_days = (max(today_ts, _last) - _first).days + 1
+    trend_label = f"{_n_days}-day"
+    _capped = [m for m in trend_meta if m['capped']]
+    _starts = [m['earliest'] for m in trend_meta if m['earliest'] is not None]
+    _reach = "; ".join(f"\"{m['query']}\": " + ("no headlines returned by Google News this time" if m['failed'] else
+                                                  f"{m['n']} headlines"
+                                                  + (f", oldest {m['earliest']:%d %b}" if m['earliest'] is not None else "")
+                                                  + (" (limit reached)" if m['capped'] else ""))
+                       for m in trend_meta)
+    st.subheader(f"Headline Tone, Last {_n_days} Days")
+    st.write(f"Daily tone of {selected_commodity}-related energy headlines from {_first:%d %b} to "
+             f"{today_ts:%d %b %Y} ({_filter_note}). Google News was asked for the last 30 days but returns at "
+             f"most {GN_CAP} headlines per query, so the headlines reach back only to {_first:%d %b}."
+             if _capped and _n_days < 30 else
+             f"Daily tone of {selected_commodity}-related energy headlines from {_first:%d %b} to "
+             f"{today_ts:%d %b %Y} ({_filter_note}).")
     tc1, tc2, tc3 = st.columns(3)
     if today_ts in daily.index:
         tc1.metric("Today's average tone (FinVADER)", f"{daily.loc[today_ts, 'mean']:+.3f}")
@@ -824,8 +916,9 @@ if trend_hl is not None and trend_hl['Date'].nunique() > 3:
     else:
         tc1.metric("Today's average tone (FinVADER)", "N/A")
         tc2.metric("Today's headlines", "0")
-    tc3.metric("30-day average tone (FinVADER)", f"{avg_30d:+.3f}",
-               help=f"Average over all {len(trend_hl)} headlines, not an average of daily averages.")
+    tc3.metric(f"{_n_days}-day average tone (FinVADER)", f"{avg_30d:+.3f}",
+               help=f"Average over all {len(trend_hl)} headlines from {_first:%d %b} to {_last:%d %b %Y}, not an "
+                    "average of daily averages.")
 
     fig_trend, (ax_trend, ax_cnt) = plt.subplots(2, 1, figsize=(14, 5), sharex=True,
                                                  gridspec_kw={'height_ratios': [3, 1]})
@@ -833,49 +926,44 @@ if trend_hl is not None and trend_hl['Date'].nunique() > 3:
                  width=0.8)
     ax_trend.axhline(y=0, color='black', linewidth=0.5)
     ax_trend.axhline(y=avg_30d, color='navy', linewidth=1, linestyle='--', alpha=0.6,
-                     label=f'30-day average over all headlines: {avg_30d:+.3f}')
+                     label=f'{_n_days}-day average over all headlines: {avg_30d:+.3f}')
     ax_trend.set_ylabel('Daily average tone')
     ax_trend.set_title(f'{selected_commodity}: headline tone per day (FinVADER)')
     ax_trend.legend(fontsize=8)
     ax_cnt.bar(daily.index, daily['size'], color='gray', width=0.8)
     ax_cnt.set_ylabel('Headlines')
+    ax_cnt.set_title(f'Headlines per day (at most {GN_CAP} per Google News query, so the count is not news volume)',
+                     fontsize=9)
     ax_cnt.tick_params(axis='x', rotation=45)
     plt.tight_layout()
     st.pyplot(fig_trend)
 
-    st.caption(f"{len(trend_hl)} distinct headlines over {len(daily)} days. A day with one headline is as noisy "
-               "as one headline: read the bars with the count below them. Scored with FinVADER only; the current "
-               "reading above may come from FinBERT, which uses a different scale, so the two are not compared.")
+    st.caption(f"{len(trend_hl)} distinct headlines over {len(daily)} days. Queries: {_reach}. "
+               + (f"Because a query stops at {GN_CAP} headlines, the daily count reflects that cap, not only how "
+                  "much news there was. " if _capped else "")
+               + (f"Days before {max(_starts):%d %b} are covered by one query only. "
+                  if len(set(_starts)) > 1 else "")
+               + ("One query returned nothing this time, so the trend rests on the other; the page tries again "
+                  "on the next run. " if any(m['failed'] for m in trend_meta) else "")
+               + "A day with one headline is as noisy as one headline: read the bars with the count below them. "
+               "Scored with FinVADER only; the current reading above may come from FinBERT, which uses a "
+               "different scale, so the two are not compared.")
 else:
+    st.subheader("Headline Tone, Recent Days")
     st.info("Not enough headlines from the last 30 days to draw a trend.")
 
 
 # ─── Section 3: Statistical checks ───
+_asof = df_analysis.index[-1]
 st.subheader("Statistical Checks")
-st.write("Is anything statistically unusual today compared with this commodity's own last 3 years? "
-         "Each check shows how often it fired over the last year, so you can judge how rare a flag is.")
+st.write(f"Is anything statistically unusual on {_asof:%d %b %Y}, the last day of the selected range, compared "
+         "with this commodity's own 3 years up to that day? Each check shows how often it fired over the year "
+         "up to that day, so you can judge how rare a flag is.")
 
-
-@st.cache_data(ttl=3600, show_spinner="Computing 3-year reference distributions...")
-def recent_reference(ticker, compare_ticker):
-    """30-day volatility, 30-day correlation and daily returns over the last 3 years up to today.
-
-    Same window as common.three_year_reference (common.CHECK_WINDOW trading days) and the same
-    definitions as common.compute_core, so the volatility mean matches ref3y['mean'].
-    """
-    today = dt.date.today()
-    start = today - dt.timedelta(days=int(common.CHECK_WINDOW * 365 / 250) + 90)
-    price = common.load_close(ticker, start, today)
-    compare = common.load_close(compare_ticker, start, today)
-    df = pd.DataFrame({'Price': price, 'R': common.simple_returns(price),
-                       'CR': common.simple_returns(compare)}).dropna(subset=['Price'])
-    df = df[df['Price'] > 0]
-    vol = (df['R'].rolling(30, min_periods=20).std() * 100).dropna().tail(common.CHECK_WINDOW)
-    corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(common.CHECK_WINDOW)
-    rets = df['R'].dropna()
-    if len(vol):
-        rets = rets.loc[vol.index[0]:]
-    return dict(vol=vol, corr=corr, rets=rets)
+# The same volatility statement as the Risk page (common.vol_summary): references that do not roll with the
+# market, next to the 3-year checks below.
+_vs = common.vol_summary(core, name=selected_commodity, with_roll=True, past_end=_past_end)
+st.markdown(f"**{_vs['headline']}**" + (f"  \n{_vs['headline2']}" if _vs['headline2'] else ""))
 
 
 def garch_10d_path(g):
@@ -891,31 +979,42 @@ def garch_10d_path(g):
     return np.sqrt(const + pers ** 9 * nxt)
 
 
-ref = recent_reference(commodity['ticker'], ctx.compare_ticker)
-if len(ref['vol']) < 250:
-    # Same fallback as common.three_year_reference: the selected range when recent history is short.
-    ref = dict(vol=df_analysis['Volatility'].dropna(), corr=df_analysis['Rolling Correlation'].dropna(),
-               rets=returns_clean)
-    ref_source = "selected date range (recent history unavailable)"
+# Every threshold, percentile, count of days fired and the GARCH reference come from ref3y: the 3 years up to
+# the end date, from compute_core's download (no second download, nothing after the end date).
+ref = ref3y
+_ref_end = pd.Timestamp(ref['end'])
+if ref['fallback']:
+    ref_source = (f"the selected date range, {ref['start']:%d %b %Y} to {_ref_end:%d %b %Y}, {ref['n']} trading "
+                  "days (fewer than 250 trading days of history up to the end date)")
+    ref_name = "the selected range"
 else:
-    ref_source = f"{ref['vol'].index[0]:%d %b %Y} to {ref['vol'].index[-1]:%d %b %Y}, {len(ref['vol'])} trading days"
+    ref_source = (f"{ref['start']:%d %b %Y} to {_ref_end:%d %b %Y}, {ref['n']} trading days: the 3 years up to "
+                  "the last day of the selected range")
+    ref_name = f"the 3 years to {_ref_end:%d %b %Y}"
 
-if garch is not None and len(garch_returns):
-    _same = (garch_returns.index[-1].normalize() == pd.Timestamp(ref3y['end']).normalize())
-    garch_window_note = (
-        f"The GARCH model behind the forecast check is fitted on the last {len(garch_returns)} trading days "
-        f"of returns ({garch_returns.index[0]:%d %b %Y} to {garch_returns.index[-1]:%d %b %Y}), "
-        + ("the same 3-year window as its reference, the 3-year average 30-day volatility, so model and "
-           "reference describe the same period. " if _same else
-           f"while its reference, the 3-year average 30-day volatility, runs to {ref3y['end']:%d %b %Y} "
-           "(the selected range ends earlier). ")
-        + "The Risk page fits its GARCH on the whole selected range, so its forecast can differ.")
-else:
-    garch_window_note = ""
+
+def garch_fit_sentence():
+    """The one statement of which returns the GARCH check's model is fitted on, for the caption and the AI input."""
+    if garch is None or not len(garch_returns):
+        return ""
+    a, b, n = garch_returns.index[0], garch_returns.index[-1], len(garch_returns)
+    if a.normalize() == pd.Timestamp(ref['start']).normalize() and b.normalize() == _ref_end.normalize():
+        return (f"The GARCH model behind the forecast check is fitted on the daily returns of the same {n} trading "
+                f"days ({a:%d %b %Y} to {b:%d %b %Y}) as its reference, the 3-year average 30-day volatility.")
+    return (f"The GARCH model behind the forecast check is fitted on {n} daily returns ({a:%d %b %Y} to "
+            f"{b:%d %b %Y}); its reference, the average 30-day volatility, covers {ref_source}.")
+
+
+garch_fit_note = garch_fit_sentence()
 
 vol_lo, vol_hi = np.percentile(ref['vol'], [VOL_LO_PCT, VOL_HI_PCT])
-vol_pctile = float((ref['vol'] < latest_vol).mean() * 100)
+# Rounded to 10 decimals on both sides: the latest volatility is computed on two paths (compute_core's window
+# and the reference) that can differ by ~1e-14.
+vol_pctile = float((np.round(ref['vol'].values, 10) < round(float(latest_vol), 10)).mean() * 100)
 vol_last = ref['vol'].tail(CHECK_DAYS)
+_count_from = vol_last.index[0]
+_count_span = f"the {len(vol_last)} trading days from {_count_from:%d %b %Y} to {_ref_end:%d %b %Y}"
+_of = f"of the {len(vol_last)} trading days to {_ref_end:%d %b %Y}"
 corr_now_s = df_analysis['Rolling Correlation'].dropna()
 corr_now = float(corr_now_s.iloc[-1]) if len(corr_now_s) else None
 has_corr = corr_now is not None and len(ref['corr']) >= 250
@@ -934,7 +1033,8 @@ if IS_BRENT:
     ref_rets_tail = ref['rets'][~ref['rets'].index.isin(brent_rolls)]
 var99_3y = float(np.percentile(ref_rets_tail, 1) * 100)
 tail_thr = TAIL_MULT * abs(var99_3y)
-recent_all = returns_clean.iloc[-CHECK_DAYS:] * 100
+# The daily-loss count covers the same last 252 trading days of the reference window as the other checks.
+recent_all = ref['rets'].iloc[-CHECK_DAYS:] * 100
 _is_roll = recent_all.index.isin(brent_rolls)
 recent_rets = recent_all[~_is_roll]
 tail_days = recent_rets[recent_rets < -tail_thr]
@@ -944,7 +1044,7 @@ n_roll_recent = int(_is_roll.sum())
 # only marked, not removed.
 ttf_flagged = []
 if commodity['ticker'] == 'TTF=F' and len(tail_days):
-    _exp = common.ttf_expiry_days(df_analysis['Price'].dropna().index)
+    _exp = common.ttf_expiry_days(ref['rets'].index)
     ttf_flagged = [d for d in tail_days.index if d in _exp]
 
 if IS_BRENT:
@@ -967,8 +1067,9 @@ if IS_BRENT and len(roll_excluded):
                       + f". With them the check would have fired on {len(roll_excluded)} more "
                       + ("day." if len(roll_excluded) == 1 else "days."))
 elif IS_BRENT:
-    tail_roll_fact = (f"{n_roll_recent} Brent roll days in the last {len(recent_all)} trading days are excluded "
-                      "from the daily-loss check; none of them was beyond the threshold.")
+    tail_roll_fact = (f"{n_roll_recent} Brent roll days in the {len(recent_all)} trading days to "
+                      f"{_ref_end:%d %b %Y} are excluded from the daily-loss check; none of them was beyond the "
+                      "threshold.")
 elif ttf_flagged:
     tail_roll_fact = (", ".join(f"{d:%d %b %Y}" for d in ttf_flagged)
                       + (" is" if len(ttf_flagged) == 1 else " are") + " on or just after a TTF "
@@ -977,10 +1078,18 @@ elif ttf_flagged:
 else:
     tail_roll_fact = ""
 
+# Closing times: TTF and the carbon ETC close in European hours, Brent and WTI in the New York afternoon.
+_EUROPEAN_CLOSE, _NEW_YORK_CLOSE = {'TTF=F', 'CARB.L'}, {'BZ=F', 'CL=F'}
+_pair = {commodity['ticker'], ctx.compare_ticker}
+corr_close_note = (" The two series close at different times (TTF and CARB.L in European hours, Brent and WTI in "
+                   "the New York afternoon), so a move after the European close reaches the European series only "
+                   "the next day, which pushes the same-day correlation down."
+                   if _pair & _EUROPEAN_CLOSE and _pair & _NEW_YORK_CLOSE else "")
+
 checks = []   # one row per check for the table
 anomalies = []
 
-# 1. Volatility spike / unusual calm: percentiles of the last 3 years.
+# 1. Volatility spike / unusual calm: percentiles of the reference window.
 n_hi = int((vol_last > vol_hi).sum())
 n_lo = int((vol_last < vol_lo).sum())
 checks.append(("Volatility spike", f"30-day vol above {common.fmt_vol(vol_hi)} ({VOL_HI_PCT}th pct)",
@@ -990,15 +1099,14 @@ checks.append(("Unusual calm", f"30-day vol below {common.fmt_vol(vol_lo)} ({VOL
 if latest_vol > vol_hi:
     anomalies.append({'level': '🟡 WARNING', 'type': 'Volatility Spike',
                       'detail': (f'30-day volatility of daily returns is {common.fmt_vol(latest_vol)}, above the '
-                                 f'{VOL_HI_PCT}th percentile of the last 3 years ({common.fmt_vol(vol_hi)}); it sits at '
-                                 f'the {vol_pctile:.0f}th percentile. Fired on {n_hi} of the last {len(vol_last)} '
-                                 'trading days.')})
+                                 f'{VOL_HI_PCT}th percentile of {ref_name} ({common.fmt_vol(vol_hi)}); it sits at '
+                                 f'the {vol_pctile:.0f}th percentile. Fired on {n_hi} {_of}.')})
 elif latest_vol < vol_lo:
     anomalies.append({'level': '🔵 WATCH', 'type': 'Unusual Calm',
                       'detail': (f'30-day volatility of daily returns is {common.fmt_vol(latest_vol)}, below the '
-                                 f'{VOL_LO_PCT}th percentile of the last 3 years ({common.fmt_vol(vol_lo)}). Low volatility '
+                                 f'{VOL_LO_PCT}th percentile of {ref_name} ({common.fmt_vol(vol_lo)}). Low volatility '
                                  'describes recent price moves only; it does not mean low risk. Fired on '
-                                 f'{n_lo} of the last {len(vol_last)} trading days.')})
+                                 f'{n_lo} {_of}.')})
 
 # 2. GARCH 10-day forecast vs the 3-year average 30-day volatility.
 if garch is not None and garch_ref:
@@ -1006,6 +1114,7 @@ if garch is not None and garch_ref:
     g_ratio = garch_forecast_10d / garch_ref
     n_ghi = int((g_path > GARCH_HI * garch_ref).sum())
     n_glo = int((g_path < GARCH_LO * garch_ref).sum())
+    _g_of = f"of the {len(g_path)} trading days to {g_path.index[-1]:%d %b %Y}"
     checks.append(("GARCH forecast high", f"10-day forecast above {common.fmt_vol(GARCH_HI * garch_ref)} "
                    f"({GARCH_HI:.1f}x 3-year mean)", f"{common.fmt_vol(garch_forecast_10d)}", g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
     checks.append(("GARCH forecast low", f"10-day forecast below {common.fmt_vol(GARCH_LO * garch_ref)} "
@@ -1014,28 +1123,30 @@ if garch is not None and garch_ref:
         anomalies.append({'level': '🟡 WARNING', 'type': 'GARCH Forecast Above 3-Year Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(g_ratio - 1) * 100:.0f}% above the {garch_ref_name} '
-                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_ghi} of the last {len(g_path)} trading days.')})
+                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_ghi} {_g_of}.')})
     elif g_ratio < GARCH_LO:
         anomalies.append({'level': '🟢 INFO', 'type': 'GARCH Forecast Below 3-Year Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(1 - g_ratio) * 100:.0f}% below the {garch_ref_name} '
-                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} of the last {len(g_path)} trading days.')})
+                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} {_g_of}.')})
 
 # 3. Correlation outside its own 3-year range.
 if has_corr:
     corr_out = corr_now > corr_hi or corr_now < corr_lo
     n_corr = int(((corr_last > corr_hi) | (corr_last < corr_lo)).sum())
-    checks.append(("Correlation shift", f"30-day corr outside {corr_lo:.2f} to {corr_hi:.2f} "
+    checks.append((f"Correlation with {compare_label}", f"30-day corr outside {corr_lo:.2f} to {corr_hi:.2f} "
                    f"({VOL_LO_PCT}th to {VOL_HI_PCT}th pct)", f"{corr_now:.2f}", corr_out, f"{n_corr} of {len(corr_last)}"))
     if corr_out:
         anomalies.append({'level': '🔵 WATCH', 'type': 'Correlation Outside 3-Year Range',
                           'detail': (f'30-day correlation of daily returns with {compare_label} is {corr_now:.2f}, '
-                                     f'outside its 3-year {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range '
+                                     f'outside its {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range of {ref_name} '
                                      f'({corr_lo:.2f} to {corr_hi:.2f}; median {corr_med:.2f}). Fired on {n_corr} '
-                                     f'of the last {len(corr_last)} trading days.')})
+                                     f'of the {len(corr_last)} trading days to {corr_last.index[-1]:%d %b %Y}.'
+                                     + corr_close_note)})
 
-# 4. Large daily losses in the last 252 trading days.
-_tail_when = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x 3-year VaR99) in the last {len(recent_all)} days"
+# 4. Large daily losses in the last 252 trading days of the reference window.
+_tail_rule = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x 3-year VaR99) on the latest day; breaches counted "
+              f"over the {len(recent_all)} trading days to {_ref_end:%d %b %Y}"
               + (", Brent roll days excluded" if IS_BRENT else ""))
 # "Fires now" means the latest trading day, as for the other checks; the last breach in the window is
 # shown with its date, so a loss months ago is not read as today's signal.
@@ -1046,10 +1157,9 @@ _tail_latest = (f"latest {_last_ret:+.2f}%"
                 + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
                    else f"; worst in window {recent_rets.min():.2f}%")
                 + (" (excl. roll days)" if IS_BRENT else ""))
-checks.append(("Large daily loss", _tail_when.replace(" in the last", " on the latest day; breaches counted over the last"),
-               _tail_latest, _tail_now, f"{len(tail_days)} of {len(recent_rets)}"))
+checks.append(("Large daily loss", _tail_rule, _tail_latest, _tail_now, f"{len(tail_days)} of {len(recent_rets)}"))
 if len(tail_days):
-    _tail_detail = (f'{len(tail_days)} daily loss(es) in the last {len(recent_all)} trading days '
+    _tail_detail = (f'{len(tail_days)} daily loss(es) in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
                     + ("(Brent roll days excluded) " if IS_BRENT else "")
                     + f'beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the 3-year 99% VaR of {var99_3y:.2f}%); '
                     f'the largest was {tail_days.min():.2f}% on {tail_days.idxmin():%d %b %Y}.')
@@ -1059,15 +1169,16 @@ if len(tail_days):
         _tail_detail += roll_note
     anomalies.append({'level': '🔵 WATCH' if _tail_now else '🟢 INFO',
                       'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x 3-Year VaR99'
-                               + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not today)')),
+                               + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not on the latest day)')),
                       'detail': _tail_detail,
                       'past': (None if _tail_now else
                                f'daily loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x 3-year VaR99): {len(tail_days)} in the '
-                               f'last {len(recent_all)} trading days, the latest {tail_days.iloc[-1]:.2f}% on '
+                               f'{len(recent_all)} trading days to {_ref_end:%d %b %Y}, the latest {tail_days.iloc[-1]:.2f}% on '
                                f'{tail_days.index[-1]:%d %b %Y}')})
 
 check_tbl = pd.DataFrame(checks, columns=['Check', 'Fires when', 'Latest', 'Fires now',
-                                          f'Days fired (of the last {CHECK_DAYS} trading days, or fewer if not available)'])
+                                          f'Days fired (of the {CHECK_DAYS} trading days to {_ref_end:%d %b %Y}, '
+                                          'or fewer if not available)'])
 check_tbl['Fires now'] = check_tbl['Fires now'].map({True: 'Yes', False: 'No'})
 st.dataframe(check_tbl, hide_index=True, width="stretch")
 if IS_BRENT and tail_roll_fact:
@@ -1093,16 +1204,18 @@ else:
     st.info(f"None of the {len(checks)} checks fires on the latest data. They cover only volatility, the GARCH "
             "forecast, one correlation and daily losses; they say nothing about supply, storage, positions or news.")
 
-_vs_checks = common.vol_summary(core, name=selected_commodity)
 st.caption(
-    f"Reference window: {ref_source}, the last 3 years. Thresholds and the counts of "
-    "days fired come from the same window, so the counts are in-sample: about 5% of the 3 years lies beyond "
-    "each percentile by construction, and the count shows how much of that fell in the last year. Latest "
-    f"values are at the last date of the selected range ({df_analysis.index[-1]:%d %b %Y}). " + garch_window_note
-    + " The GARCH counts use today's fitted parameters for every past day. Volatility is the standard deviation "
-    "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether "
-    "today is unusual for the last 3 years; the volatility heading on the Risk page places it against the pre-war "
-    "level and the whole history instead. " + _vs_checks['detail'] + roll_note)
+    f"Reference window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
+    f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
+    f"percentile by construction, and the count shows how much of that fell in {_count_span}. Latest values are "
+    f"at the last date of the selected range ({_asof:%d %b %Y})."
+    + common.last_value_note(commodity['ticker'], end_date) + " " + garch_fit_note
+    + " The Risk page fits its GARCH on the whole selected range, so its forecast can differ. The GARCH counts "
+    "use the parameters fitted on the whole window for every past day. Volatility is the standard deviation "
+    "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether the "
+    "latest day is unusual for the 3 years before it; the volatility line above the table places it against the "
+    "pre-war level and the whole history instead. " + _vs['detail']
+    + (" " + _vs['roll'] if _vs['roll'] else "") + roll_note + corr_close_note)
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
@@ -1128,9 +1241,9 @@ def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, 
 
     v = f"{common.fmt_vol(vol_now)}"
     add('vol', "Current 30-day volatility", vol_now, v, vol_spike,
-        f"the volatility-spike threshold {common.fmt_vol(vol_spike)} ({VOL_HI_PCT}th percentile of 3 years)")
+        f"the volatility-spike threshold {common.fmt_vol(vol_spike)} ({VOL_HI_PCT}th percentile of {ref_name})")
     add('vol', "Current 30-day volatility", vol_now, v, vol_calm,
-        f"the unusual-calm threshold {common.fmt_vol(vol_calm)} ({VOL_LO_PCT}th percentile of 3 years)")
+        f"the unusual-calm threshold {common.fmt_vol(vol_calm)} ({VOL_LO_PCT}th percentile of {ref_name})")
     add('vol', "Current 30-day volatility", vol_now, v, ref_mean,
         f"the 3-year average 30-day volatility {common.fmt_vol(ref_mean)}")
     if g_10d is not None:
@@ -1151,7 +1264,7 @@ def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, 
     if corr_v is not None:
         c = f"{corr_v:.2f}"
         add('corr', f"Current 30-day correlation with {corr_label}", corr_v, c, corr_hi_v,
-            f"the top of its 3-year {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range, {corr_hi_v:.2f}")
+            f"the top of its {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range of {ref_name}, {corr_hi_v:.2f}")
         add('corr', f"Current 30-day correlation with {corr_label}", corr_v, c, corr_lo_v,
             f"the bottom of that range, {corr_lo_v:.2f}")
     return lines, levels
@@ -1161,18 +1274,23 @@ def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, 
 # The model is told on which side of every level the current value is, but its output is still
 # checked before display: a sentence that tells the reader to watch whether a value pushes
 # above (or falls below) a level it is already above (below) is dropped. Deterministic rules:
-# 1. split the text into sentences;
+# 1. "ann." is written out as "annualised" first, so the abbreviation the page itself uses
+#    ("51% ann. (3.19% daily)") does not end a sentence; then the text is split into sentences;
 # 2. only sentences with a forward-looking cue (watch, monitor, whether, if, would, could, next,
 #    coming, following, ahead) are tested;
 # 3. for every crossing verb (pushes, breaks, crosses, rises, climbs, moves, returns, jumps, falls,
-#    drops, slips, dips, sinks, eases, retreats, declines) take the first number with a decimal point
-#    in the next 80 characters; the move is downward if "below", "under", "down", "lower" or a falling
-#    verb appears between the verb and the number, otherwise upward;
+#    drops, slips, dips, sinks, eases, retreats, declines) the numbers in the next 80 characters are
+#    read: the first one, and the next one if it follows in brackets (the other scale of the same
+#    level). A percentage (with or without decimals) is a volatility, annualised if
+#    "annualised" (or "annualized", "annual") follows it and daily if "daily" follows it, either if
+#    neither does; a decimal number without "%" is a correlation. The move is downward if "below",
+#    "under", "down", "lower" or a falling verb appears between the verb and the first number,
+#    otherwise upward;
 # 4. the subject is the first of GARCH/forecast, correlation or volatility named between the cue and
 #    the verb (if none, every subject is tried);
-# 5. the number matches a level when it equals the level rounded to the same decimals; the sentence
-#    is dropped if the current value is already above that level for an upward move, or already
-#    below it for a downward move.
+# 5. a number matches a level when it equals the level rounded to the same decimals, an annualised
+#    number against the level x sqrt(252); the sentence is dropped if the current value is already
+#    above that level for an upward move, or already below it for a downward move.
 _FORWARD_CUE = re.compile(r"\b(?:watch\w*|monitor\w*|whether|if|would|could|next|coming|following|ahead)\b", re.I)
 _CROSS_VERB = re.compile(
     r"\b(?:push(?:es|ing)?|break(?:s|ing)?|cross(?:es|ing)?|climb(?:s|ing)?|ris(?:e|es|ing)|mov(?:e|es|ing)"
@@ -1181,7 +1299,11 @@ _CROSS_VERB = re.compile(
 _DOWNWARD = re.compile(
     r"\b(?:below|under|beneath|down|lower|fall(?:s|ing)?|drop(?:s|ping)?|slip(?:s|ping)?|dip(?:s|ping)?"
     r"|sink(?:s|ing)?|eas(?:e|es|ing)|retreat(?:s|ing)?|declin(?:e|es|ing))\b", re.I)
-_DECIMAL = re.compile(r"(?<![\d.])(\d+)\.(\d+)")
+# A number: a percentage (integer or decimal) or a decimal; bare integers ("ten days", "10 days") are not levels.
+_NUMBER = re.compile(r"(?<![\d.])(\d+)(?:\.(\d+))?(?![\d.])(\s*%)?")
+_ANN_ABBR = re.compile(r"\bann\.", re.I)
+_ANNUAL_AFTER = re.compile(r"\s*(?:annuali[sz]ed|annual)\b", re.I)
+_DAILY_AFTER = re.compile(r"\s*daily\b", re.I)
 _SUBJECTS = [('garch', re.compile(r"\b(?:GARCH|forecast)\b", re.I)),
              ('corr', re.compile(r"\bcorrelation\b", re.I)),
              ('vol', re.compile(r"\b(?:volatility|vol)\b", re.I))]
@@ -1192,30 +1314,67 @@ def _subject(text):
     return min(found)[1] if found else None
 
 
+def _numbers(window, start):
+    """(value, decimals, kind) for each level-like number in `window` from `start`: kind 'ann', 'daily' or
+    'pct' (a percentage of either scale) for a percentage, 'corr' for a decimal without '%'."""
+    out = []
+    for m in _NUMBER.finditer(window, start):
+        whole, frac, pct = m.group(1), m.group(2), m.group(3)
+        if not pct and frac is None:
+            continue
+        num, dec = float(whole + ("." + frac if frac else "")), len(frac or "")
+        if not pct:
+            out.append((m.start(), num, dec, 'corr'))
+            continue
+        rest = window[m.end():]
+        kind = 'ann' if _ANNUAL_AFTER.match(rest) else 'daily' if _DAILY_AFTER.match(rest) else 'pct'
+        out.append((m.start(), num, dec, kind))
+    return out
+
+
+def _matches(num, dec, kind, sub, thr):
+    """True if the number written in the text is this level, to the decimals written."""
+    if kind == 'corr':
+        return sub == 'corr' and round(thr, dec) == round(num, dec)
+    if sub == 'corr':
+        return False
+    daily_ok = round(thr, dec) == round(num, dec)
+    ann_ok = round(thr * common.ANNUAL, dec) == round(num, dec)
+    return {'ann': ann_ok, 'daily': daily_ok}.get(kind, daily_ok or ann_ok)
+
+
 def drop_crossed_watch_sentences(text, levels):
-    """(text without the offending sentences, list of dropped sentences). See the rules above."""
-    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    """(text without the offending sentences, list of dropped sentences). See the rules above. `levels` are
+    (subject, threshold, current) with subject 'vol', 'garch' or 'corr' and volatility levels as daily %."""
+    text = _ANN_ABBR.sub("annualised", text.strip())
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s]
     kept, dropped = [], []
     for s in sentences:
         bad = False
         if _FORWARD_CUE.search(s):
             for vm in _CROSS_VERB.finditer(s):
                 window = s[vm.start():vm.start() + 80]
-                nm = _DECIMAL.search(window, len(vm.group(0)))
-                if not nm:
+                nums = _numbers(window, len(vm.group(0)))
+                if not nums:
                     continue
-                downward = bool(_DOWNWARD.search(window[:nm.start()]))
+                downward = bool(_DOWNWARD.search(window[:nums[0][0]]))
+                # The level named is the first number, with its other scale if it follows in brackets
+                # ("28% annualised (1.74% daily)"); later numbers belong to other parts of the sentence.
+                nums = nums[:1] + [x for x in nums[1:2]
+                                   if x[0] - nums[0][0] <= 30 and "(" in window[nums[0][0]:x[0]]]
                 before = s[:vm.start()]
                 cues = list(_FORWARD_CUE.finditer(before))
                 subj = _subject(before[cues[-1].end():] if cues else before) or _subject(before)
-                num, dec = float(nm.group(0)), len(nm.group(2))
-                for sub, thr, cur in levels:
-                    if subj is not None and sub != subj:
-                        continue
-                    if round(thr, dec) != round(num, dec):
-                        continue
-                    if (not downward and cur > thr) or (downward and cur < thr):
-                        bad = True
+                for _, num, dec, kind in nums:
+                    for sub, thr, cur in levels:
+                        if subj is not None and sub != subj:
+                            continue
+                        if not _matches(num, dec, kind, sub, thr):
+                            continue
+                        if (not downward and cur > thr) or (downward and cur < thr):
+                            bad = True
+                            break
+                    if bad:
                         break
                 if bad:
                     break
@@ -1230,7 +1389,8 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
                             var_95_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
                             avg_score_v, score_model, avg_30d_v, anomaly_types_str,
                             top_neg_str, date_str, levels_str, tail_fact_str,
-                            past_breaches_str=""):
+                            past_breaches_str="", garch_fit_str="", has_prewar=True, trend_label="30-day",
+                            check_window_str="the last 3 years"):
     api_key = None
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", None)
@@ -1253,12 +1413,25 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
     if garch_10d and garch_ref_v:
         _pos = "above" if garch_10d > garch_ref_v else "below" if garch_10d < garch_ref_v else "equal to"
         garch_line += (f"; the day-10 forecast is {abs(garch_10d / garch_ref_v - 1) * 100:.0f}% {_pos} the "
-                       f"{garch_ref_label} ({common.fmt_vol(garch_ref_v)}). Model fitted on the same 3 years")
+                       f"{garch_ref_label} ({common.fmt_vol(garch_ref_v)}). {garch_fit_str}").rstrip()
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
     past_line = past_breaches_str if past_breaches_str else "None"
 
     headline_line = top_neg_str if top_neg_str else "None retrieved"
     sentiment_30d_line = (f"{avg_30d_v:+.3f}" if avg_30d_v is not None else "N/A")
+    # Whether the two tone readings come from different models: the trend is always FinVADER.
+    if score_model == "FinBERT":
+        tone_models = ("- The current reading (FinBERT) and the trend average (FinVADER) come from DIFFERENT models "
+                       "and are NOT on a common scale. Never compare them numerically and never describe a move "
+                       "from one to the other.")
+    else:
+        tone_models = (f"- The current reading and the trend average are both scored with {score_model}, but over "
+                       "different headlines (at most twenty from several feeds over the last 7 days against Google "
+                       "News headlines over a longer period). A difference between them is not a trend: do not "
+                       "describe a move from one to the other.")
+    prewar_rule = ("State the pre-war multiple whenever you describe the level of volatility." if has_prewar else
+                   "There is no pre-war multiple for this date (the summary says why): do not mention one, and "
+                   "describe the level of volatility only by its percentile.")
     sentiment_now_line = (f"{avg_score_v:+.3f} ({score_model})" if avg_score_v is not None
                           else "N/A (news feeds unreachable, no tone computed)")
     tail_line = tail_fact_str if tail_fact_str else "None"
@@ -1268,12 +1441,12 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
 HOW TO READ THE INPUTS
 
 Volatility
-- All volatility figures are DAILY standard deviation of returns, in percent. Not annualised.
-- The GARCH figure forecasts the daily volatility on the tenth trading day ahead. It is not a cumulative move over ten days.
-- The GARCH check compares the day-10 forecast with the commodity's 3-year average 30-day volatility, not with current volatility; the GARCH model is fitted on the same 3 years. Describe the forecast only by the two facts given: its direction relative to current GARCH volatility (higher, lower or about the same) and whether it is above or below the 3-year average. Use neutral wording: do not call it normalisation, mean reversion, a return to normal, escalation, a build-up of risk, calming, reassuring or a danger signal.
+- Every volatility figure is the standard deviation of daily returns, written annualised first (daily x the square root of 252) with the daily figure in brackets, for example "51% ann. (3.19% daily)". The two numbers are the same volatility on two scales: never compare an annualised figure with a daily one.
+- The GARCH figure forecasts the volatility of a single day's return on the tenth trading day ahead (written the same way). It is not a cumulative move over ten days.
+- The GARCH check compares the day-10 forecast with the commodity's average 30-day volatility over {check_window_str}, not with current volatility. {garch_fit_str} Describe the forecast only by the two facts given: its direction relative to current GARCH volatility (higher, lower or about the same) and whether it is above or below the 3-year average. Use neutral wording: do not call it normalisation, mean reversion, a return to normal, escalation, a build-up of risk, calming, reassuring or a danger signal.
 
 Volatility summary
-- The volatility summary places current 30-day volatility against two references that do not roll with the market: its multiple of the pre-war level (Oct to Dec 2025) and its percentile among every 30-day volatility since the start of the data (named in the summary). State the pre-war multiple whenever you describe the level of volatility.
+- The volatility summary places current 30-day volatility against two references that do not roll with the market: its multiple of the pre-war level (Oct to Dec 2025) and its percentile among every 30-day volatility since the start of the data (named in the summary). {prewar_rule}
 - There is no Normal / Elevated / Extreme label. Do not invent one, and do not call volatility high or low without one of the two references.
 - Volatility measures how much prices move, not overall risk. Never call the market "low risk" because volatility is low: supply disruptions, storage levels and policy events can make a calm-volatility market risky.
 - The selected-period average volatility is context only.
@@ -1283,12 +1456,12 @@ VaR
 - VaR 95% is the 5th percentile of daily returns over the last 250 trading days: a loss threshold, given as a negative number.
 
 Headline tone - weak evidence, handle with care
-- Computed from at most twenty scraped headlines of the last 7 days, by models trained on company news. It is the tone of the wording, NOT a price direction: a headline about a price surge can score negative.
-- The current reading and the 30-day average come from DIFFERENT models depending on which service was reachable, and are NOT on a common scale. Never compare them numerically and never describe a move from one to the other.
+- Computed from at most twenty scraped headlines of the last 7 days, by FinBERT (fine-tuned on sentences from financial news) or FinVADER (finance word lists). It is the tone of the wording, NOT a price direction: a headline about a price surge can score negative.
+{tone_models}
 - Anything between -0.05 and +0.05 is NEUTRAL. Do not call it mildly positive or mildly negative.
 
 Checks and headlines
-- The latest-day checks field lists only the NAMES of the statistical checks firing on the latest day (percentiles of the last 3 years). The past-breaches field lists events that are over; mention one only with its date, as past. Their thresholds are in the LEVELS list; do not invent other numbers.
+- The latest-day checks field lists only the NAMES of the statistical checks firing on the latest day (percentiles of {check_window_str}). The past-breaches field lists events that are over; mention one only with its date, as past. Their thresholds are in the LEVELS list; do not invent other numbers.
 - The headline field is raw scraped text, truncated and unverified.
 
 MARKET DATA AS OF {date_str}
@@ -1296,9 +1469,9 @@ MARKET DATA AS OF {date_str}
 - 30-day rolling volatility: {common.fmt_vol(latest_vol_v)} (average over the selected period {common.fmt_vol(avg_vol_v)})
 - VaR 95%, 1-day (historical, last 250 trading days): {var_95_v:.2f}%
 - {garch_line}
-- Headline tone now: {sentiment_now_line} | 30-day average (FinVADER): {sentiment_30d_line}
+- Headline tone now: {sentiment_now_line} | {trend_label} average (FinVADER): {sentiment_30d_line}
 - Checks firing on the latest day: {anomaly_line}
-- Past breaches in the last 252 trading days (with dates): {past_line}
+- Past breaches in the last 252 trading days up to the data date (with dates): {past_line}
 - Daily-loss check and contract rolls: {tail_line}
 - Unverified headlines: {headline_line}
 
@@ -1356,8 +1529,9 @@ Output only the 3 sentences."""
 
 anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies if not a.get('past'))
 past_breaches_for_llm = "; ".join(a['past'] for a in anomalies if a.get('past'))
-_vs = common.vol_summary(core, name=selected_commodity)
-vol_summary_for_llm = f"{_vs['headline']}; {_vs['headline2']}. {_vs['detail']}"
+# The same vol_summary as the volatility line in the checks section (past_end, roll check included).
+vol_summary_for_llm = (f"{_vs['headline']}; {_vs['headline2'].replace(' (see below)', '')}. {_vs['detail']}"
+                       + (f" {_vs['roll']}" if _vs['roll'] else ""))
 if not is_live:
     top_neg_for_llm = "none (news feeds unreachable, no tone computed)"
 else:
@@ -1398,6 +1572,10 @@ narrative, error = generate_risk_narrative(
     date_str=today_date_str,
     levels_str=levels_for_llm,
     tail_fact_str=tail_roll_fact,
+    garch_fit_str=garch_fit_note,
+    has_prewar=bool(_vs['ctx'] and _vs['ctx']['prewar_ratio'] is not None),
+    trend_label=trend_label,
+    check_window_str=ref_name,
 )
 
 narrative_dropped = []
@@ -1466,6 +1644,13 @@ if not cr_df.empty:
                  'gdp_clv': 'GDP (M€ 2020 prices, nama_10_gdp CLV20_MEUR)'}
     cr_export = ranked[['Country', mcol] + raw_cols].rename(columns={mcol: M['measure'], **raw_names})
     eu_export = pd.DataFrame([eu])[['Country', mcol] + raw_cols].rename(columns={mcol: M['measure'], **raw_names})
+    # Which of the row's values Eurostat flags as provisional ("p"), by the column names above.
+    _prov_names = {**raw_names, mcol: M['measure']}
+
+    def _prov_list(r):
+        return "; ".join(_prov_names[c] for c in [mcol] + raw_cols if is_provisional(r, c))
+    cr_export['Provisional values (Eurostat flag p)'] = [_prov_list(r) for _, r in ranked.iterrows()]
+    eu_export['Provisional values (Eurostat flag p)'] = [_prov_list(eu)]
     cr_export.insert(0, 'Rank', range(1, len(cr_export) + 1))
     eu_export.insert(0, 'Rank', 'reference')
     cr_export = pd.concat([cr_export, eu_export], ignore_index=True)

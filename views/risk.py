@@ -109,10 +109,6 @@ _last_cmp = _cmp_own.index.max() if len(_cmp_own) else None   # its own last pri
 # TTF=F follows the NYMEX trading calendar, as BZ=F does: when Brent already has a price for a later day and
 # TTF=F does not, Yahoo's TTF row for that day is late, not a holiday (same check as the Power page).
 _ttf_late = ""
-# The last row can still be a live or evening-session price when the end date is the latest trading day or the
-# day before it (Yahoo rewrites a row to the settlement only hours later), not only when it is today.
-_recent_end = (pd.Timestamp.today().normalize() - pd.Timestamp(end_date)).days <= 3
-_futures = commodity['ticker'].endswith("=F")
 if not _past_end:
     for _n, _t, _d in ((selected_commodity, commodity['ticker'], _last_px), (compare_label, ctx.compare_ticker, _last_cmp)):
         if _t == "TTF=F" and _d is not None:
@@ -124,9 +120,9 @@ if not _past_end:
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
-           + ((" The last value can be a price from the current or the evening electronic session, not the "
-               "settlement, so it can change within the hour." if _futures else
-               " The last value is the latest close on the London Stock Exchange.") if _recent_end else "")
+           # The last row can still be a live or evening-session price when the end date is the latest trading
+           # day or shortly after it (Yahoo rewrites a row to the settlement only hours later).
+           + common.last_value_note(commodity['ticker'], end_date)
            + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
            "the series, computed together.")
 

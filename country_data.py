@@ -3,14 +3,15 @@
 Downloaded from the Eurostat API at run time and cached for a day:
 - import dependency (gas, oil, all products): nrg_ind_id, in % (net imports / gross
   available energy of that fuel)
-- gross available energy by fuel (natural gas, oil and petroleum products, all products):
-  nrg_bal_c, in thousand tonnes of oil equivalent (ktoe)
+- gross available energy by fuel (natural gas; oil and petroleum products excluding the biofuel
+  portion, O4000XBIO; all products): nrg_bal_c, in thousand tonnes of oil equivalent (ktoe)
 - renewable share of gross final energy consumption: nrg_ind_ren
 - greenhouse-gas intensity of GDP: env_air_gge (total GHG excluding LULUCF) divided by
   nama_10_gdp at constant prices (chain-linked volumes, 2020 reference year), in tonnes
   CO2-equivalent per million euro.
 No value is typed in by hand. Years run from FIRST_YEAR to the latest year Eurostat
-returns; a country without a value is shown as missing, never filled in.
+returns; a country without a value is shown as missing, never filled in. Values Eurostat flags
+as provisional (status "p") keep that flag, and every measure derived from one is provisional too.
 """
 import re
 
@@ -64,12 +65,13 @@ MODES = {
         question="Which countries are most exposed to imported gas?",
         measure='Net gas imports (% of all energy)',
         share='Gas share of energy (%)', dep='Gas import dependency (%)',
-        inputs=('gae_gas', 'gae_total', 'dep_gas'), fuel='natural gas'),
+        inputs=('gae_gas', 'gae_total', 'dep_gas'), fuel='Natural gas'),   # Eurostat's label for G3000
     'oil': dict(
         question="Which countries are most exposed to imported oil?",
         measure='Net oil imports (% of all energy)',
         share='Oil share of energy (%)', dep='Oil import dependency (%)',
-        inputs=('gae_oil', 'gae_total', 'dep_oil'), fuel='oil and petroleum products'),
+        inputs=('gae_oil', 'gae_total', 'dep_oil'),
+        fuel='Oil and petroleum products (excluding biofuel portion)'),   # Eurostat's label for O4000XBIO
     'carbon': dict(
         question="Which economies emit the most greenhouse gas per unit of output?",
         measure='GHG intensity (tCO2e per M€, 2020 prices)',
@@ -79,12 +81,14 @@ MODES = {
 
 
 def _jsonstat_values(js):
-    """{(geo, year): value} from a Eurostat JSON-stat 2.0 response filtered to one series."""
+    """({(geo, year): value}, {(geo, year): status}) from a Eurostat JSON-stat 2.0 response filtered to one
+    series. The status is Eurostat's flag for that value ("p" = provisional), keyed like the value."""
     ids, sizes = js['id'], js['size']
     cats = {d: js['dimension'][d]['category']['index'] for d in ids}
     # position -> code for each dimension
     pos = {d: {v: k for k, v in cats[d].items()} for d in ids}
-    out = {}
+    status = js.get('status', {}) or {}
+    out, flags = {}, {}
     for flat, val in js.get('value', {}).items():
         if val is None:
             continue
@@ -92,13 +96,16 @@ def _jsonstat_values(js):
         for d, n in zip(reversed(ids), reversed(sizes)):
             idx[d] = pos[d][rem % n]
             rem //= n
-        out[(idx['geo'], int(idx['time']))] = float(val)
-    return out
+        key = (idx['geo'], int(idx['time']))
+        out[key] = float(val)
+        if status.get(str(flat)):
+            flags[key] = str(status[str(flat)])
+    return out, flags
 
 
 @st.cache_data(ttl=86400, show_spinner="Downloading country data from Eurostat...")
 def _fetch_eurostat(dataset, filters):
-    """(values, last update) for one series, from FIRST_YEAR to the latest year available."""
+    """(values, status flags, last update) for one series, from FIRST_YEAR to the latest year available."""
     params = [('format', 'JSON'), ('lang', 'EN'), ('freq', 'A'),
               ('sinceTimePeriod', str(FIRST_YEAR))]
     params += list(filters.items())
@@ -107,7 +114,21 @@ def _fetch_eurostat(dataset, filters):
     r = requests.get(_EUROSTAT_URL.format(dataset), params=params, timeout=30)
     r.raise_for_status()
     js = r.json()
-    return _jsonstat_values(js), str(js.get('updated', ''))[:10]
+    values, flags = _jsonstat_values(js)
+    return values, flags, str(js.get('updated', ''))[:10]
+
+
+# Inputs of each derived column, so a measure built from a provisional value is marked provisional too.
+_DERIVED_FROM = {
+    'gas_share': ('gae_gas', 'gae_total'), 'gas_exposure': ('gae_gas', 'gae_total', 'dep_gas'),
+    'oil_share': ('gae_oil', 'gae_total'), 'oil_exposure': ('gae_oil', 'gae_total', 'dep_oil'),
+    'ghg_int': ('ghg', 'gdp_clv'),
+}
+
+
+def is_provisional(row, col):
+    """True if Eurostat flags `col` (or an input of it) as provisional in this row of load_country_data."""
+    return col in str(row.get('provisional', '') or '').split(',')
 
 
 def _ratio(a, b, scale=100.0):
@@ -123,15 +144,17 @@ def load_country_data():
       oil_share (% of gross available energy), gas_exposure and oil_exposure (net imports of
       the fuel as % of all gross available energy = share x dependency, with a negative
       dependency (net exporter) counted as 0), ghg_int (tCO2e per million euro of GDP at 2020 prices).
+      `provisional` lists the columns whose value Eurostat flags as provisional, comma-separated ("" if
+      none); a derived column is listed when any of its inputs is.
     - failed: names of datasets that could not be downloaded.
     - updated: {dataset: last Eurostat update date}.
     """
-    raw, failed, updated = {}, [], {}
+    raw, flags, failed, updated = {}, {}, [], {}
     for key, (dataset, filters) in _SERIES.items():
         try:
-            raw[key], updated[dataset] = _fetch_eurostat(dataset, filters)
+            raw[key], flags[key], updated[dataset] = _fetch_eurostat(dataset, filters)
         except Exception:
-            raw[key] = {}
+            raw[key], flags[key] = {}, {}
             failed.append(dataset)
     years = sorted({yr for vals in raw.values() for (_, yr) in vals})
     rows = []
@@ -158,6 +181,11 @@ def load_country_data():
                     # net imports over gross available energy.
                     r[f'{fuel}_exposure'] = share * max(dep, 0.0) / 100
             r['ghg_int'] = _ratio(r['ghg'], r['gdp_clv'], scale=1000.0)  # kt -> t, per M€
+            prov = {key for key in _SERIES if flags[key].get((geo, yr)) == 'p' and r[key] is not None}
+            for col, inputs in _DERIVED_FROM.items():
+                if r[col] is not None and prov & set(inputs):
+                    prov.add(col)
+            r['provisional'] = ",".join(sorted(prov))
             rows.append(r)
     df = pd.DataFrame(rows)
     return df, sorted(set(failed)), updated

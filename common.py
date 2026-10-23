@@ -75,6 +75,9 @@ def resolve_carbon_benchmark():
 
 
 
+OIL_BARREL_TERMS = ['a barrel', 'per barrel', 'barrels a day', 'barrels per day', 'bpd']
+
+
 def build_commodities(carbon):
     """Commodity definitions. The carbon entry follows whichever benchmark resolved."""
     return {
@@ -90,7 +93,9 @@ def build_commodities(carbon):
             "ticker": "CL=F",
             "unit": "$/barrel",
             "color": "saddlebrown",
-            "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'barrel', 'refinery'],
+            # "barrel" alone also matches stories such as "Tank barrel production returns to UK", so it counts
+            # only as an oil-price unit ("a barrel", "per barrel", "barrels a day").
+            "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'refinery'] + OIL_BARREL_TERMS,
             "rss_query": "crude+oil+Europe+price",
             "news_term": "oil",   # one word for country and 30-day news queries
         },
@@ -98,7 +103,7 @@ def build_commodities(carbon):
             "ticker": "BZ=F",
             "unit": "$/barrel",
             "color": "darkred",
-            "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'barrel', 'North Sea'],
+            "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'North Sea'] + OIL_BARREL_TERMS,
             "rss_query": "brent+oil+Europe+price",
             "news_term": "oil",   # one word for country and 30-day news queries
         },
@@ -350,10 +355,14 @@ def compute_core(ticker, compare_ticker, start, end):
     overall_corr = returns_corr['Returns'].corr(returns_corr['Compare_Returns'])
 
     # 30-day volatility since the start of the data (2017) up to today, from the same download: the source of
-    # the percentile, the pre-war multiple and the Market page's 3-year reference window.
+    # the percentile and the pre-war multiple (vol_context cuts it at the end date).
     hist = _slice(raw, _CONTEXT_START, today)
     hist_vol = (simple_returns(hist.mask(_stale_mask(hist))).rolling(30, min_periods=20).std() * 100).dropna()
-    ref3y = three_year_reference(hist_vol, df_analysis['Volatility'])
+    # The Market page's 3-year check window ends on the end date, never later, and comes from this same download
+    # (the comparison series from its own shared download, the one `compare` above is cut from).
+    ref_price = _slice(raw, _CONTEXT_START, end)
+    ref_compare = load_close(compare_ticker, min(pd.Timestamp(start).date(), _CONTEXT_START), end)
+    ref3y = three_year_reference(ref_price.mask(_stale_mask(ref_price)), ref_compare, df_analysis)
 
     vol_asof = df_analysis['Volatility'].dropna().index[-1]
     window_returns = df_analysis['Returns'].loc[:vol_asof].tail(30)
@@ -463,21 +472,35 @@ _MIN_HISTORY = 250
 ANNUAL = np.sqrt(252)   # daily volatility x sqrt(252) = annualised volatility
 
 
-@st.cache_data(ttl=3600, show_spinner="Computing the 3-year reference...")
-def three_year_reference(hist_vol, fallback_vol):
-    """The last CHECK_WINDOW trading days of 30-day volatility up to today: the reference window of the Market
-    page's statistical checks (its mean is the GARCH check's reference level).
+def three_year_reference(price, compare, fallback):
+    """The reference window of the Market page's statistical checks: the last CHECK_WINDOW trading days up to
+    the end date of the selected range, never later. A past end date is judged against the 3 years before it,
+    with no data from after it.
 
-    `hist_vol` is the 30-day volatility up to today from the shared download, computed once in compute_core
-    (the only caller), so the cache key is the download itself and the window expires with it. If that history
-    is too short, `fallback_vol` (the 30-day volatility of the selected range) is used instead.
+    `price` is the commodity's close from compute_core's download (the only caller) from the start of the data
+    to the end date, stale repeats masked; `compare` the comparison series over the same span. The definitions
+    are compute_core's: simple returns on each series' own trading days, non-positive prices dropped, 30-day
+    windows with at least 20 returns. Returns dict(vol, corr, rets, start, end, n, mean, std, fallback): the
+    last CHECK_WINDOW values of 30-day volatility (daily, %) and of the 30-day correlation of returns, and the
+    daily returns from the window's first day (for the 3-year VaR99, the GARCH fit and the counts of days
+    fired); `mean` (of vol) is the GARCH check's reference level. If that history has fewer than _MIN_HISTORY
+    volatility values, the selected range (`fallback`, compute_core's df_analysis) is used instead and
+    `fallback` is True.
     """
-    vol = hist_vol.dropna().tail(CHECK_WINDOW)
-    source = f"last {len(vol):,} trading days"
-    if len(vol) < _MIN_HISTORY:
-        vol, source = fallback_vol.dropna(), "selected date range only; recent history unavailable"
-    return dict(source=source, start=vol.index[0], end=vol.index[-1], n=len(vol),
-                mean=float(vol.mean()), std=float(vol.std()))
+    df = pd.DataFrame({'Price': price, 'R': simple_returns(price),
+                       'CR': simple_returns(compare)}).dropna(subset=['Price'])
+    df = df[df['Price'] > 0]
+    vol = (df['R'].rolling(30, min_periods=20).std() * 100).dropna().tail(CHECK_WINDOW)
+    corr = df['R'].rolling(30, min_periods=20).corr(df['CR']).dropna().tail(CHECK_WINDOW)
+    rets = df['R'].dropna()
+    used_fallback = len(vol) < _MIN_HISTORY
+    if used_fallback:
+        vol, corr = fallback['Volatility'].dropna(), fallback['Rolling Correlation'].dropna()
+        rets = fallback['Returns'].dropna()
+    else:
+        rets = rets.loc[vol.index[0]:]
+    return dict(vol=vol, corr=corr, rets=rets, start=vol.index[0], end=vol.index[-1], n=len(vol),
+                mean=float(vol.mean()), std=float(vol.std()), fallback=used_fallback)
 
 
 # Fixed pre-war reference: the last full quarter before the US-Israeli strikes on Iran on 28 Feb 2026.
@@ -718,10 +741,35 @@ def vol_summary(core, name=None, with_roll=False, past_end=False):
     elif ctx['prewar_incomplete']:
         detail += ("No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
                    f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
-    detail += (f"The percentile ranks today's figure among every 30-day volatility {span}, a history that "
-               "includes the 2021-22 crisis and the 2026 war; it does not move with a rolling window.")
+    # Name only the episodes that lie inside the history up to the end date (the war began with the strikes of
+    # 28 Feb 2026, _WAR_START is the first day of the month after).
+    events = []
+    if as_of >= pd.Timestamp("2023-01-01"):
+        events.append("the 2021-22 crisis")
+    elif as_of >= pd.Timestamp("2021-01-01"):
+        events.append(f"the 2021-22 crisis up to {as_of:%b %Y}")
+    if as_of >= _WAR_START:
+        events.append("the 2026 war")
+    whose = "the latest figure" if past_end else "today's figure"
+    detail += (f"The percentile ranks {whose} among every 30-day volatility {span}"
+               + (f", a history that includes {' and '.join(events)}" if events else "")
+               + "; it does not move with a rolling window.")
     out['detail'] = detail
     return out
+
+
+def last_value_note(ticker, end_date):
+    """The sentence on the last price, or '' when the end date is more than three days before today. Yahoo
+    rewrites a futures row to the settlement only hours after the close, so the note is kept for three days.
+    The Risk and Market pages both call this, so the note is written in one place."""
+    if (pd.Timestamp.today().normalize() - pd.Timestamp(end_date)).days > 3:
+        return ""
+    if ticker.endswith("=F"):
+        return (" The last value can be a price from the current or the evening electronic session, not the "
+                "settlement, so it can change within the hour.")
+    if ticker.endswith(".L"):
+        return " The last value is the latest close on the London Stock Exchange."
+    return " The last value is the latest close."
 
 
 # ─── Cross-commodity returns (correlation matrix, portfolio VaR, positions) ───
