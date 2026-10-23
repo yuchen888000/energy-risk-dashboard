@@ -652,9 +652,12 @@ ttf_last_date = ttf.index[-1]
 # all prices come from the shared download.
 _fit_from = min(pd.Timestamp(start_date), pd.Timestamp(common.DEFAULT_START)) - pd.Timedelta(days=10)
 _ttf_fit = common.load_close("TTF=F", _fit_from.date(), end_date).dropna()
-# The decision day is the end date (the last weekday on or before it), even when its TTF price is not out yet.
-_decide = max(pd.Timestamp(np.busday_offset(end_date, 0, roll="backward")), ttf_last_date.normalize())
-_wait_day = pd.Timestamp(np.busday_offset(_decide.date(), _WAIT_DAYS))
+# The decision day is the end date (the last NYMEX business day on or before it), even when its TTF price is not
+# out yet. The wait and the simulation horizon count NYMEX business days (common.NYMEX_BDAYS, the days TTF=F
+# settles), the calendar of the contract's last trading day, so "5 business days" means 5 trading days of the gas.
+_decide = max(pd.Timestamp(np.busday_offset(end_date, 0, roll="backward", busdaycal=common.NYMEX_BDAYS)),
+              ttf_last_date.normalize())
+_wait_day = pd.Timestamp(np.busday_offset(_decide.date(), _WAIT_DAYS, busdaycal=common.NYMEX_BDAYS))
 _front = common.front_month_contract("TTF=F", ttf_last_date)
 _front_exp = common.contract_expiry("TTF", _front["delivery"])
 # The front contract stops trading before the plant could buy in a week: switch to the next contract that
@@ -743,7 +746,8 @@ else:
     fit_series = _c if _mode == "own" else _ttf_fit
     price_now = float(_c.iloc[-1]) if _mode in ("own", "approx") else float(ttf.iloc[-1])
     price_date = _c.index[-1] if _mode in ("own", "approx") else ttf_last_date
-    _horizon = max(_WAIT_DAYS, int(np.busday_count(price_date.date(), _wait_day.date())))
+    _horizon = max(_WAIT_DAYS, int(np.busday_count(price_date.date(), _wait_day.date(),
+                                                   busdaycal=common.NYMEX_BDAYS)))
     wait = common.garch_price_range(fit_series, horizon=_horizon)
     if wait is None:
         st.caption("TTF price range unavailable: the GARCH model could not be fitted on this date range.")
@@ -799,7 +803,8 @@ if wait is not None:
 
     fig_w, ax_w = plt.subplots(figsize=(14, 3.5))
     hist = (_c if _switch else ttf).tail(40)
-    days_ahead = pd.bdate_range(price_date, periods=_horizon + 1)
+    days_ahead = pd.bdate_range(price_date, periods=_horizon + 1, freq="C",
+                                holidays=list(common.NYMEX_BDAYS.holidays))
     ax_w.plot(hist.index, hist.values, color="steelblue", linewidth=1.2,
               label=f"TTF {delivery_month:%b %y} ({contract})" if _switch else "TTF front month (TTF=F)")
     ax_w.fill_between(days_ahead, np.r_[price_now, wait["lo"] * scale], np.r_[price_now, wait["hi"] * scale],
@@ -873,9 +878,13 @@ if wait is not None:
             # Not matched to a listed contract: name a possible roll on the exchange-rule days, without a range.
             _cand = common.rule_roll_days("TTF", _rc["unknown"])
             if _cand:
-                _roll_txt = (" " + common.rule_roll_sentence(_cand) + f" These days are among the last {_ROLL_CHECK} "
-                             "returns of the fit, which weigh most on the fitted volatility; no range without them "
-                             "is given, because the roll is not identified.")
+                _roll_txt = (" " + common.rule_roll_sentence(_cand)
+                             + (" This day is" if len(_cand) == 1 else " These days are")
+                             + f" among the last {_ROLL_CHECK} "
+                             "returns of the fit, which weigh on the volatility at the end of the fit, where the "
+                             "range starts; no range without "
+                             + ("it" if len(_cand) == 1 else "them")
+                             + " is given, because the roll is not identified.")
         _method = (f"GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}. Monthly roll jumps in `TTF=F` feed into the "
                    "fitted volatility." + _roll_txt + _fit_note)

@@ -479,8 +479,8 @@ if corr_full is not None:
             st.pyplot(_heatmap(corr_30d, f"Last {common.VOL_DAYS} trading days, {_win_range}"))
         else:
             st.caption(f"No recent matrix: only {len(_recent_df)} of the last {common.VOL_DAYS} trading days have a "
-                       f"return in all four series, and at least {common.VOL_MIN} are needed (the same rule as the "
-                       "30-day correlation line), so the window does not reach back across a gap such as the "
+                       f"return in all four series, and at least {common.VOL_MIN} are needed (the same thresholds as the "
+                       f"30-day correlation line: {common.VOL_DAYS} days, at least {common.VOL_MIN}), so the window does not reach back across a gap such as the "
                        "carbon ETC's stale prices.")
 
     st.caption("Blue = positive correlation (move together). Red = negative (move inversely); for a hedged book a "
@@ -560,7 +560,7 @@ if commodity['ticker'] == "BZ=F":
                    f"was {_ex_roll.min() * 100:.2f}% on {_ex_roll.idxmin():%d %b %Y}.")
     else:
         st.caption(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
-                   "day of a month, or the last trading day of December).")
+                   "day of each month except January, or the last trading day of December).")
 if commodity['ticker'] == "TTF=F":
     _ttf_exp = common.ttf_expiry_days(df_analysis['Price'].dropna().index)
     _flag = [d for d in (_worst_recent_day, _worst_full_day) if d in _ttf_exp]

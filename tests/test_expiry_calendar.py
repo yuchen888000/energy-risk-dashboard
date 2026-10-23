@@ -8,6 +8,7 @@ Run from the repository root with `python -m pytest tests/`.
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -68,3 +69,43 @@ def test_roll_sentence_skips_candidate_of_identified_roll():
     rc['adjusted_vol'] = None
     text = common.roll_sentence("TTF=F", rc, window)
     assert "the Oct 26 contract's last trading day was 29 Sep 2026" in text
+
+
+@pytest.mark.parametrize("root, delivery, last_trade", [
+    # US holidays on which CME trades but publishes no settlement are not NYMEX business days.
+    ("CL", "2020-06-01", "2020-05-19"),   # Memorial Day 25 May 2020; The Energy Year, 19 May 2020
+    ("CL", "2026-06-01", "2026-05-19"),   # Memorial Day 25 May 2026
+    ("CL", "2037-06-01", "2037-05-19"),   # Memorial Day 25 May 2037
+    ("TTF", "2022-06-01", "2022-05-27"),  # second London business day 30 May 2022 is Memorial Day
+])
+def test_contract_expiry_us_no_settlement_days(root, delivery, last_trade):
+    assert common.contract_expiry(root, delivery) == pd.Timestamp(last_trade)
+
+
+@pytest.mark.parametrize("day, open_", [
+    ("2026-06-19", False),   # Juneteenth: CME's 2026 notice, no NYMEX settlement
+    ("2026-01-19", False),   # Martin Luther King Jr. Day
+    ("2026-09-07", False),   # Labor Day
+    ("2026-07-03", False),   # Friday before Saturday 4 July
+    ("2025-01-09", True),    # day of mourning, energy traded normally (CME notice of 30 Dec 2024)
+    ("2026-04-06", True),    # Easter Monday: a UK holiday, NYMEX open
+])
+def test_nymex_business_days(day, open_):
+    assert bool(np.is_busday(day, busdaycal=common.NYMEX_BDAYS)) is open_
+
+
+def test_rule_roll_days_ttf_uk_only_holiday():
+    # TTF Sep 21 stopped on Fri 27 Aug 2021; Mon 30 Aug 2021 is a UK bank holiday on which TTF=F has a price, so it
+    # is the next day of the series, not 31 Aug.
+    cand = common.rule_roll_days("TTF", pd.bdate_range("2021-08-20", "2021-09-03"))
+    assert sorted(cand) == [pd.Timestamp("2021-08-27"), pd.Timestamp("2021-08-30")]
+
+
+@pytest.mark.parametrize("now, expected", [
+    ("2026-10-23 09:54", True),    # 10:54 London (BST), session open
+    ("2026-10-23 15:59", True),    # 16:59 London
+    ("2026-10-23 16:00", False),   # 17:00 London
+    ("2026-10-24 09:00", False),   # next day: the 23 Oct row is a close
+])
+def test_london_session_row(now, expected):
+    assert common.london_session_row("2026-10-23", pd.Timestamp(now, tz="UTC")) is expected
