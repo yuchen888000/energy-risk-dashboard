@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 from arch import arch_model
+from arch.univariate import GARCH, StudentsT, ZeroMean
 from scipy.stats import chi2
 
 # ─── Carbon Benchmark Resolution ───
@@ -115,6 +116,12 @@ def build_commodities(carbon):
 DEFAULT_START = dt.date(2020, 1, 1)
 
 
+def berlin_today():
+    """Today's date in Berlin. The default end date and the Power page's "is it today" checks use it, so the
+    page agrees with the power market's calendar day whatever time zone the server runs in."""
+    return pd.Timestamp.now(tz="Europe/Berlin").date()
+
+
 def context():
     """Everything a page needs to know about the current selection.
 
@@ -137,7 +144,7 @@ def context():
         compare_ticker="TTF=F" if is_carbon else carbon["ticker"],
         compare_label="TTF Natural Gas (€/MWh)" if is_carbon else carbon["label"],
         start_date=st.session_state.get("start_date", DEFAULT_START),
-        end_date=st.session_state.get("end_date", dt.date.today()),
+        end_date=st.session_state.get("end_date", berlin_today()),
     )
 
 
@@ -199,10 +206,18 @@ def _slice(close, start, end):
     return close[(close.index >= pd.Timestamp(start)) & (close.index <= pd.Timestamp(end))]
 
 
+def shared_download(ticker, start):
+    """The shared download (_download_batch) that load_close(ticker, start, ...) reads: the continuous series
+    and, for TTF=F, CL=F and BZ=F, the monthly contracts of _batch_contracts. A page that needs a monthly
+    contract next to the continuous series calls this, so both come from the same download."""
+    return _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), dt.date.today())
+
+
 def _raw_close(ticker, start, end):
     """Daily closes from `start` to `end` (both included), cut from the one shared download."""
-    first = min(pd.Timestamp(start).date(), _DATA_START)
-    return _slice(_download_close(ticker, first, dt.date.today()), start, end)
+    batch = shared_download(ticker, start)
+    close = batch[ticker] if ticker in batch else pd.Series(dtype=float)
+    return _slice(close, start, end)
 
 
 def _stale_mask(close):
@@ -520,6 +535,36 @@ _LAST_TOL = 5e-4
 _FRONT_AHEAD = {"TTF": (1, 2), "CL": (1, 2), "BZ": (2, 3)}
 
 
+def match_front_contract(batch, ticker, day):
+    """The monthly contract whose close in the shared download (_download_batch) equals the continuous
+    series' close on `day`, or None. Only contracts that can be the front month on that day are compared
+    (_FRONT_AHEAD). On the download's last day, which can be a live price, the closest contract counts if it is
+    within _LAST_TOL and every other contract is at least _LAST_TOL farther; on earlier days the closes must
+    agree within _PRICE_TOL and exactly one contract may match. window_rolls and front_month_contract both use
+    this rule."""
+    if ticker not in CURVE_ROOTS or ticker not in batch or day not in batch.index:
+        return None
+    cont = batch.at[day, ticker]
+    if pd.isna(cont):
+        return None
+    root = CURVE_ROOTS[ticker][0]
+    lo, hi = _FRONT_AHEAD[root]
+    m0 = day.year * 12 + day.month
+    quotes = {}
+    for s in batch.columns:
+        if s == ticker:
+            continue
+        d = contract_delivery(s, root)
+        if lo <= d.year * 12 + d.month - m0 <= hi and pd.notna(batch.at[day, s]):
+            quotes[s] = batch.at[day, s]
+    if day == batch[ticker].dropna().index[-1]:
+        gaps = sorted((abs(q / cont - 1), s) for s, q in quotes.items())
+        ok = gaps and gaps[0][0] < _LAST_TOL and all(g >= gaps[0][0] + _LAST_TOL for g, _ in gaps[1:])
+        return gaps[0][1] if ok else None
+    hits = [s for s, q in quotes.items() if abs(q - cont) < _PRICE_TOL]
+    return hits[0] if len(hits) == 1 else None
+
+
 def window_rolls(ticker, batch, window_returns):
     """Contract rolls of a continuous front-month future (TTF=F, CL=F, BZ=F) inside a volatility window.
 
@@ -546,25 +591,11 @@ def window_rolls(ticker, batch, window_returns):
     if r.empty:
         return None
     first, last = r.index[0], r.index[-1]
-    live_day = batch[ticker].dropna().index[-1]
     data = batch[(batch.index >= first - pd.Timedelta(days=14)) & (batch.index <= last)]
     cont = data[ticker].dropna()
-    syms = [s for s in data.columns if s != ticker and data[s].notna().any()]
-
-    root = CURVE_ROOTS[ticker][0]
-    months_ahead = {s: (contract_delivery(s, root).year * 12 + contract_delivery(s, root).month) for s in syms}
-    lo, hi = _FRONT_AHEAD[root]
 
     def match(day):
-        m0 = day.year * 12 + day.month
-        quotes = {s: data.at[day, s] for s in syms
-                  if lo <= months_ahead[s] - m0 <= hi and pd.notna(data.at[day, s])}
-        if day == live_day:
-            gaps = sorted((abs(q / cont[day] - 1), s) for s, q in quotes.items())
-            ok = gaps and gaps[0][0] < _LAST_TOL and all(g >= gaps[0][0] + _LAST_TOL for g, _ in gaps[1:])
-            return gaps[0][1] if ok else None
-        hits = [s for s, q in quotes.items() if abs(q - cont[day]) < _PRICE_TOL]
-        return hits[0] if len(hits) == 1 else None
+        return match_front_contract(batch, ticker, day)
 
     rule = set(brent_roll_days(cont.index)) if ticker == "BZ=F" and len(cont) else set()
     rolls, unknown, rule_only = [], [], []
@@ -772,23 +803,73 @@ def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SP
     if len(sub) < window:
         return None
     pnl = (sub * pd.Series(positions)).sum(axis=1)
-    arr, idx = pnl.values, sub.index
-    span = np.full(len(arr), np.inf)
-    span[window - 1:] = (idx[window - 1:] - idx[:len(idx) - window + 1]).days
-    es_by_end = np.full(len(arr), np.nan)
-    for k in np.where(span <= max_span)[0]:
-        w = arr[k - window + 1:k + 1]
+    idx = sub.index
+
+    def es(w):
         q = np.percentile(w, 2.5)
-        es_by_end[k] = -w[w <= q].mean()
-    if np.all(np.isnan(es_by_end)):
+        return -w[w <= q].mean()
+
+    found = _stress_search(pnl.values, idx, es, window, max_span)
+    if found is None:
         return None
-    top = np.nanmax(es_by_end)
-    ties = np.where(es_by_end >= top - 1e-9 * max(abs(top), 1.0))[0]
+    ties = found['ties']
     k = int(ties[-1])
     w = pnl.iloc[k - window + 1:k + 1]
     return dict(start=w.index[0], end=w.index[-1], ties=len(ties), first_tie_end=idx[int(ties[0])],
                 var95=float(hist_var(w, 0.95)), var99=float(hist_var(w, 0.99)), es975=float(hist_es(w, 0.975)),
                 search_from=idx[0], search_to=idx[-1])
+
+
+def _stress_search(values, index, score, window=STRESS_WINDOW, max_span=STRESS_MAX_SPAN):
+    """The window search behind stress_period and stress_period_fall, written once: every run of `window`
+    consecutive observations spanning at most `max_span` calendar days is scored with `score` (larger = more
+    stressed). Scores within 1e-9 (relative) of the largest count as tied. Returns None when no run qualifies,
+    else dict(scores = score by window end position (NaN where the span is too long), top, ties = end positions of
+    the tied windows, in date order)."""
+    values = np.asarray(values, dtype=float)
+    if len(values) < window:
+        return None
+    span = np.full(len(values), np.inf)
+    span[window - 1:] = (index[window - 1:] - index[:len(index) - window + 1]).days
+    scores = np.full(len(values), np.nan)
+    for k in np.where(span <= max_span)[0]:
+        scores[k] = score(values[k - window + 1:k + 1])
+    if np.all(np.isnan(scores)):
+        return None
+    top = float(np.nanmax(scores))
+    ties = np.where(scores >= top - 1e-9 * max(abs(top), 1.0))[0]
+    return dict(scores=scores, top=top, ties=ties)
+
+
+@st.cache_data(ttl=3600, show_spinner="Searching for the stress period...")
+def stress_period_fall(changes, window=STRESS_WINDOW, max_span=STRESS_MAX_SPAN):
+    """Stress period of a series of day-on-day changes that can be negative (the Power page's spread in €/MWh
+    and the flexible plant's daily margin in €), by the same rule as stress_period: the run of `window`
+    consecutive changes, spanning at most `max_span` calendar days, with the largest 1-in-20 fall (the 5th
+    percentile of the changes, numpy's default linear interpolation, shown as a positive number), the latest of
+    tied runs. `changes` runs from the start of the data to the end date chosen, so nothing after the end date
+    is searched. The 5th percentile of 250 changes depends only on the 13th and 14th largest falls, so
+    neighbouring windows containing the same falls tie exactly.
+
+    Returns None when no run qualifies, else dict(start, end, fall, ties, first_tie_end, search_from, search_to,
+    runner_up): runner_up is None or dict(fall, n, first_end, last_end) for the next-highest value, so the page
+    can say when a window far from the stress period comes close."""
+    s = changes.dropna()
+    idx = s.index
+    found = _stress_search(s.values, idx, lambda w: -np.percentile(w, 5), window, max_span)
+    if found is None:
+        return None
+    scores, top, ties = found['scores'], found['top'], found['ties']
+    k = int(ties[-1])
+    w = s.iloc[k - window + 1:k + 1]
+    rest = np.where(scores < top - 1e-9 * max(abs(top), 1.0), scores, np.nan)
+    runner = None
+    if not np.all(np.isnan(rest)):
+        r2 = float(np.nanmax(rest))
+        r2k = np.where(np.abs(rest - r2) <= 1e-9 * max(abs(r2), 1.0))[0]
+        runner = dict(fall=r2, n=len(r2k), first_end=idx[int(r2k[0])], last_end=idx[int(r2k[-1])])
+    return dict(start=w.index[0], end=w.index[-1], fall=top, ties=len(ties), first_tie_end=idx[int(ties[0])],
+                search_from=idx[0], search_to=idx[-1], runner_up=runner)
 
 
 def kupiec_pof(n, x, p):
@@ -821,6 +902,9 @@ def basel_zone(exceptions, n=250):
 
 
 # ─── Price range over a short horizon (risk of waiting) ───
+GARCH_SEED = 42   # seed of the simulated shocks in garch_price_range
+
+
 @st.cache_data(ttl=3600, show_spinner="Simulating price paths...")
 def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     """Range of the price `horizon` business days ahead from a GARCH(1,1) fit.
@@ -828,16 +912,20 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     Fitted on daily log returns with zero mean (no view on direction) and Student-t
     shocks (fat tails). Simulated paths give, for each day ahead, the lower, median
     and upper percentile of the price. Returns None if the fit fails.
+
+    The shocks are drawn from a Student-t distribution seeded with GARCH_SEED, so the same prices give the
+    same range on every run. (arch 8.0 uses forecast(random_state=...) only for bootstrap forecasts, not for
+    method='simulation', so the seed has to be given to the distribution.) The fit is the same as
+    arch_model(..., mean='Zero', vol='GARCH', p=1, q=1, dist='t').
     """
     close = close.where(close > 0)
     # Log returns on the series' own days; NaN across a stale gap rather than one jump.
     log_ret = (100 * np.log(close).diff()).dropna()
     close = close.dropna()
     try:
-        res = arch_model(log_ret, mean='Zero', vol='GARCH', p=1, q=1, dist='t',
-                         rescale=False).fit(disp='off')
-        fc = res.forecast(horizon=horizon, method='simulation', simulations=simulations,
-                          reindex=False, random_state=np.random.RandomState(42))
+        res = ZeroMean(log_ret, volatility=GARCH(p=1, q=1), distribution=StudentsT(seed=GARCH_SEED),
+                       rescale=False).fit(disp='off')
+        fc = res.forecast(horizon=horizon, method='simulation', simulations=simulations, reindex=False)
     except Exception:
         return None
     cum = np.cumsum(fc.simulations.values[-1], axis=1) / 100   # (simulations, horizon)
@@ -896,34 +984,43 @@ def ttf_expiry_days(index):
 
 
 # ─── Which monthly contract a continuous front-month series is tracking ───
-@st.cache_data(ttl=3600, show_spinner=False)
-def front_month_contract(continuous, root, last_date, last_price):
-    """Delivery month of the monthly contract that `continuous` (e.g. TTF=F) tracked on `last_date`.
+def contract_symbol(root, delivery):
+    """Yahoo Finance symbol of a NYMEX monthly contract, e.g. ("TTF", 2026-12-01) -> TTFZ26.NYM."""
+    d = pd.Timestamp(delivery)
+    return f"{root}{MONTH_CODES[d.month - 1]}{d.year % 100:02d}.NYM"
 
-    Yahoo Finance does not label the continuous series reliably, so the next two monthly
-    contracts are downloaded and the one whose close on `last_date` equals the continuous
-    close is taken. Returns (dt.date of the delivery month, contract symbol), or (None, None)
-    if no contract matches.
+
+def front_by_rule(root, day):
+    """Delivery month (dt.date, first day) of the front contract on `day` by the exchange expiry rule: the
+    earliest delivery month whose last trading day (contract_expiry) is not before `day`."""
+    d = pd.Timestamp(day).normalize()
+    for k in range(0, 4):
+        delivery = (d.to_period('M') + k).to_timestamp()
+        if not contract_expired(root, delivery, d):
+            return delivery.date()
+    return None
+
+
+def front_month_contract(continuous, day):
+    """The monthly contract that `continuous` (TTF=F, CL=F or BZ=F) tracked on `day`.
+
+    Read from the shared download (_download_batch), the same one load_close uses, so the continuous price and
+    the contract prices come from one download and nothing is downloaded again. The contract is the one whose
+    close matches the continuous close on that day (match_front_contract: the same rule and tolerances as the
+    Risk page's roll check). When none matches (Yahoo has dropped expired contracts, the date is older than the
+    contracts downloaded, or a live price moved between rows), the delivery month comes from the exchange
+    expiry rule (front_by_rule) instead, and `matched` is False so the page can say so.
+
+    Returns dict(delivery=dt.date, symbol=str, matched=bool).
     """
-    d = pd.Timestamp(last_date)
-    for k in (1, 2, 0):
-        month_index = d.month - 1 + k
-        year, month = d.year + month_index // 12, month_index % 12 + 1
-        sym = f"{root}{MONTH_CODES[month - 1]}{year % 100:02d}.NYM"
-        try:
-            data = yf.download(sym, start=d - pd.Timedelta(days=10), end=d + pd.Timedelta(days=1),
-                               progress=False)
-        except Exception:
-            continue
-        if data is None or data.empty:
-            continue
-        close = data['Close']
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close = close.dropna()
-        if d in close.index and abs(float(close.loc[d]) - float(last_price)) < 1e-6:
-            return dt.date(year, month, 1), sym
-    return None, None
+    root = CURVE_ROOTS[continuous][0]
+    d = pd.Timestamp(day).normalize()
+    batch = shared_download(continuous, _DATA_START)
+    sym = match_front_contract(batch, continuous, d) if len(batch) else None
+    if sym is not None:
+        return dict(delivery=contract_delivery(sym, root), symbol=sym, matched=True)
+    delivery = front_by_rule(root, d)
+    return dict(delivery=delivery, symbol=contract_symbol(root, delivery), matched=False)
 
 
 # ─── Forward curves from individual monthly futures on Yahoo Finance ───

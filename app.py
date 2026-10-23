@@ -51,7 +51,8 @@ with st.sidebar:
     if _on_power:
         st.caption("Not used on this page: it always shows German power, TTF and EUA.")
     st.date_input("Start Date", value=common.DEFAULT_START, key="start_date")
-    st.date_input("End Date", value=dt.date.today(), key="end_date")
+    # Berlin date, not the server's: between 00:00 and 02:00 Berlin time a UTC server is still on the day before.
+    st.date_input("End Date", value=common.berlin_today(), key="end_date")
     if _on_power:
         # The Power page prices carbon from EEX auctions in €/t, not from the ETC used elsewhere.
         st.caption("Carbon on this page: EUA primary-auction prices from EEX, €/tCO2. If EEX "
