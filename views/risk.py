@@ -72,7 +72,7 @@ with st.sidebar.expander("Methodology: Risk page"):
     - **GARCH(1,1) Forecast**: Student-t GARCH; daily volatility forecast for each of the next
       10 days, and the 10-day holding-period volatility.
     - **Volatility references**: two references that do not roll with the market: the multiple of
-      the pre-war level (median 30-day volatility of Oct to Dec 2025) and the percentile among every
+      the Oct to Dec 2025 level (median 30-day volatility of that quarter, the last full one before the war) and the percentile among every
       30-day volatility since the start of the data (2017; TTF from Oct 2017). No Normal / Elevated /
       Extreme label: there is no industry-standard cut-off for one.
     - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 (at most
@@ -156,9 +156,9 @@ _data_full = (f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
               # Thursday) may not yet be the settlement (common.futures_row_state, the same rule as the curve).
               + _last_note
               + _cmp_value_note
-              + (" The volatility, percentile, pre-war multiple, VaR and the roll check"
+              + (" The volatility, percentile, multiple of the Oct to Dec 2025 level, VaR and the roll check"
                  if commodity['ticker'] in common.CURVE_ROOTS else
-                 " The volatility, percentile, pre-war multiple and VaR")
+                 " The volatility, percentile, multiple of the Oct to Dec 2025 level and VaR")
               + " all come from one download of the series, computed together.")
 # On the page: the dates, what kind of price the last one is (in a few words; the full sentence is in the details)
 # and a late TTF row, which changes what the latest figures cover. Definitions and the roll check are folded.
@@ -174,19 +174,9 @@ _kinds = [k for k in (_kind, f"for {ctx.compare_label.split(' (')[0]}, {_cmp_kin
 st.caption(f"Data up to {_last_px:%d %b %Y}" + (f" ({'; '.join(_kinds)})" if _kinds else "") + "." + _ttf_late)
 # Roll days stay on the page in one short line (date, the contract switched to, the adjusted 30-day volatility),
 # because the heading points to them; the return breakdown and why the heading is unadjusted are in the details.
-_rc = core.get('rolls')
-if _rc and _rc.get('rolls'):
-    _root = common.CURVE_ROOTS[commodity['ticker']][0]
-    _bits = []
-    for _t, _sym, _r, _nr in _rc['rolls']:
-        _live = common.futures_row_state(_t) != 'close'
-        _bits.append(f"{pd.Timestamp(_t):%d %b %Y} (to the {common._contract_month(_sym, _root)} contract"
-                     + (", read from the latest price" if _live else "") + ")")
-    st.caption(("Contract roll days in the 30-day window: " if len(_bits) > 1 else "Contract roll day in the 30-day window: ")
-               + " and ".join(_bits)
-               + (f". With the new contract's own return on {'that day' if len(_bits) == 1 else 'those days'}, "
-                  "the 30-day volatility is "
-                  f"{common.fmt_vol(_rc['adjusted_vol'])}." if _rc.get('adjusted_vol') is not None else "."))
+_roll_line = common.roll_line(commodity['ticker'], core.get('rolls'))
+if _roll_line:
+    st.caption(_roll_line)
 _folded("Details: roll days, data dates and the references", _vs['roll'], _vs['detail'], _data_full.replace(_ttf_late, ""))
 
 _vol_series = df_analysis['Volatility'].dropna()
@@ -194,7 +184,8 @@ _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
 # The 30-day correlation of the last day with a price (common.rolling_corr), or n/a with the reason: an older
 # figure is not shown in its place.
 _corr_now = core['latest_corr']
-_partner = ctx.compare_ticker
+# The comparison series by its name, not its ticker (the same name as in the "Data up to" line).
+_partner = compare_label.split(" (")[0]
 
 mc1, mc2, mc3, mc4 = st.columns(4)
 mc1.metric("Current Volatility (30-day)", _vs['tile'],
@@ -214,7 +205,7 @@ if len(_corr_pairs):
     mc3.caption(_corr_note)
 else:
     mc3.metric(f"Correlation vs {_partner}", "n/a", help="No common days with returns in the selected range.")
-mc4.metric("VaR 95% (1-day, per unit)", f"{var_95:.2f}%",
+mc4.metric("VaR 95%, 1-day (% of a long position)", f"{var_95:.2f}%",
            help=f"Historical, last {var_days} trading days: the daily loss exceeded on 5% of days, shown as a "
                 "negative return. The € figures in Positions & Limits are shown as positive losses.")
 
@@ -558,7 +549,7 @@ _n_tail = int((_recent_ret <= np.percentile(_recent_ret, 2.5)).sum())
 
 vc1, vc2, vc3, vc4 = st.columns(4)
 for _col, _name, _recent, _full, _help in (
-        (vc1, "VaR 95%", var_95, core['var_95_full'], "Loss exceeded on 5% of days."),
+        (vc1, "VaR 95%, 1-day (% of a long position)", var_95, core['var_95_full'], "Loss exceeded on 5% of days."),
         (vc2, "VaR 99%", var_99, core['var_99_full'], "Loss exceeded on 1% of days."),
         (vc3, "ES 97.5%", es_975, core['es_975_full'],
          f"Average return of the {_n_tail} days (of {var_days}) at or below the 2.5% quantile.")):
@@ -626,7 +617,7 @@ if commodity['ticker'].endswith("=F"):
                "not a real price move: when the next contract trades below the expiring one, "
                "the series shows a drop that no contract actually had. Roll days are not removed, so they can "
                "distort the volatility, the max daily loss, the tails, the VaR and the backtest exceptions. When "
-               "the latest 30-day window contains a roll day, the line under the volatility heading gives the "
+               "the latest 30-day window contains a roll day, the line 'Contract roll day in the 30-day window' at the top of the page gives the "
                "30-day volatility with the new contract's own return on that day.")
 
 _folded("How VaR and ES are calculated", *_var_notes)
@@ -681,7 +672,10 @@ if len(_bt) >= 100:
                      f"({row['Exceptions']} exceptions vs {row['Expected']} expected, p = {row['p-value']:.3f})"
                      for row in _rows)
     st.write(f"**VaR Backtest ({selected_commodity}), last {_n} trading days "
-             f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt + " " + _kup + ".")
+             f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt + " " + _kup + "."
+             + "".join(f" VaR {row['VaR level']} was exceeded {row['Exceptions'] / row['Expected']:.1f} times as often as "
+                       "expected: it understates losses at that level." for row in _rows
+                       if row['p-value'] < 0.05 and row['Exceptions'] > row['Expected']))
     st.dataframe(pd.DataFrame(_rows).set_index('VaR level'), width="stretch")
     _folded("How the backtest works", f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
                "and compared with that day's return. Kupiec also rejects too few exceptions. Basel zones: "
@@ -739,7 +733,7 @@ if garch is not None:
     with st.expander("GARCH(1,1) Model Parameters"):
         st.write(f"Fitted on daily returns from {returns_clean.index.min():%d %b %Y} to "
                  f"{returns_clean.index.max():%d %b %Y}.")
-        st.write(f"**omega (ω):** {params['omega']:.6f}")
+        st.write(f"**omega (ω):** {params['omega']:.3g}")
         st.write(f"**alpha (α):** {params['alpha[1]']:.4f} (reaction to recent shocks)")
         st.write(f"**beta (β):** {params['beta[1]']:.4f} (persistence of volatility)")
         persistence = params['alpha[1]'] + params['beta[1]']
@@ -821,7 +815,8 @@ else:
                    help=f"Average loss on the {_n_tail_book} days (of {len(recent)}) at or below the 2.5% quantile, "
                         "1-day horizon. 97.5% is the confidence level Basel FRTB uses. FRTB also scales the ES by "
                         "liquidity horizon and calibrates it to a stress period; this figure is not scaled, and "
-                        "the stress-period figures are below.")
+                        "the stress-period figures are below. ES 97.5% can be slightly below VaR 99% (with 250 days "
+                        "it averages the worst 7 days, while VaR 99% lies between the 3rd and 4th worst); that is not an error.")
         pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
                    help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
         st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span>, "
@@ -848,9 +843,8 @@ else:
                    "EUR/USD is not included: returns are in each instrument's own currency.")
 
         # ── Stress period (after Basel MAR33.7) ──
-        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months: normally 360 to 380 "
-                 f"calendar days, at most {common.STRESS_MAX_SPAN}) in which today's positions have the largest "
-                 "ES 97.5%**")
+        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months) in which today's "
+                 "positions have the largest ES 97.5%**")
         _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
         _sp = (common.stress_period(_stress_panel[list(positions)], positions)
                if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
@@ -928,7 +922,9 @@ else:
             _folded("How the stress period is chosen",
                 f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, searched from "
                 f"{_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y}: the {common.STRESS_WINDOW} trading "
-                f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted. "
+                f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted; "
+                f"the {common.STRESS_WINDOW} days must fall within {common.STRESS_MAX_SPAN} calendar days (normally "
+                "they span 360 to 380). "
                 "As above, only days on which every instrument held has a return count"
                 + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out the carbon ETC's suspension (Jun 2020 to "
                    "Aug 2021) and its sparse prices before 2018" if CARBON_SHORT in positions else "")
@@ -993,7 +989,7 @@ SCENARIOS = [
     {"name": "August 2022 gas peak", "first": "2022-08-01", "last": "2022-08-26",
      "why": "from the first trading day of August 2022 to 26 Aug 2022, the record TTF front-month close (about "
             "€339/MWh) after Gazprom announced a three-day Nord Stream 1 shutdown"},
-    {"name": "2026 Iran war: Qatar LNG halt, Hormuz", "first": "2026-03-02", "last": "2026-03-13",
+    {"name": "2026 Iran war (Qatar LNG halt, Hormuz)", "first": "2026-03-02", "last": "2026-03-13",
      "why": "the first two trading weeks after the US-Israeli strikes on Iran (Sat 28 Feb 2026): QatarEnergy "
             "halted LNG output and an IRGC official said Hormuz was closed on 2 Mar"},
 ]
@@ -1058,6 +1054,10 @@ else:
         _summary, _detail, _notes = [], [], []
         _brent_rolls = _brent_roll_days(scen_panel['Brent Oil'].dropna().index) \
             if 'Brent Oil' in scen_panel else pd.DatetimeIndex([])
+        # TTF=F front-month expiries (and the day after): a TTF move there can be partly the gap between contracts.
+        _ttf_exp_days = (common.ttf_expiry_days(scen_panel['TTF Gas'].dropna().index)
+                         if 'TTF Gas' in scen_panel and positions.get('TTF Gas', 0) else pd.DatetimeIndex([]))
+        _ttf_notes = []
         for sc in SCENARIOS:
             res = replay_scenario(scen_panel, positions, sc["first"], sc["last"])
             if not res["days"] or res["base"] is None:
@@ -1084,6 +1084,13 @@ else:
             _roll_in = [d for d in _brent_rolls if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
             if _roll_in:
                 _notes.append(f"{sc['name']}: {', '.join(f'{d:%d %b %Y}' for d in _roll_in)}")
+            _ttf_in = [d for d in _ttf_exp_days if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
+            if _ttf_in:
+                _wd = res.get('worst_day')
+                _ttf_notes.append(f"{sc['name']}: {', '.join(f'{d:%d %b %Y}' for d in _ttf_in)}"
+                                  + (" (the worst book day of that window)"
+                                     if _wd is not None and pd.Timestamp(_wd).normalize() in
+                                     [pd.Timestamp(d).normalize() for d in _ttf_in] else ""))
 
         st.dataframe(pd.DataFrame(_summary).set_index("Scenario"), width="stretch")
         with st.expander("Return and P&L by instrument"):
@@ -1107,6 +1114,9 @@ else:
             st.pyplot(fig_sc)
 
         st.caption("This replays what happened; it is not a forecast or a probability.")
+        if _ttf_notes:
+            st.caption("⚠️ TTF front-month expiry days, or the day after, inside the windows (part of that day's TTF move "
+                       "may be the gap between two contracts; not verified): " + "; ".join(_ttf_notes) + ".")
         if _notes:
             st.caption("⚠️ Brent roll days inside the windows (part of that day's Brent move is the gap between two "
                        "contracts): " + "; ".join(_notes) + ".")

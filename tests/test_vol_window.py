@@ -101,8 +101,9 @@ def test_ai_input_names_no_later_event(as_of, ratio, complete):
         assert "Oct to Dec 2025 level" in vs['ai'] and vs['prewar_ai'] == "the Oct to Dec 2025 level"
     else:
         assert "Oct to Dec 2025" not in vs['ai'] and vs['prewar_ai'] == ""
-    # the page keeps its own wording
-    assert ("pre-war" in vs['headline2']) or ("strikes on Iran" in vs['detail'])
+    # the page names no later event either (readability audit 2026-10-23, R-B1 and M-B5)
+    for word in ("Iran", "strikes", "war", "pre-war", "28 Feb 2026"):
+        assert not re.search(rf"\b{re.escape(word)}\b", vs['headline2'] + " " + vs['detail']), word
 
 
 def test_ai_input_after_the_strikes_is_the_page_text():

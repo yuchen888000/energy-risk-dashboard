@@ -608,13 +608,25 @@ else:
                                              subset=pd.IndexSlice[_rows, [_c]], na_rep="n/a")
             # Tall enough to show every country without scrolling (35 px per row plus the header).
             st.dataframe(cr_view, width="stretch", height=(len(cr_df) + 1) * 35 + 3, column_config=col_cfg)
+            if ctx.is_carbon:
+                # Which countries EUAs cover (European Commission, About the EU ETS, read 2026-10-23).
+                _outside = [c for c in ("Turkey", "Switzerland", "United Kingdom") if c in set(cr_df['Country'])]
+                if _outside:
+                    st.caption("The EU ETS covers the EU-27, Iceland, Liechtenstein and Norway; "
+                               + ", ".join(_outside) + (" is" if len(_outside) == 1 else " are")
+                               + " not in it (Switzerland has its own ETS, linked to the EU ETS since 2020).")
 
         with cr_col2:
             # Alphabetical options and a default taken from the latest year, so moving the year
             # slider does not reset the chosen country.
             _options = sorted(cr_df['Country'])
             _latest = country_df[(country_df['Year'] == country_years[-1]) & (country_df['Country'] != EU27)]
-            _default = _latest.sort_values(mcol, ascending=False)['Country'].iloc[0]
+            _ranked_latest = _latest.sort_values(mcol, ascending=False)['Country']
+            # On the carbon page the default is the highest-ranked country inside the EU ETS (Turkey ranks first
+            # but EUAs do not cover it).
+            if ctx.is_carbon:
+                _ranked_latest = _ranked_latest[~_ranked_latest.isin(["Turkey", "Switzerland", "United Kingdom"])]
+            _default = _ranked_latest.iloc[0]
             selected_country = st.selectbox("Select Country for Detail", _options,
                                             index=_options.index(_default) if _default in _options else 0)
             row = ranked[ranked['Country'] == selected_country].iloc[0]
@@ -836,16 +848,15 @@ else:
     avg_score = float(sent_df['Score'].mean())
     n_pos, n_neg, n_neut = ((sent_df['Label'] == lab).sum() for lab in ('Positive', 'Negative', 'Neutral'))
 
-    st.markdown(f"#### Average tone: {tone_label(avg_score)} ({avg_score:+.3f})")
+    st.markdown(f"#### Average tone ({nlp_model_name}): {tone_label(avg_score)} ({avg_score:+.3f})"
+                + (f" · {len(sent_df)} headlines: too few to read as a trend" if len(sent_df) < 10 else ""))
     st.caption("The score is the tone of the wording: FinBERT is fine-tuned on sentences from financial news "
                "(Financial PhraseBank, where annotators judged news for a company's share price); FinVADER uses "
                "finance word lists. It is not a price direction and not bullish or bearish: \"gas prices "
                "surge\" can score negative although it describes a price rise. Between -0.05 and +0.05 is neutral.")
 
-    sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric(f"Average tone ({nlp_model_name})", f"{avg_score:+.3f}",
-               help="Simple average over all headlines below.")
-    sc2.metric("Positive wording", f"{n_pos}")
+    sc2, sc3, sc4 = st.columns(3)
+    sc2.metric("Positive wording", f"{n_pos}", help="The average above is a simple average over all headlines below.")
     sc3.metric("Negative wording", f"{n_neg}")
     sc4.metric("Neutral", f"{n_neut}")
 
@@ -854,7 +865,7 @@ else:
                "duplicates across feeds removed: " + ", ".join(f"{k} {v}" for k, v in _per_feed.items())
                + f" · Model: {nlp_model_name}")
     if not finbert_success:
-        st.caption(f"FinBERT unavailable ({finbert_reason}); {nlp_model_name} used.")
+        st.caption(f"Scored with {nlp_model_name} (FinBERT not available in this deployment).")
 
     fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
     ax4.barh(range(len(sent_df)), sent_df['Score'], color=[TONE_COLORS[l] for l in sent_df['Label']], height=0.6)
@@ -1043,6 +1054,10 @@ st.write(f"Is anything statistically unusual on {_asof:%d %b %Y}, the last tradi
 # market, next to the 3-year checks below.
 _vs = common.vol_summary(core, name=selected_commodity, with_roll=True, past_end=_past_end)
 st.markdown(f"**{_vs['headline']}**" + (f"  \n{_vs['headline2']}" if _vs['headline2'] else ""))
+# The roll days the heading points to, in one line (the same line as the Risk page, common.roll_line).
+_roll_line = common.roll_line(commodity['ticker'], core.get('rolls'))
+if _roll_line:
+    st.caption(_roll_line)
 
 
 def garch_10d_path(g):
@@ -1225,10 +1240,22 @@ n_lo = int((vol_last < vol_lo).sum())
 # No 30-day volatility on the latest day (too few returns after a suspension): the two volatility checks
 # give no latest value and do not fire; the volatility line above the table says why.
 _vol_latest = common.fmt_vol(latest_vol) if latest_vol is not None else "n/a"
-checks.append(("Volatility spike", f"30-day vol above {common.fmt_vol(vol_hi)} ({VOL_HI_PCT}th pct)",
-               _vol_latest, None if latest_vol is None else latest_vol > vol_hi, f"{n_hi} of {len(vol_last)}"))
-checks.append(("Unusual calm", f"30-day vol below {common.fmt_vol(vol_lo)} ({VOL_LO_PCT}th pct)",
-               _vol_latest, None if latest_vol is None else latest_vol < vol_lo, f"{n_lo} of {len(vol_last)}"))
+def _ann_pair(latest, thr):
+    """Latest and threshold as the table shows them, with one decimal on the annualised figure when it would
+    print the same for both (18% against 18%), so a reader can see why the check does or does not fire."""
+    if latest is None:
+        return "n/a", common.fmt_vol(thr)
+    if f"{latest * common.ANNUAL:.0f}" != f"{thr * common.ANNUAL:.0f}":
+        return common.fmt_vol(latest), common.fmt_vol(thr)
+    return common.fmt_vol(latest, 1), common.fmt_vol(thr, 1)
+
+
+_hi_now, _hi_thr = _ann_pair(latest_vol, vol_hi)
+_lo_now, _lo_thr = _ann_pair(latest_vol, vol_lo)
+checks.append(("Volatility spike", f"30-day vol above {_hi_thr} ({VOL_HI_PCT}th pct)",
+               _hi_now, None if latest_vol is None else latest_vol > vol_hi, f"{n_hi} of {len(vol_last)}"))
+checks.append(("Unusual calm", f"30-day vol below {_lo_thr} ({VOL_LO_PCT}th pct)",
+               _lo_now, None if latest_vol is None else latest_vol < vol_lo, f"{n_lo} of {len(vol_last)}"))
 if latest_vol is None:
     pass
 elif latest_vol > vol_hi:
@@ -1262,9 +1289,9 @@ if garch is not None and garch_ref:
                 f"{thr * common.ANNUAL:.1f}% ann. ({thr:.3f}% daily)")
     _g_hi_now, _g_hi_thr = _vol_pair(garch_forecast_10d, GARCH_HI * garch_ref)
     _g_lo_now, _g_lo_thr = _vol_pair(garch_forecast_10d, GARCH_LO * garch_ref)
-    checks.append(("GARCH forecast high", f"10-day forecast above {_g_hi_thr} "
+    checks.append(("GARCH forecast high", f"Day-10 daily vol forecast above {_g_hi_thr} "
                    f"({GARCH_HI:.1f}x {ref_short} mean)", _g_hi_now, g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
-    checks.append(("GARCH forecast low", f"10-day forecast below {_g_lo_thr} "
+    checks.append(("GARCH forecast low", f"Day-10 daily vol forecast below {_g_lo_thr} "
                    f"({GARCH_LO:.1f}x {ref_short} mean)", _g_lo_now, g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
     if g_ratio > GARCH_HI:
         anomalies.append({'level': '🟡 WARNING', 'type': f'GARCH Forecast Above {ref_short.title()} Average',
@@ -1272,10 +1299,11 @@ if garch is not None and garch_ref:
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(g_ratio - 1) * 100:.0f}% above the {garch_ref_name} '
                                      f'({common.fmt_vol(garch_ref)}). Fired on {n_ghi} {_g_of}.')})
     elif g_ratio < GARCH_LO:
-        anomalies.append({'level': '🟢 INFO', 'type': f'GARCH Forecast Below {ref_short.title()} Average',
+        anomalies.append({'level': 'ℹ️ NOTE', 'type': f'GARCH Forecast Below {ref_short.title()} Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(1 - g_ratio) * 100:.0f}% below the {garch_ref_name} '
-                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} {_g_of}.')})
+                                     f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} {_g_of}. Low forecast '
+                                     'volatility is not low risk.')})
 
 # 3. Correlation outside its own 3-year range. With no latest figure the row shows n/a and does not fire.
 if has_corr_ref and not has_corr:
@@ -1326,7 +1354,7 @@ if _last_is_roll:
         f"The latest day, {recent_all.index[-1]:%d %b %Y}, is a Brent roll day and is not checked"
         + (" (read from the latest price, which can still change)" if _roll_live else "") + ".")
 if len(tail_days):
-    _tail_detail = (f'{len(tail_days)} daily loss(es) in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
+    _tail_detail = (f'{len(tail_days)} daily {"loss" if len(tail_days) == 1 else "losses"} in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
                     + ("(Brent roll days excluded) " if IS_BRENT else "")
                     + f'beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the {ref_short} 99% VaR of {var99_3y:.2f}%); '
                     f'the largest was {tail_days.min():.2f}% on {tail_days.idxmin():%d %b %Y}.')
@@ -1334,7 +1362,7 @@ if len(tail_days):
         _tail_detail += " " + tail_roll_fact
     elif roll_note_box and not IS_BRENT:
         _tail_detail += roll_note_box
-    anomalies.append({'level': '🔵 WATCH' if _tail_now else '🟢 INFO',
+    anomalies.append({'level': '🔵 WATCH' if _tail_now else 'ℹ️ NOTE',
                       'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x {ref_short.title()} VaR99'
                                + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not on the latest day)')),
                       'detail': _tail_detail,
@@ -1344,8 +1372,7 @@ if len(tail_days):
                                f'{tail_days.index[-1]:%d %b %Y}')})
 
 check_tbl = pd.DataFrame(checks, columns=['Check', 'Fires when', 'Latest', 'Fires now',
-                                          f'Days fired (of the {CHECK_DAYS} trading days to {_ref_end:%d %b %Y}, '
-                                          'or fewer where days are excluded)'])
+                                          f'Days fired (last {CHECK_DAYS} trading days)'])
 check_tbl['Fires now'] = check_tbl['Fires now'].map(lambda v: 'n/a' if v is None else 'Yes' if v else 'No')
 st.dataframe(check_tbl, hide_index=True, width="stretch")
 if IS_BRENT and tail_roll_fact:
@@ -1378,10 +1405,10 @@ if _vs['ctx'] is None:
 elif _vs['ctx']['prewar_ratio'] is None:
     _vs_against = "; the volatility line above the table places it against the whole history instead"
 else:
-    _vs_against = ("; the volatility line above the table places it against the pre-war level and the whole "
-                   "history instead")
+    _vs_against = (f"; the volatility line above the table places it against {_vs.get('level_name', 'the pre-war level')} "
+                   "and the whole history instead")
 _check_notes = (
-    f"Reference window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
+    f"Thresholds and the counts of days fired come from the reference window and use no "
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
     f"percentile by construction, and the count shows how much of that fell in {_count_span}.{corr_source} Latest values are "
     f"at the last trading day with a price in the selected range ({_asof:%d %b %Y})."
@@ -1398,7 +1425,9 @@ _lv = common.last_value_note(commodity['ticker'], end_date, _asof)
 _kind = ("the last value is a live price, not a settlement" if "latest price" in _lv else
          "the last value may not yet be the settlement" if "may not yet be the settlement" in _lv else
          "the last value may be an intraday London price" if "London session" in _lv else "")
-st.caption(f"Reference window: {ref_source}. Latest values: {_asof:%d %b %Y}" + (f" ({_kind})" if _kind else "") + ".")
+st.caption(f"Reference window: {ref_source}. Latest values: {_asof:%d %b %Y}" + (f" ({_kind})" if _kind else "") + "."
+           + " The GARCH check is fitted on this window; the Risk page fits its GARCH on the whole selected range, so "
+           "its day-10 forecast differs.")
 if corr_gap_note and has_corr_ref:
     st.caption(corr_gap_note)
 with st.expander("How the checks are built"):
@@ -1868,7 +1897,7 @@ if narrative:
         f"{_safe}</div>",
         unsafe_allow_html=True
     )
-    st.caption(f"Generated by Claude ({AI_MODEL}) · data as of {today_date_str} · {_ai_scope} "
+    st.caption(f"Generated by Claude ({AI_MODEL}) · data as of {df_analysis.index[-1]:%d %b %Y} · {_ai_scope} "
                "Cached for 30 minutes for identical inputs." + _dropped_note)
 elif narrative_dropped:
     st.caption("AI summary withheld: every sentence asked the reader to watch for a level the data had "

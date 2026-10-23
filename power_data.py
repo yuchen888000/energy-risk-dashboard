@@ -172,7 +172,7 @@ def _fetch_power_year(year, bzn):
         except Exception as e:
             note = f"ENTSO-E unavailable ({e}); Energy-Charts used instead"
     else:
-        note = "no ENTSO-E token configured; Energy-Charts used instead"
+        note = "ENTSO-E not used in this deployment; Energy-Charts carries the same day-ahead prices"
     s, source = _fetch_energy_charts_year(year, bzn)
     return s, source, note
 

@@ -3,6 +3,7 @@
 Designed with power trading desks and utilities in mind.
 """
 import calendar
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,6 +41,13 @@ _LOOKBACK = 250            # day-on-day changes behind the 1-in-20 figures
 _TTF_MAX_AGE = 5           # calendar days: a TTF settlement older than this is not used
 _EUA_MAX_AGE = 14          # calendar days: an auction price is carried forward at most two weeks
 _PEAK = f"weekdays {power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00"
+
+
+def _hm(hours):
+    """Run time written as a reader says it: '30 min', '14 h', '13 h 45 min' (15-minute resolution)."""
+    m = int(round(hours * 60))
+    h, m = divmod(m, 60)
+    return " ".join(x for x in ((f"{h} h" if h else ""), (f"{m} min" if m else "")) if x) or "0 min"
 
 
 def _eff(e):
@@ -216,6 +224,13 @@ if len(df) < _LOOKBACK // 5:
 latest = df.iloc[-1]
 day = df.index[-1]
 st.markdown(f"**Clean spark spread for delivery on {day:%a %d %b %Y}**")
+# The answer to the page's question in one sentence, before the figures (readability audit 2026-10-23, P-B4).
+# A negative spread is not a loss: it says the price did not cover fuel and carbon (the analyst rules, item 5).
+_covered = latest["CSS peak"] >= 0
+st.write(f"On {day:%a %d %b} the peak block {'covered' if _covered else 'did not cover'} the fuel and carbon cost of a "
+         f"50% (HHV) gas plant ({latest['CSS peak']:+.2f} €/MWh); "
+         + (f"the price covered it in {_hm(latest['Run hours'])} of the day." if latest["Run hours"] > 0
+            else "the price covered it in no period of the day."))
 h1, h2, h3 = st.columns(3)
 h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00), 50% efficiency (HHV)",
           f"{latest['CSS peak']:+.2f} €/MWh",
@@ -224,10 +239,11 @@ h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:0
 h2.metric("Baseload (all 24 h), 50% efficiency (HHV)", f"{latest['CSS base']:+.2f} €/MWh")
 if latest["Run hours"] > 0:
     h3.metric("Flexible plant, 50% efficiency (HHV)",
-              f"{latest['Run hours']:.2f} h at {latest['Run spread']:+.2f} €/MWh",
+              f"{_hm(latest['Run hours'])} at {latest['Run spread']:+.2f} €/MWh",
               help=f"Hours of the day (any of the 24) where the price covered the fuel and carbon cost, and "
-                   f"the average spread in those hours. It would start {int(latest['Starts'])} time(s) that "
-                   "day; start-up costs are ignored.")
+                   "the average spread in those hours. It would start "
+                   + ({1: "once", 2: "twice"}.get(int(latest['Starts']), f"{int(latest['Starts'])} times"))
+                   + " that day; start-up costs are ignored.")
 else:
     h3.metric("Flexible plant, 50% efficiency (HHV)", "Stays off",
               help="No period of the day covered the fuel and carbon cost.")
@@ -358,9 +374,10 @@ st.caption(f"{period_label.capitalize()}: {last_year.index[0]:%d %b %Y} to {day:
 
 k1, k2, k3 = st.columns(3)
 k1.metric("Power (DE-LU peak)", f"{latest['Power peak']:.2f} €/MWh",
-          help=f"Average over {_PEAK}. Baseload (24 h): {latest['Power base']:.2f} €/MWh.")
+          help=f"Average over this day's {power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00. "
+               f"Baseload (24 h): {latest['Power base']:.2f} €/MWh.")
 k2.metric("Fuel cost at 50% (TTF / 0.5)", f"{latest['Fuel cost']:.2f} €/MWh")
-k3.metric(f"Carbon cost at 50% ({CARBON_PER_MWH:.3f} × EUA)", f"{latest['Carbon cost']:.2f} €/MWh")
+k3.metric(f"Carbon cost at 50% ({GAS_EF} ÷ 0.5 × EUA)", f"{latest['Carbon cost']:.2f} €/MWh")
 
 # ─── Chart 1: spread over time ───
 st.subheader("Clean Spark Spread")
@@ -393,7 +410,7 @@ for _col, _kw in [("Power peak", dict(color="goldenrod", linewidth=1, label="Pow
                   ("Power base", dict(color="goldenrod", linewidth=0.6, alpha=0.5, label="Power price, baseload")),
                   ("Fuel cost", dict(color="steelblue", linewidth=1, label="Fuel cost at 50% (TTF / 0.5)")),
                   ("Carbon cost", dict(color="seagreen", linewidth=1,
-                                       label=f"Carbon cost at 50% ({CARBON_PER_MWH:.3f} × EUA)"))]:
+                                       label=f"Carbon cost at 50% ({GAS_EF} ÷ 0.5 × EUA)"))]:
     _s = common.break_gaps(df[_col])
     ax2.plot(_s.index, _s.values, **_kw)
 ax2.set_ylabel("€/MWh")
@@ -472,6 +489,15 @@ else:
     cmp = cmp[cmp.index > day - pd.Timedelta(days=90)]
     df["Gas-weighted price"] = captured.reindex(df.index)
     if not cmp.empty:
+        st.subheader("Do Gas Plants Run in the High-Price Hours?")
+        _gm = gas_mw[gas_mw.index.tz_localize(None).normalize() > day - pd.Timedelta(days=90)].dropna()
+        _gm_txt = (f"German gas plants produced in every period of the last 90 days (lowest output "
+                   f"{_gm.min():,.0f} MW), and more when prices were high. "
+                   if len(_gm) and _gm.min() > 0 else "German gas plants produce more when prices are high. ")
+        st.caption("A reality check on the peak block: " + _gm_txt +
+                   "It is a day-ahead capture price, not what the plants sold at: output sold forward "
+                   "earns the forward price instead. Generation: Energy-Charts (Fraunhofer ISE) public net generation, fossil gas; "
+                   "power plants for the public supply only, industrial self-generation not included.")
         last30 = cmp[cmp.index > cmp.index[-1] - pd.Timedelta(days=30)]
         _to = f"30 days to {cmp.index[-1]:%d %b}"
         g1, g2 = st.columns(2)
@@ -493,14 +519,6 @@ else:
         ax_g.legend(fontsize=8, loc="upper left")
         plt.tight_layout()
         st.pyplot(fig_g)
-        _gm = gas_mw[gas_mw.index.tz_localize(None).normalize() > day - pd.Timedelta(days=90)].dropna()
-        _gm_txt = (f"German gas plants produced in every period of the last 90 days (lowest output "
-                   f"{_gm.min():,.0f} MW), and more when prices were high. "
-                   if len(_gm) and _gm.min() > 0 else "German gas plants produce more when prices are high. ")
-        st.caption("A reality check on the peak block: " + _gm_txt +
-                   "It is a day-ahead capture price, not what the plants sold at: output sold forward "
-                   "earns the forward price instead. Generation: Energy-Charts (Fraunhofer ISE) public net generation, fossil gas; "
-                   "power plants for the public supply only, industrial self-generation not included.")
 
 export = pd.DataFrame({
     "Delivery date": df.index.strftime("%Y-%m-%d"),
@@ -526,7 +544,7 @@ export = pd.DataFrame({
     "Gas-weighted day-ahead price (EUR/MWh)": (df["Gas-weighted price"].round(2).values
                                                if "Gas-weighted price" in df else np.nan),
 })
-st.download_button("Download CSV", data=export.to_csv(index=False), file_name="clean_spark_spread_de.csv",
+st.download_button("Download daily spread data (CSV)", data=export.to_csv(index=False), file_name="clean_spark_spread_de.csv",
                    mime="text/csv",
                    help=f"Daily data behind the page ({len(export):,} delivery business days), including the dates "
                         "of the TTF price and EUA auction used for each day, so every figure can be recomputed. "
@@ -561,12 +579,13 @@ sp_css = common.stress_period_fall(_full["dCSS"]) if len(_full) else None
 sp_flex = common.stress_period_fall(_full["dFlex"]) if len(_full) else None
 
 r1, r2, r3 = st.columns(3)
-r1.metric("30-day volatility of the day-on-day change in peak spread", f"{css_vol_now:.2f} €/MWh",
+r1.metric("30-day volatility of the day-on-day change in peak spread (last 30 changes)", f"{css_vol_now:.2f} €/MWh",
           help="Standard deviation of the last 30 day-on-day changes (consecutive delivery business days).")
-r2.metric("1-in-20 day-on-day fall in the peak spread", f"{css_fall95:.2f} €/MWh",
+r2.metric(f"1-in-20 day-on-day fall in the peak spread (last {len(recent)} changes)", f"{css_fall95:.2f} €/MWh",
           help=f"5th percentile of the last {len(recent)} day-on-day changes in the peak spread at 50%, shown as "
                "a positive number (95% historical VaR of the daily change). Monday is compared with Friday.")
-r3.metric(f"1-in-20 day-on-day fall in the {PLANT_MW} MW flexible plant's daily margin", f"€{flex_fall95:,.0f}",
+r3.metric(f"1-in-20 day-on-day fall in the {PLANT_MW} MW flexible plant's daily margin (last {len(flex_recent)} changes)",
+          f"€{flex_fall95 / 1e6:.2f}m",
           help=f"5th percentile of the last {len(flex_recent)} day-on-day changes in the flexible plant's "
                f"daily gross margin ({PLANT_MW} MW × hours run × average spread when running).")
 
@@ -607,7 +626,9 @@ if sp_css is not None:
         ru = sp["runner_up"]
         # Name the next-highest window only when it comes within 1%: then the stress period's dates can jump.
         if ru is not None and sp["fall"] - ru["fall"] < 0.01 * abs(sp["fall"]):
-            out += (f". The next-highest value, {fmt(ru['fall'])}, is only {fmt(sp['fall'] - ru['fall'])} lower and "
+            # The difference of the two figures as printed, so the reader's own subtraction matches.
+            _shown = lambda x: float(re.sub(r"[^0-9.\-]", "", fmt(x)))
+            out += (f". The next-highest value, {fmt(ru['fall'])}, is only {fmt(_shown(sp['fall']) - _shown(ru['fall']))} lower and "
                     f"belongs to {ru['n']} window{'s' if ru['n'] > 1 else ''} ending "
                     + (f"between {ru['first_end']:%d %b %Y} and {ru['last_end']:%d %b %Y}" if ru['n'] > 1
                        else f"{ru['first_end']:%d %b %Y}")
@@ -618,7 +639,7 @@ if sp_css is not None:
 
     st.caption(
         _stress_text(sp_css, "peak spread", lambda x: f"{x:.2f} €/MWh") + " "
-        + (_stress_text(sp_flex, "flexible plant", lambda x: f"€{max(0.0, x):,.0f}") if sp_flex else ""))
+        + (_stress_text(sp_flex, "flexible plant", lambda x: f"€{max(0.0, x) / 1e6:.2f}m") if sp_flex else ""))
     _folded("How the stress period is chosen",
         f"Each stress period is the run of {common.STRESS_WINDOW} consecutive day-on-day changes, within "
         f"{common.STRESS_MAX_SPAN} calendar days, with the largest 1-in-20 fall, searched over every change from "

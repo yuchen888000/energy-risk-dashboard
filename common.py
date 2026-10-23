@@ -859,18 +859,55 @@ def roll_sentence(ticker, rc, window_returns):
         parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
                      "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
                      "roll on those days is neither ruled out nor adjusted.")
-        cand = rule_roll_days(root, rc['unknown'])
-        # A contract whose roll was already identified (on its expiry or the day after) needs no candidate.
-        found = {pd.Timestamp(t).normalize() for t, _, _, _ in rc['rolls']}
-        cal = _SERIES_CALENDARS.get(root)
-        cand = {d: (m, exp) for d, (m, exp) in cand.items()
-                if not ({exp.normalize(), pd.Timestamp(np.busday_offset(exp.date(), 1, busdaycal=cal))} & found)}
+        cand = roll_candidates(root, rc)
         if cand:
             parts.append(rule_roll_sentence(cand))
     if rc['rolls']:
-        parts.append("The heading, the percentile and the pre-war multiple use the unadjusted figure, because "
+        parts.append("The heading, the percentile and the multiple of the Oct to Dec 2025 level use the unadjusted figure, because "
                      "the history they are compared with contains roll days too.")
     return " ".join(parts)
+
+
+def roll_candidates(root, rc):
+    """rule_roll_days for the unidentified days of a roll check, without contracts whose roll was identified (on
+    their expiry or the day after): {day: (delivery month, last trading day)}."""
+    if rc is None or not rc.get('unknown'):
+        return {}
+    cand = rule_roll_days(root, rc['unknown'])
+    found = {pd.Timestamp(t).normalize() for t, _, _, _ in rc['rolls']}
+    cal = _SERIES_CALENDARS.get(root)
+    return {d: (m, exp) for d, (m, exp) in cand.items()
+            if not ({exp.normalize(), pd.Timestamp(np.busday_offset(exp.date(), 1, busdaycal=cal))} & found)}
+
+
+def roll_line(ticker, rc):
+    """The one short line on the page under the volatility heading (Risk and Market): the identified roll days, the
+    contract switched to, the 30-day volatility with the new contract's own return, and a likely roll the check could
+    not identify (by the exchange rule), which the adjusted figure still contains. '' when there is nothing to say.
+    The full breakdown is roll_sentence, which the pages fold."""
+    if rc is None or ticker not in CURVE_ROOTS:
+        return ""
+    root = CURVE_ROOTS[ticker][0]
+    bits = [f"{pd.Timestamp(t):%d %b %Y} (to the {_contract_month(m, root)} contract"
+            + (", read from the latest price" if futures_row_state(t) != 'close' else "") + ")"
+            for t, m, _, _ in rc.get('rolls') or []]
+    cand = roll_candidates(root, rc) if root in ("CL", "TTF") else {}
+    by_exp = {}
+    for d, (m, exp) in sorted(cand.items()):
+        by_exp.setdefault(exp, []).append(d)
+    likely = ["; ".join(" or ".join(f"{d:%d %b %Y}" for d in ds) for ds in by_exp.values())] if by_exp else []
+    out = ""
+    if bits:
+        out = (("Contract roll days in the 30-day window: " if len(bits) > 1 else
+                "Contract roll day in the 30-day window: ") + " and ".join(bits))
+        if rc.get('adjusted_vol') is not None:
+            out += (f". With the new contract's own return on {'that day' if len(bits) == 1 else 'those days'}, the "
+                    f"30-day volatility is {fmt_vol(rc['adjusted_vol'])}")
+    if likely:
+        out += (("; " if out else "") + f"a roll on {likely[0]} is likely by the exchange rule but not identified"
+                + (", so the adjusted figure still contains it" if bits and rc.get('adjusted_vol') is not None
+                   else ", so it is not adjusted"))
+    return (out[0].upper() + out[1:] + ".") if out else ""
 
 
 def rule_roll_sentence(cand):
@@ -952,13 +989,17 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
                roll=(roll_sentence(core['ticker'], rc, window_returns) if with_roll else ""),
                headline=f"{lead}: {vol_now * ANNUAL:.0f}% annualised ({vol_now:.2f}% daily)")
     if ctx is None:
-        out.update(headline2="", detail="", ai=out['headline'], prewar_ai="")
+        out.update(headline2="", detail="", ai=out['headline'], prewar_ai="", level_name="the pre-war level")
         return out
     before_strikes = as_of < _STRIKES
     r = ctx['prewar_ratio']
-    level, level_ai = "its pre-war level", ("its Oct to Dec 2025 level" if before_strikes else "its pre-war level")
+    # Before the strikes the page, like the AI input, names the quarter by its dates, not as "pre-war" (a reader of
+    # a date in 2025 or earlier would otherwise read about an event that had not happened).
+    level = level_ai = ("its Oct to Dec 2025 level" if before_strikes else "its pre-war level")
+    out['level_name'] = ("the Oct to Dec 2025 level" if before_strikes else "the pre-war level")
     if r is None:
-        compare, compare_ai = "no pre-war reference", (None if before_strikes else "no pre-war reference")
+        compare, compare_ai = (("no comparison with the Oct to Dec 2025 level", None) if before_strikes
+                               else ("no pre-war reference", "no pre-war reference"))
     elif r >= 1.1:
         compare, compare_ai = f"{r:.2f}x {level}", f"{r:.2f}x {level_ai}"
     elif r >= 0.9:
@@ -976,12 +1017,18 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     detail, detail_ai = "", ""
     if ctx['prewar_median'] is not None:
         _lvl = f"{ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% daily)"
-        detail += (f"Pre-war level: {_lvl}, the median of Oct to Dec 2025, the last full quarter before the strikes on "
-                   "Iran on 28 Feb 2026. ")
-        detail_ai += (f"Oct to Dec 2025 level: {_lvl}, the median of that quarter. " if before_strikes else
-                      detail)
+        # The latest 30-day window can lie partly inside the reference quarter (end dates up to early 2026).
+        _first = pd.Timestamp(window_returns.index[0]) if len(window_returns) else as_of
+        _overlap = ("; the latest 30-day window overlaps that quarter, so the multiple partly compares the "
+                    "quarter with itself" if _first <= PREWAR_END else "")
+        detail_ai += (f"Oct to Dec 2025 level: {_lvl}, the median of that quarter{_overlap}. " if before_strikes else
+                      f"Pre-war level: {_lvl}, the median of Oct to Dec 2025, the last full quarter before the strikes "
+                      f"on Iran on 28 Feb 2026{_overlap}. ")
+        detail += detail_ai
     elif ctx['prewar_incomplete']:
-        detail += ("No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
+        detail += (f"No comparison with the Oct to Dec 2025 level: that quarter is not complete by {as_of:%d %b %Y}. "
+                   if before_strikes else
+                   "No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
                    f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
     # Name only the episodes that lie inside the history up to the end date (the war began with the strikes of
     # 28 Feb 2026, _WAR_START is the first day of the month after).
