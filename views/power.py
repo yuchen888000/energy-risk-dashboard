@@ -3,7 +3,6 @@
 Designed with power trading desks and utilities in mind.
 """
 import calendar
-import datetime as dt
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -54,10 +53,10 @@ with st.sidebar.expander("Methodology: Power page"):
       weekends, so each delivery day is matched with the last TTF close on a weekday **before**
       it (Friday's for Monday) and the last EUA auction before it. For Tuesday to Friday the gas
       price is the close of the power-auction day itself, which comes after the 12:00 auction, so
-      it is not the price a bidder saw at 12:00. EEX does not hold an EUA auction on every weekday
-      (in 2026, for example, Wednesdays have one only every other week), so carbon is from the
-      power-auction day when that day has an auction (result at about 11:00, before the power
-      auction) and otherwise from the last auction before it; the headline says which.
+      it is not the price a bidder saw at 12:00. EUA auctions are not held every weekday; the page
+      uses the last auction before the delivery day and prints its date: the power-auction day's
+      when that day has one (result at about 11:00, before the power auction), otherwise an
+      earlier one, and the headline says which.
     - **Clean spark spread** = power − gas / efficiency − ({GAS_EF:.5f} / efficiency) × EUA,
       efficiencies 45%, 50% and 60% (HHV), as S&P Global Platts publishes for Germany. A gross
       margin per MWh before start-up, other variable and fixed costs.
@@ -227,29 +226,29 @@ _hl = common.front_month_contract("TTF=F", latest["TTF date"])
 _hl_contract = (f"TTF {_hl['delivery']:%b %y} future (front month)" if _hl["matched"] else
                 f"TTF {_hl['delivery']:%b %y} future (front month by the exchange expiry rule, holidays not modelled; "
                 "this price could not be matched to a single monthly contract on Yahoo Finance)")
-_is_today = latest["TTF date"].date() == _today
 # The day-ahead auction for this delivery day runs the calendar day before; gas and carbon trade on weekdays,
 # so the last trading day before the auction is the last weekday before the delivery day.
 _trade_day = pd.Timestamp(np.busday_offset(day.date(), -1, roll="backward"))
+
+
+# ─── Timing sentence (tests/test_power_timing.py runs this block on its own) ───
 # Yahoo's TTF=F follows the NYMEX trading calendar, so a weekday can be an exchange holiday (e.g. US
-# Thanksgiving). Gas counts as lagging only if NYMEX Brent (BZ=F, normally the same calendar) has a price for
-# that day and TTF=F does not.
-_gas_lags = False
-if latest["TTF date"].normalize() < _trade_day:
-    _bz = common.load_close("BZ=F", _trade_day.date() - pd.Timedelta(days=7), _today)
-    _gas_lags = bool((_bz.dropna().index.normalize() == _trade_day).any())
-# "Not out yet" only makes sense for the latest trading day; for an older day the missing price will not come.
-_lag_recent = _trade_day.date() >= np.busday_offset(_today, -1, roll="backward").astype(dt.date)
-if not _gas_lags:
-    _lag_txt = ""
-elif _lag_recent:
-    _lag_txt = (f" **Gas is from an earlier day than that:** this page's TTF data has no price for "
-                f"{_trade_day:%a %d %b} yet, although NYMEX Brent (`BZ=F`, normally the same trading days) has one, "
-                "so this spread will change when it arrives.")
-else:
-    _lag_txt = (f" **Gas is from an earlier day than that:** Yahoo Finance's `TTF=F` has no price for "
-                f"{_trade_day:%a %d %b %Y}, although NYMEX Brent (`BZ=F`, normally the same trading days) has one, "
-                f"so the previous close ({latest['TTF date']:%a %d %b}) is used.")
+# Thanksgiving). Gas counts as late only if NYMEX Brent (BZ=F, normally the same calendar) has a price for a day
+# up to the trade day that TTF=F lacks, by the Risk page's rule (common.ttf_row_late: only BZ=F rows dated before
+# today's New York date count, because after New York midnight Yahoo opens a BZ=F row for the evening session).
+def _gas_late(ttf_day, trade_day, bz_close, now=None):
+    """(day, recent): the latest day up to `trade_day` on which NYMEX Brent has a price and TTF=F, whose last price
+    before the delivery day is of `ttf_day`, does not (common.ttf_row_late, the Risk page's rule), else None; and
+    whether that price can still arrive, i.e. the day is the last weekday before today's New York date
+    (common.futures_live_from). For an older day the missing price will not come."""
+    trade_day = pd.Timestamp(trade_day).normalize()
+    if pd.Timestamp(ttf_day).normalize() >= trade_day:
+        return None, False
+    bz = bz_close.dropna()
+    late = common.ttf_row_late(ttf_day, bz[bz.index.normalize() <= trade_day], now)
+    return late, late is not None and late >= common.futures_live_from(now)
+
+
 # EEX does not auction EUAs on every weekday, and TTF=F has no price on NYMEX holidays. When a price is not from the
 # last weekday before the delivery day, say so and name the weekdays without one (from the data).
 def _days_txt(first_after, last):
@@ -258,26 +257,62 @@ def _days_txt(first_after, last):
             f"any weekday from {d[0]:%a %d %b} to {d[-1]:%a %d %b}")
 
 
-_eua_day, _ttf_day = latest["EUA date"].normalize(), latest["TTF date"].normalize()
-_why_gas = ("Monday's power is auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday the gas price is "
-            "from the day of the 12:00 power auction itself, and the TTF close comes after the auction, so it is not "
-            "the price a bidder saw at 12:00.")
-if _eua_day >= _trade_day:
-    _from_txt = (f"Both are taken from the last weekday before this delivery day, {_trade_day:%a %d %b}. Monday's "
-                 "power is auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday it is the day of the "
-                 "12:00 power auction itself, when the EUA auction result (about 11:00) is already out but the TTF "
-                 "close comes later, so the gas price is not the one a bidder saw at 12:00.")
-elif _eua_day < _ttf_day:
-    _from_txt = (f"Gas is taken from the last weekday before this delivery day, {_trade_day:%a %d %b}, and carbon "
-                 f"from the last auction before it (no auction on {_days_txt(_eua_day, _trade_day)}). " + _why_gas)
-else:
-    # Carbon not from the trade day and gas not newer than carbon: neither is from the last weekday before delivery.
-    _from_txt = (f"Neither is from the last weekday before this delivery day, {_trade_day:%a %d %b}: this page's data "
-                 f"has no EUA auction on {_days_txt(_eua_day, _trade_day)} and no TTF close on "
-                 f"{_days_txt(_ttf_day, _trade_day)}, so the last earlier ones are used. " + _why_gas)
-st.caption(f"Gas: {_hl_contract}, {'latest price' if _is_today else 'close'} of {latest['TTF date']:%a %d %b} "
-           f"({latest['TTF']:.2f} €/MWh); not day-ahead gas, see Caveats. Carbon: EEX auction of "
-           f"{latest['EUA date']:%a %d %b} ({latest['EUA']:.2f} €/t). " + _from_txt + _lag_txt)
+def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=False):
+    """Which day the gas (TTF) and carbon (EUA) prices of a delivery day are from, against `trade_day`, the last
+    weekday before the delivery day. `late_day` is the day NYMEX Brent has a price and TTF=F does not
+    (common.ttf_row_late), `late_recent` whether that price can still arrive. The reason for using the auction day's
+    gas close (Monday's power auctioned on Sunday; the close comes after the 12:00 auction) is given only when the
+    gas price is from the trade day; otherwise the sentence says which weekdays have no price and that earlier ones
+    are used."""
+    trade_day, ttf_day, eua_day = (pd.Timestamp(x).normalize() for x in (trade_day, ttf_day, eua_day))
+    gas_ok, eua_ok = ttf_day >= trade_day, eua_day >= trade_day
+    if gas_ok and eua_ok:
+        return (f"Both are taken from the last weekday before this delivery day, {trade_day:%a %d %b}. Monday's "
+                "power is auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday it is the day of the "
+                "12:00 power auction itself, when the EUA auction result (about 11:00) is already out but the TTF "
+                "close comes later, so the gas price is not the one a bidder saw at 12:00.")
+    if gas_ok:
+        return (f"Gas is taken from the last weekday before this delivery day, {trade_day:%a %d %b}, and carbon "
+                f"from the last auction before it (no auction on {_days_txt(eua_day, trade_day)}). Monday's power is "
+                "auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday the gas price is from the day "
+                "of the 12:00 power auction itself, and the TTF close comes after the auction, so it is not the price a "
+                "bidder saw at 12:00.")
+    no_gas = f"no TTF close on {_days_txt(ttf_day, trade_day)}"
+    if late_day is not None:
+        no_gas += (f"{' yet' if late_recent else ''}, although NYMEX Brent (`BZ=F`, normally the same trading days) "
+                   f"has one for {pd.Timestamp(late_day):%a %d %b}")
+    after = " This spread will change when that TTF price arrives." if late_day is not None and late_recent else ""
+    if eua_ok:
+        return (f"Carbon is taken from the last weekday before this delivery day, {trade_day:%a %d %b}, but gas is "
+                f"not: this page's data has {no_gas}, so an earlier gas price is used." + after)
+    return (f"Neither is from the last weekday before this delivery day, {trade_day:%a %d %b}: this page's data has "
+            f"no EUA auction on {_days_txt(eua_day, trade_day)} and {no_gas}, so the last earlier ones are used."
+            + after)
+# ─── End of timing sentence ───
+
+
+# How a TTF price is labelled by its row's date in New York (common.futures_row_state, the Risk page's rule):
+# today's New York date or later is the latest price, the weekday before may not yet be the settlement, older
+# rows are closes. The headline, the CSV column and the gas-purchase label all use these words.
+_PRICE_TYPE = {"live": "latest price, not the settlement", "unsettled": "may not yet be the settlement",
+               "close": "close"}
+
+
+def _price_of(d, value_txt):
+    state = common.futures_row_state(d)
+    return {"live": f"latest price of {d:%a %d %b} ({value_txt}), not the settlement",
+            "unsettled": f"price of {d:%a %d %b} ({value_txt}), which may not yet be the settlement",
+            "close": f"close of {d:%a %d %b} ({value_txt})"}[state]
+
+
+_bz = (common.load_close("BZ=F", _trade_day.date() - pd.Timedelta(days=7), _today)
+       if latest["TTF date"].normalize() < _trade_day else pd.Series(dtype=float))
+_from_txt = _timing_sentence(_trade_day, latest["TTF date"], latest["EUA date"],
+                             *_gas_late(latest["TTF date"], _trade_day, _bz))
+_ttf_txt = f"{latest['TTF']:.2f} €/MWh"
+st.caption(f"Gas: {_hl_contract}, {_price_of(latest['TTF date'], _ttf_txt)}; not day-ahead gas, see Caveats. "
+           f"Carbon: EEX auction of "
+           f"{latest['EUA date']:%a %d %b} ({latest['EUA']:.2f} €/t). " + _from_txt)
 
 last_year = df[df.index > day - pd.DateOffset(years=1)]
 has_year = df.index[0] <= day - pd.DateOffset(years=1)
@@ -448,7 +483,7 @@ export = pd.DataFrame({
     "DE power price, baseload (EUR/MWh)": df["Power base"].round(2).values,
     "TTF front month (EUR/MWh, HHV)": df["TTF"].round(3).values,
     "TTF price date": df["TTF date"].dt.strftime("%Y-%m-%d").values,
-    "TTF price type": np.where(df["TTF date"].dt.date == _today, "latest price, not a settlement", "close"),
+    "TTF price type": [_PRICE_TYPE[common.futures_row_state(d)] for d in df["TTF date"]],
     "EUA auction price (EUR/tCO2)": df["EUA"].round(2).values,
     "EUA auction date": df["EUA date"].dt.strftime("%Y-%m-%d").values,
     "Fuel cost at 50% (EUR/MWh)": df["Fuel cost"].round(3).values,
@@ -469,9 +504,10 @@ export = pd.DataFrame({
 st.download_button("Download CSV", data=export.to_csv(index=False), file_name="clean_spark_spread_de.csv",
                    mime="text/csv",
                    help=f"Daily data behind the page ({len(export):,} delivery business days), including the dates "
-                        "of the TTF price and EUA auction used for each day (the TTF price of today is the latest "
-                        "price, not a settlement), so every figure can be "
-                        "recomputed.")
+                        "of the TTF price and EUA auction used for each day, so every figure can be recomputed. "
+                        "The TTF price type follows the row's date in New York: a price of today's New York date is "
+                        "the latest price, not the settlement; one of the weekday before may not yet be the "
+                        f"settlement ({common._UNSETTLED_WHY}); older ones are closes.")
 
 # ─── Risk: day-on-day changes ───
 st.subheader("Spread Risk")
@@ -608,6 +644,7 @@ _WAIT_DAYS = 5
 _MIN_FIT = 250   # daily returns a monthly contract needs in the fit window to have its own GARCH fit
 _MIN_CMP = 20    # daily returns on common days needed to compare TTF=F's and a contract's volatility
 _SAME_VOL = 0.05  # volatilities within 5% of each other are "about the same"
+_ROLL_CHECK = 5   # last returns of the front-month fit checked for a contract roll day
 ttf_last_date = ttf.index[-1]
 # GARCH fit window: it does not shrink with a later start date. It starts 10 days before 1 Jan 2020 (the default
 # start date) or before the start date if that is earlier, as the page's TTF data does, and ends at the end date;
@@ -689,8 +726,9 @@ if _switch:
                "weekend and within-day spot contracts EEX lists (EEX contract specifications 0105a, section 1.2.4.1), "
                "but this page has no prices for them. This section therefore uses the next contract still trading "
                f"then, TTF {delivery_month:%b %y} (`{contract}`): its price, delivery month, days and hours.")
-st.write(f"The plant buys the gas for {month_label} on the TTF {delivery_month:%b %y} contract"
-         + (" (the front month)" if not _switch else "") + f". If it waits {_WAIT_DAYS} business days instead of "
+st.write(f"The plant buys the gas for {month_label} on TTF {delivery_month:%b %y}"
+         + (", the front month" if not _switch else "") + " (price from the NYMEX Dutch TTF contract)"
+         + f". If it waits {_WAIT_DAYS} business days instead of "
          f"buying on {_decide:%a %d %b}, how much could that gas cost? This is the gas leg alone: a plant that "
          f"hedges its spread also sells its power forward at the same time, and {_corr_txt}, so the plant's real "
          "exposure is smaller.")
@@ -718,7 +756,7 @@ if wait is not None:
     fit_start = fit_series.dropna().index[0]
 
     w1, w2, w3 = st.columns(3)
-    _w_today = pd.Timestamp(price_date).date() == _today
+    _w_state = common.futures_row_state(price_date)
     if _switch:
         _price_help = f"Yahoo Finance `{contract}`, the monthly contract itself, from the same download as `TTF=F`."
     elif _front["matched"]:
@@ -728,10 +766,13 @@ if wait is not None:
                        "Finance for this date, so the delivery month is the front month by the exchange expiry rule "
                        f"(`{contract}`; holidays not modelled, so it can be a month off for a day or two around a "
                        "holiday).")
-    w1.metric(f"TTF {delivery_month:%b %y} ({month_label}), {'latest price' if _w_today else 'close'} "
-              f"{price_date:%d %b %Y}", f"{price_now:.2f} €/MWh",
-              help=_price_help + (" During the trading day this is the latest price, not yet a settlement."
-                                  if _w_today else ""))
+    _w_label = {"live": f"latest price {price_date:%d %b %Y}",
+                "unsettled": f"price of {price_date:%d %b %Y} (may not yet be the settlement)",
+                "close": f"close {price_date:%d %b %Y}"}[_w_state]
+    w1.metric(f"TTF {delivery_month:%b %y} ({month_label}), {_w_label}", f"{price_now:.2f} €/MWh",
+              help=_price_help + {"live": " This is the latest price, not the settlement.",
+                                  "unsettled": f" It may not yet be the settlement: {common._UNSETTLED_WHY}.",
+                                  "close": ""}[_w_state])
     w2.metric(f"On {_wait_day:%a %d %b}, in {_WAIT_DAYS} business days: 90% range (€/MWh)",
               f"{_half(lo):.1f} to {_half(hi):.1f}",
               help="Rounded to 0.5 €/MWh: the range comes from 10,000 simulated paths with a fixed random seed "
@@ -749,10 +790,12 @@ if wait is not None:
                    f"trading unit 1 MW), so this volume is about {contract_mw:,.0f} MW of the contract; the plant's "
                    "actual use varies by hour and is only on business days, so the contract matches it only on "
                    "average.")
-    b2.metric("Bought in a week, 90% range", f"€{bill_lo / 1e6:,.1f}m to €{bill_hi / 1e6:,.1f}m")
+    b2.metric("Bought in a week, 90% range", f"€{bill_lo / 1e6:,.1f}m to €{bill_hi / 1e6:,.1f}m",
+              help=f"{gas_mwh:,.0f} MWh times the 90% range, from the simulated percentiles before rounding "
+                   f"({lo:.2f} to {hi:.2f} €/MWh), so it can differ by €0.1m from the rounded range times the volume.")
     b3.metric("Extra cost if TTF ends at the 95th percentile", f"+€{(bill_hi - bill_now) / 1e6:,.1f}m",
-              help="Top of the 90% range minus the cost at the last price: a 1-in-20 threshold, not the average of "
-                   "the worst 5%.")
+              help=f"Top of the 90% range ({hi:.2f} €/MWh before rounding) minus the last price, times the volume: a "
+                   "1-in-20 threshold, not the average of the worst 5%.")
 
     fig_w, ax_w = plt.subplots(figsize=(14, 3.5))
     hist = (_c if _switch else ttf).tail(40)
@@ -803,9 +846,31 @@ if wait is not None:
                    f"{fit_start:%d %b %Y} to {wait['date']:%d %b %Y}) applied to this contract's price. It is not this "
                    "contract's own volatility." + _cmp + _fit_note)
     else:
+        # A roll day among the last returns of the fit weighs most on the GARCH variance at the end of the sample.
+        # Only days the roll check identifies (common.window_rolls: TTF=F's close equals a new monthly contract's)
+        # are named; when Yahoo no longer lists the contracts, nothing is said.
+        _roll_txt = ""
+        _last_r = _ttf_fit.pct_change(fill_method=None).dropna().tail(_ROLL_CHECK)
+        _rc = common.window_rolls("TTF=F", _batch, _last_r)
+        if _rc and _rc["rolls"]:
+            _rdays = tuple(t for t, _, _, _ in _rc["rolls"])
+            _alt = common.garch_price_range(fit_series, horizon=_horizon, drop=_rdays)
+            _one = len(_rdays) == 1
+            _roll_txt = (f" The last {_ROLL_CHECK} returns of the fit include "
+                         + ("a contract roll day, " if _one else "contract roll days, ")
+                         + " and ".join(f"{t:%a %d %b %Y} (`TTF=F` {cr * 100:+.2f}%, the "
+                                        f"{common.contract_delivery(m, 'TTF'):%b %y} contract it switched to "
+                                        f"{nr * 100:+.2f}%)" for t, m, cr, nr in _rc["rolls"])
+                         + ": part of " + ("that day's return" if _one else "those days' returns")
+                         + " is the gap between two contracts.")
+            if _alt is not None:
+                _s_alt = price_now / _alt["price_now"]
+                _roll_txt += (f" Fitted again on the same series, the range with {'that day' if _one else 'those days'} "
+                              f"left out would be {_half(_alt['lo'][-1] * _s_alt):.1f} to "
+                              f"{_half(_alt['hi'][-1] * _s_alt):.1f} €/MWh (same seed and number of paths).")
         _method = (f"GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}. Monthly roll jumps in `TTF=F` feed into the "
-                   "fitted volatility." + _fit_note)
+                   "fitted volatility." + _roll_txt + _fit_note)
     st.caption(
         "**This is the risk of waiting, not a forecast of direction.** The model has no view on whether "
         "TTF goes up or down: its mean return is set to zero, so the range is centred on the last price. "

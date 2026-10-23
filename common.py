@@ -1256,7 +1256,7 @@ GARCH_SEED = 42   # seed of the simulated shocks in garch_price_range
 
 
 @st.cache_data(ttl=3600, show_spinner="Simulating price paths...")
-def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
+def garch_price_range(close, horizon=5, simulations=10000, conf=0.90, drop=None):
     """Range of the price `horizon` business days ahead from a GARCH(1,1) fit.
 
     Fitted on daily log returns with zero mean (no view on direction) and Student-t
@@ -1267,10 +1267,15 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90):
     same range on every run. (arch 8.0 uses forecast(random_state=...) only for bootstrap forecasts, not for
     method='simulation', so the seed has to be given to the distribution.) The fit is the same as
     arch_model(..., mean='Zero', vol='GARCH', p=1, q=1, dist='t').
+
+    `drop`: days whose returns are left out of the fit (the Power page's check of a contract roll day among the
+    last returns); the paths still start from the last price. None leaves every return in.
     """
     close = close.where(close > 0)
     # Log returns on the series' own days; NaN across a stale gap rather than one jump.
     log_ret = (100 * np.log(close).diff()).dropna()
+    if drop is not None:
+        log_ret = log_ret.drop(pd.DatetimeIndex(list(drop)), errors='ignore')
     close = close.dropna()
     try:
         res = ZeroMean(log_ret, volatility=GARCH(p=1, q=1), distribution=StudentsT(seed=GARCH_SEED),
