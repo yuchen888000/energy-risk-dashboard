@@ -1710,7 +1710,9 @@ def nymex_path_days(start, n):
 def ice_endex_ttf_expiry(delivery):
     """Last trading day of the ICE Endex Dutch TTF monthly contract: two UK business days before the first
     calendar day of the delivery month (ICE Endex TTF contract specifications, ProductSpec_27996665, page 2),
-    on England's bank holidays. contract_expiry("TTF", ...) moves the NYMEX contract earlier when that day is not
+    on England's bank holidays (UK business days are taken as England's bank holidays; ICE Endex's own definition
+    of a UK Business Day, which could include Scottish or Northern Irish holidays, has not been checked).
+    contract_expiry("TTF", ...) moves the NYMEX contract earlier when that day is not
     a NYMEX business day (Jun 2022: ICE Mon 30 May, NYMEX Fri 27 May, Memorial Day)."""
     first = pd.Timestamp(delivery).replace(day=1).date()
     return pd.Timestamp(np.busday_offset(first, -2, roll='forward', busdaycal=LONDON_BDAYS))

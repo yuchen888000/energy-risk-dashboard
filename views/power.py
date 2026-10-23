@@ -12,6 +12,16 @@ import streamlit as st
 import common
 import power_data
 
+def _folded(label, *texts):
+    """Method notes and caveats under a section, folded into one expander so the figures and the warnings that
+    change how a figure reads stay on top (the same rule as the Risk page). Empty texts are skipped."""
+    texts = [t.strip() for t in texts if t and t.strip()]
+    if texts:
+        with st.expander(label):
+            for t in texts:
+                st.caption(t)
+
+
 # Efficiencies on a higher heating value (HHV) basis, as S&P Global Platts publishes its German
 # clean spark spreads: 45% and 50% for all locations, plus 60% for the UK, Germany and Italy
 # (Platts European Electricity specifications: June 2026 edition p.14, October 2026 edition p.15, same text).
@@ -294,15 +304,27 @@ def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=Fal
 # How a TTF price is labelled by its row's date in New York (common.futures_row_state, the Risk page's rule):
 # today's New York date or later is the latest price, the day before (Monday to Thursday) may not yet be the
 # settlement, older rows and Friday's from Saturday on are closes. The headline, the CSV column and the gas-purchase label all use these words.
+# A row on a NYMEX holiday (Yahoo has TTF=F rows on Thanksgiving 2023 and 4 July 2025, days on which NYMEX publishes
+# no settlement) is a price of that day's trading, not a close: 'holiday' (audit Power round 5, 3-1).
 _PRICE_TYPE = {"live": "latest price, not the settlement", "unsettled": "may not yet be the settlement",
-               "close": "close"}
+               "close": "close", "holiday": "price on a US holiday, no NYMEX settlement"}
+
+
+def _ttf_state(d):
+    """common.futures_row_state, with 'holiday' for an older row dated on a NYMEX holiday."""
+    state = common.futures_row_state(d)
+    if state == "close" and not np.is_busday(pd.Timestamp(d).date(), busdaycal=common.NYMEX_BDAYS):
+        return "holiday"
+    return state
 
 
 def _price_of(d, value_txt):
-    state = common.futures_row_state(d)
+    state = _ttf_state(d)
     return {"live": f"latest price of {d:%a %d %b} ({value_txt}), not the settlement",
             "unsettled": f"price of {d:%a %d %b} ({value_txt}), which may not yet be the settlement",
-            "close": f"close of {d:%a %d %b} ({value_txt})"}[state]
+            "close": f"close of {d:%a %d %b} ({value_txt})",
+            "holiday": f"price of {d:%a %d %b} ({value_txt}), a US holiday on which NYMEX publishes no "
+                       "settlement"}[state]
 
 
 _bz = (common.load_close("BZ=F", _trade_day.date() - pd.Timedelta(days=7), _today)
@@ -418,7 +440,9 @@ else:
 _full_q = by_q[[not (p == by_q.index[-1] and day < p.end_time.normalize()) for p in by_q.index]]
 _bars_txt = (f"; the full quarters shown range from €{_full_q['margin'].min() / 1e6:.1f}m to "
              f"€{_full_q['margin'].max() / 1e6:.1f}m" if len(_full_q) else "")
-st.caption("By construction this margin cannot be negative: the plant runs in exactly the periods whose "
+st.caption("The bars are an upper bound: the plant runs only in the periods whose price covers its fuel and "
+           "carbon cost and pays nothing to start or stop.")
+_folded("How the margin is built", "By construction this margin cannot be negative: the plant runs in exactly the periods whose "
            "price covers its fuel and carbon cost (as a unit offering at that cost would be dispatched in the "
            "auction) and pays nothing to start, stop or stay on, so the bars are an upper bound, not a finding "
            "about what gas plants earn. Days with no EUA auction in the previous two weeks (around the year-end "
@@ -483,7 +507,7 @@ export = pd.DataFrame({
     "DE power price, baseload (EUR/MWh)": df["Power base"].round(2).values,
     "TTF front month (EUR/MWh, HHV)": df["TTF"].round(3).values,
     "TTF price date": df["TTF date"].dt.strftime("%Y-%m-%d").values,
-    "TTF price type": [_PRICE_TYPE[common.futures_row_state(d)] for d in df["TTF date"]],
+    "TTF price type": [_PRICE_TYPE[_ttf_state(d)] for d in df["TTF date"]],
     "EUA auction price (EUR/tCO2)": df["EUA"].round(2).values,
     "EUA auction date": df["EUA date"].dt.strftime("%Y-%m-%d").values,
     "Fuel cost at 50% (EUR/MWh)": df["Fuel cost"].round(3).values,
@@ -593,8 +617,9 @@ if sp_css is not None:
 
     st.caption(
         _stress_text(sp_css, "peak spread", lambda x: f"{x:.2f} €/MWh") + " "
-        + (_stress_text(sp_flex, "flexible plant", lambda x: f"€{max(0.0, x):,.0f}") + " " if sp_flex else "")
-        + f"Each stress period is the run of {common.STRESS_WINDOW} consecutive day-on-day changes, within "
+        + (_stress_text(sp_flex, "flexible plant", lambda x: f"€{max(0.0, x):,.0f}") if sp_flex else ""))
+    _folded("How the stress period is chosen",
+        f"Each stress period is the run of {common.STRESS_WINDOW} consecutive day-on-day changes, within "
         f"{common.STRESS_MAX_SPAN} calendar days, with the largest 1-in-20 fall, searched over every change from "
         f"the first in the power data ({sp_css['search_from']:%d %b %Y}) to the last on this page "
         f"({sp_css['search_to']:%d %b %Y}), whatever start date is chosen and never past the end date; when "
@@ -625,8 +650,8 @@ st.caption(
     "include the days on which `TTF=F` switches to the next monthly contract: part of that day's change is the "
     "price gap between two contracts, and the fuel cost (TTF ÷ 0.5) doubles it."
 )
-st.caption(
-    "**Caveats.** Power is the day-ahead price, while gas is the TTF front-month future, so the tenors "
+_folded("Caveats",
+    "Power is the day-ahead price, while gas is the TTF front-month future, so the tenors "
     "don't match. S&P Global Platts calculates its German spark spreads using its own TTF assessments, which are "
     "not freely available; a change to its day-ahead and weekend assessments in March 2026 affected 12 day-ahead "
     "spread codes (S&P Global subscriber note, 31 Mar 2026). Platts prices "
@@ -740,7 +765,10 @@ st.write(f"The plant buys the gas for {month_label} on TTF {delivery_month:%b %y
          + (", the front month" if not _switch else "") + " (price from the NYMEX Dutch TTF contract)"
          + f". If it waits {_WAIT_DAYS} business days (NYMEX business days, the days `TTF=F` settles: US exchange "
          "holidays such as Martin Luther King Jr. Day are skipped) instead of "
-         f"buying on {_decide:%a %d %b}, how much could that gas cost? This is the gas leg alone: a plant that "
+         f"buying on {_decide:%a %d %b}"
+         + (" (a US holiday: NYMEX trades but publishes no settlement that day)"
+            if not np.is_busday(pd.Timestamp(_decide).date(), busdaycal=common.NYMEX_BDAYS) else "")
+         + ", how much could that gas cost? This is the gas leg alone: a plant that "
          f"hedges its spread also sells its power forward at the same time, and {_corr_txt}, so the plant's real "
          "exposure is smaller.")
 
@@ -768,7 +796,7 @@ if wait is not None:
     fit_start = fit_series.dropna().index[0]
 
     w1, w2, w3 = st.columns(3)
-    _w_state = common.futures_row_state(price_date)
+    _w_state = _ttf_state(price_date)
     if _switch:
         _price_help = f"Yahoo Finance `{contract}`, the monthly contract itself, from the same download as `TTF=F`."
     elif _front["matched"]:
@@ -779,11 +807,14 @@ if wait is not None:
                        f"(`{contract}`, {common.expiry_cal_note('TTF')}).")
     _w_label = {"live": f"latest price {price_date:%d %b %Y}",
                 "unsettled": f"price of {price_date:%d %b %Y} (may not yet be the settlement)",
-                "close": f"close {price_date:%d %b %Y}"}[_w_state]
+                "close": f"close {price_date:%d %b %Y}",
+                "holiday": f"price of {price_date:%d %b %Y} (US holiday, no NYMEX settlement)"}[_w_state]
     w1.metric(f"TTF {delivery_month:%b %y} ({month_label}), {_w_label}", f"{price_now:.2f} €/MWh",
               help=_price_help + {"live": " This is the latest price, not the settlement.",
                                   "unsettled": f" It may not yet be the settlement: {common._UNSETTLED_WHY}.",
-                                  "close": ""}[_w_state])
+                                  "close": "",
+                                  "holiday": " That day is a US holiday: NYMEX trades but publishes no settlement, "
+                                             "so this is a price of the day's trading."}[_w_state])
     w2.metric(f"On {_wait_day:%a %d %b}, in {_WAIT_DAYS} NYMEX business days: 90% range (€/MWh)",
               f"{_half(lo):.1f} to {_half(hi):.1f}",
               help="Rounded to 0.5 €/MWh: the range comes from 10,000 simulated paths with a fixed random seed "
@@ -894,9 +925,9 @@ if wait is not None:
         _method = (f"GARCH(1,1) with Student-t shocks fitted on daily log returns of `TTF=F` from "
                    f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}. Monthly roll jumps in `TTF=F` feed into the "
                    "fitted volatility." + _roll_txt + _fit_note)
-    st.caption(
-        "**This is the risk of waiting, not a forecast of direction.** The model has no view on whether "
-        "TTF goes up or down: its mean return is set to zero, so the range is centred on the last price. "
+    st.caption("**This is the risk of waiting, not a forecast of direction.** The model has no view on whether "
+               "TTF goes up or down: its mean return is set to zero, so the range is centred on the last price.")
+    _folded("How the range is built",
         f"Method: {_method} 10,000 simulated paths over {_horizon} NYMEX business days"
         + (f" (from the last price, {price_date:%a %d %b}, to {_wait_day:%a %d %b})" if _horizon != _WAIT_DAYS
            else "")
