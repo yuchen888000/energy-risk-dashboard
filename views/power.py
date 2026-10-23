@@ -765,7 +765,7 @@ if wait is not None:
     else:
         _price_help = ("Yahoo Finance `TTF=F`. Its price could not be matched to a single monthly contract on Yahoo "
                        "Finance for this date, so the delivery month is the front month by the exchange expiry rule "
-                       f"(`{contract}`, {common.expiry_cal_note("TTF")}).")
+                       f"(`{contract}`, {common.expiry_cal_note('TTF')}).")
     _w_label = {"live": f"latest price {price_date:%d %b %Y}",
                 "unsettled": f"price of {price_date:%d %b %Y} (may not yet be the settlement)",
                 "close": f"close {price_date:%d %b %Y}"}[_w_state]
