@@ -140,3 +140,20 @@ def test_nearest_subject_over_first_named():
     assert _post["_subject"](s[:s.index("rises")]) == "vol"
     assert _post["_subject"]("Watch whether the GARCH forecast of volatility ") == "garch"
     assert _post["_subject"]("Watch whether the correlation ") == "corr"
+
+
+@pytest.mark.parametrize("sentence, levels", [
+    # "returns to" and "moves to" name no direction: a level below the current value is a move back down, so the
+    # sentence is kept (audit Market 2026-10-23 round 5, 4-1).
+    ("Watch whether volatility returns to 28% annualised.", LEVELS),
+    ("Watch whether the correlation moves to 0.30 over the next ten days.", LEVELS),
+])
+def test_neutral_verbs_keep_a_move_back(sentence, levels):
+    kept, dropped = drop(sentence, levels)
+    assert dropped == [] and kept == sentence
+
+
+def test_neutral_verb_with_explicit_direction_still_checked():
+    # "moves above" names the direction: volatility is already above 28%, so the sentence goes.
+    _, dropped = drop("Watch whether volatility moves above 28% annualised.", LEVELS)
+    assert len(dropped) == 1

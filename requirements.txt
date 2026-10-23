@@ -10,4 +10,4 @@ requests
 finvader
 scipy
 openpyxl
-holidays
+holidays==0.107

@@ -135,14 +135,24 @@ if not _past_end:
                 _ttf_late = (f" TTF figures end a day earlier than Brent: Yahoo Finance has no TTF=F price for "
                              f"{_late_day:%d %b} in this download, although NYMEX Brent (BZ=F, which usually "
                              "follows the same trading calendar) has one.")
+# The comparison series' last value gets the same note when it may not be a close (it enters the correlation and
+# the book's P&L), phrased for that series.
+_cmp_value_note = ""
+if _last_cmp is not None:
+    _cn = common.last_value_note(ctx.compare_ticker, end_date, _last_cmp)
+    if _cn.startswith(" The last value") and ("may" in _cn or "latest price" in _cn):
+        _cmp_value_note = f" For {compare_label}, the last value" + _cn[len(" The last value"):]
 st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
            + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
            + "." + _ttf_late
            # A futures row of today's New York date is a latest price, one of the day before (Monday to Thursday)
            # may not yet be the settlement (common.futures_row_state, the same rule as the forward curve below).
            + common.last_value_note(commodity['ticker'], end_date, _last_px)
-           + " The volatility, percentile, pre-war multiple, VaR and the roll check all come from one download of "
-           "the series, computed together.")
+           + _cmp_value_note
+           + (" The volatility, percentile, pre-war multiple, VaR and the roll check"
+              if commodity['ticker'] in common.CURVE_ROOTS else
+              " The volatility, percentile, pre-war multiple and VaR")
+           + " all come from one download of the series, computed together.")
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -550,17 +560,19 @@ _brent_roll_days = common.brent_roll_days
 
 
 if commodity['ticker'] == "BZ=F":
-    _rolls = _brent_roll_days(df_analysis['Price'].dropna().index)
+    # Rule days corrected by the roll check of the latest 30-day window (Yahoo can switch on another day).
+    _rolls = common.brent_roll_set(df_analysis['Price'].dropna().index, core['rolls'])
     _ex_roll = _recent_ret[~_recent_ret.index.isin(_rolls)]
     if _worst_recent_day in _rolls:
-        st.caption(f"⚠️ {_worst_recent_day:%d %b %Y}, the worst day, is a Brent roll day: the ICE Brent front "
-                   "contract stops trading on the last business day of the month before, so on this day the "
-                   "continuous series switches to the next contract, and part or all of the move can be the "
-                   "price gap between the two contracts, not a real loss. Excluding roll days, the worst day "
-                   f"was {_ex_roll.min() * 100:.2f}% on {_ex_roll.idxmin():%d %b %Y}.")
+        st.caption(f"⚠️ {_worst_recent_day:%d %b %Y}, the worst day, is a Brent roll day: on this day the "
+                   "continuous series switches to the next contract (the first trading day after an ICE Brent "
+                   "contract's last trading day, or the day the roll check found the switch), and part or all of "
+                   "the move can be the price gap between the two contracts, not a real loss. Excluding roll "
+                   f"days, the worst day was {_ex_roll.min() * 100:.2f}% on {_ex_roll.idxmin():%d %b %Y}.")
     else:
         st.caption(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
-                   "day of each month except January, or the last trading day of December).")
+                   "day after an ICE Brent contract's last trading day: normally the first trading day of the "
+                   "month, the last trading day of December for the February contract).")
 if commodity['ticker'] == "TTF=F":
     _ttf_exp = common.ttf_expiry_days(df_analysis['Price'].dropna().index)
     _flag = [d for d in (_worst_recent_day, _worst_full_day) if d in _ttf_exp]

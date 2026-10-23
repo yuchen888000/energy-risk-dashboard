@@ -657,9 +657,11 @@ _ttf_fit = common.load_close("TTF=F", _fit_from.date(), end_date).dropna()
 # settles), the calendar of the contract's last trading day, so "5 business days" means 5 trading days of the gas.
 _decide = max(pd.Timestamp(np.busday_offset(end_date, 0, roll="backward", busdaycal=common.NYMEX_BDAYS)),
               ttf_last_date.normalize())
-_wait_day = pd.Timestamp(np.busday_offset(_decide.date(), _WAIT_DAYS, busdaycal=common.NYMEX_BDAYS))
+# _decide can be a NYMEX holiday with a Yahoo row (4 Jul 2025); nymex_days_after counts from it.
+_wait_day = common.nymex_days_after(_decide, _WAIT_DAYS)
 _front = common.front_month_contract("TTF=F", ttf_last_date)
 _front_exp = common.contract_expiry("TTF", _front["delivery"])
+_ice_exp = common.ice_endex_ttf_expiry(_front["delivery"])
 # The front contract stops trading before the plant could buy in a week: switch to the next contract that
 # is still trading on the wait day (contract_expiry, on the exchange holiday calendars).
 _switch = _wait_day.normalize() > _front_exp.normalize()
@@ -724,15 +726,20 @@ if _switch:
     st.warning(f"The front-month contract, TTF {_front['delivery']:%b %y}, "
                f"{'stopped' if _front_exp.normalize() < _decide else 'stops'} trading on "
                f"{_front_exp:%a %d %b %Y} (its last trading day by the exchange rule and holiday calendar), "
-               f"before {_wait_day:%a %d %b}, {_WAIT_DAYS} business days after {_decide:%a %d %b}: the plant cannot "
+               f"before {_wait_day:%a %d %b}, {_WAIT_DAYS} NYMEX business days after {_decide:%a %d %b}: the plant cannot "
                f"wait a week to buy {_front['delivery']:%B} gas on it. Once that contract has stopped trading, "
                f"{_front['delivery']:%B} gas can still be bought for shorter delivery periods, such as the TTF day, "
                "weekend and within-day spot contracts EEX lists (EEX contract specifications 0105a, section 1.2.4.1), "
                "but this page has no prices for them. This section therefore uses the next contract still trading "
-               f"then, TTF {delivery_month:%b %y} (`{contract}`): its price, delivery month, days and hours.")
+               f"then, TTF {delivery_month:%b %y} (`{contract}`): its price, delivery month, days and hours."
+               + (f" ICE Endex TTF {_front['delivery']:%b %y}, the European benchmark, trades until "
+                  f"{_ice_exp:%a %d %b %Y} (two UK business days before the delivery month); the NYMEX contract "
+                  "this page uses stops earlier because that day is a US holiday on which NYMEX does not settle."
+                  if _ice_exp.normalize() != _front_exp.normalize() else ""))
 st.write(f"The plant buys the gas for {month_label} on TTF {delivery_month:%b %y}"
          + (", the front month" if not _switch else "") + " (price from the NYMEX Dutch TTF contract)"
-         + f". If it waits {_WAIT_DAYS} business days instead of "
+         + f". If it waits {_WAIT_DAYS} business days (NYMEX business days, the days `TTF=F` settles: US exchange "
+         "holidays such as Martin Luther King Jr. Day are skipped) instead of "
          f"buying on {_decide:%a %d %b}, how much could that gas cost? This is the gas leg alone: a plant that "
          f"hedges its spread also sells its power forward at the same time, and {_corr_txt}, so the plant's real "
          "exposure is smaller.")
@@ -777,13 +784,13 @@ if wait is not None:
               help=_price_help + {"live": " This is the latest price, not the settlement.",
                                   "unsettled": f" It may not yet be the settlement: {common._UNSETTLED_WHY}.",
                                   "close": ""}[_w_state])
-    w2.metric(f"On {_wait_day:%a %d %b}, in {_WAIT_DAYS} business days: 90% range (€/MWh)",
+    w2.metric(f"On {_wait_day:%a %d %b}, in {_WAIT_DAYS} NYMEX business days: 90% range (€/MWh)",
               f"{_half(lo):.1f} to {_half(hi):.1f}",
               help="Rounded to 0.5 €/MWh: the range comes from 10,000 simulated paths with a fixed random seed "
                    "(the same prices give the same range; another seed moves the ends by a few tenths).")
     w3.metric(f"Std. dev. of the {_horizon}-day return", f"{wait['horizon_vol']:.1f}%",
               help=f"Standard deviation of the simulated log return from the last price ({price_date:%d %b}) to "
-                   f"{_wait_day:%d %b}, {_horizon} business days.")
+                   f"{_wait_day:%d %b}, {_horizon} NYMEX business days.")
 
     b1, b2, b3 = st.columns(3)
     b1.metric("The month's gas, bought at the last price", f"€{bill_now / 1e6:,.2f}m",
@@ -803,8 +810,7 @@ if wait is not None:
 
     fig_w, ax_w = plt.subplots(figsize=(14, 3.5))
     hist = (_c if _switch else ttf).tail(40)
-    days_ahead = pd.bdate_range(price_date, periods=_horizon + 1, freq="C",
-                                holidays=list(common.NYMEX_BDAYS.holidays))
+    days_ahead = common.nymex_path_days(price_date, _horizon)
     ax_w.plot(hist.index, hist.values, color="steelblue", linewidth=1.2,
               label=f"TTF {delivery_month:%b %y} ({contract})" if _switch else "TTF front month (TTF=F)")
     ax_w.fill_between(days_ahead, np.r_[price_now, wait["lo"] * scale], np.r_[price_now, wait["hi"] * scale],
@@ -891,7 +897,7 @@ if wait is not None:
     st.caption(
         "**This is the risk of waiting, not a forecast of direction.** The model has no view on whether "
         "TTF goes up or down: its mean return is set to zero, so the range is centred on the last price. "
-        f"Method: {_method} 10,000 simulated paths over {_horizon} business days"
+        f"Method: {_method} 10,000 simulated paths over {_horizon} NYMEX business days"
         + (f" (from the last price, {price_date:%a %d %b}, to {_wait_day:%a %d %b})" if _horizon != _WAIT_DAYS
            else "")
         + ", 5th to 95th percentile. The front-month contract's last trading day comes from the exchange rule "

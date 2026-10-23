@@ -109,3 +109,63 @@ def test_rule_roll_days_ttf_uk_only_holiday():
 ])
 def test_london_session_row(now, expected):
     assert common.london_session_row("2026-10-23", pd.Timestamp(now, tz="UTC")) is expected
+
+
+def test_brent_roll_days_follow_the_expiry_rule():
+    # ICE Brent Oct 26 stopped on Fri 28 Aug 2026 (Mon 31 Aug is an English bank holiday); BZ=F trades on 31 Aug,
+    # so that is the roll day, not 1 Sep (audit Risk 2026-10-23 round 5, 2-1).
+    idx = pd.DatetimeIndex(["2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02"])
+    assert list(common.brent_roll_days(idx)) == [pd.Timestamp("2026-08-31")]
+    # December: the Feb contract stops one London business day earlier, so the roll is the last trading day of
+    # December and there is none on the first trading day of January.
+    idx = pd.bdate_range("2026-12-22", "2027-01-06")
+    days = list(common.brent_roll_days(idx))
+    assert pd.Timestamp("2026-12-31") in days and pd.Timestamp("2027-01-01") not in days
+    assert pd.Timestamp("2027-01-04") not in days
+
+
+def test_brent_roll_set_uses_the_identified_switch():
+    # On 23 Oct 2026 BZ=F already followed the Jan 27 contract; the rule day of that switch (2 Nov, after the Dec 26
+    # expiry on 30 Oct) is then not a roll day, and 23 Oct is (audit Market 2026-10-23 round 5, 1-1 and 2-1).
+    idx = pd.bdate_range("2026-09-28", "2026-11-06")
+    rc = dict(rolls=[(pd.Timestamp("2026-10-23"), "BZF27.NYM", -0.025, 0.0155)], unknown=[], rule_only=[],
+              adjusted_vol=2.0)
+    days = list(common.brent_roll_set(idx, rc))
+    assert pd.Timestamp("2026-10-23") in days and pd.Timestamp("2026-11-02") not in days
+    assert pd.Timestamp("2026-10-01") in days            # the earlier rule day is kept
+    assert pd.Timestamp("2026-11-02") in list(common.brent_roll_set(idx, None))
+
+
+@pytest.mark.parametrize("day, n, expected", [
+    ("2025-07-04", 5, "2025-07-11"),   # 4 Jul 2025, a NYMEX holiday with a Yahoo row: counted from, no error
+    ("2025-07-05", 5, "2025-07-11"),   # Saturday after it
+    ("2023-11-23", 5, "2023-11-30"),   # Thanksgiving 2023, Yahoo row
+    ("2026-01-16", 5, "2026-01-26"),   # skips Martin Luther King Jr. Day
+    ("2022-05-23", 5, "2022-05-31"),   # skips Memorial Day
+])
+def test_nymex_days_after(day, n, expected):
+    assert common.nymex_days_after(day, n) == pd.Timestamp(expected)
+
+
+def test_nymex_path_days_start_on_a_holiday():
+    path = common.nymex_path_days("2025-07-04", 5)
+    assert path[0] == pd.Timestamp("2025-07-04") and path[-1] == pd.Timestamp("2025-07-11") and len(path) == 6
+
+
+def test_ice_endex_ttf_expiry_differs_from_nymex_in_june_2022():
+    assert common.ice_endex_ttf_expiry("2022-06-01") == pd.Timestamp("2022-05-30")
+    assert common.contract_expiry("TTF", "2022-06-01") == pd.Timestamp("2022-05-27")
+    assert common.ice_endex_ttf_expiry("2026-11-01") == common.contract_expiry("TTF", "2026-11-01")
+
+
+def test_last_value_note_uses_now_for_the_three_day_rule():
+    # The London-session note can be tested at a fixed past time (audit Risk round 5, 4-5).
+    note = common.last_value_note("CARB.L", "2026-03-30", "2026-03-30", now=pd.Timestamp("2026-03-30 14:59", tz="UTC"))
+    assert "may be a price during today's London session" in note
+    assert common.last_value_note("CARB.L", "2026-03-30", "2026-03-30",
+                                  now=pd.Timestamp("2026-04-10 12:00", tz="UTC")) == ""
+
+
+@pytest.mark.parametrize("root, to", [("CL", "February 2037"), ("BZ", "March 2035"), ("TTF", "December 2036")])
+def test_expiry_cal_note_names_each_products_checked_range(root, to):
+    assert f"(to {to})" in common.expiry_cal_note(root)

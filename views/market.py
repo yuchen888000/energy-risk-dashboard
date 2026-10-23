@@ -87,7 +87,7 @@ with st.sidebar.expander("Methodology: Market page"):
       95th percentile range over its last 750 values, and daily losses beyond 2x the window's
       99% VaR (Brent roll days excluded).
       Nothing after the end date is used. Each check shows on how many of the last 252 trading
-      days with a price it fired, with their dates. With fewer than 20 returns in the latest
+      days with a price it fired, and the dates those 252 days run from and to. With fewer than 20 returns in the latest
       30-day window (after a suspension) the volatility checks give no value.
     - **AI interpretation** (optional): the statistics on this page summarised in three
       sentences by Claude via the Anthropic API. It sees no fundamentals. A fixed rule removes
@@ -1148,13 +1148,14 @@ if has_corr_ref:
     corr_last = ref['corr'][ref['corr'].index >= _count_from]
 IS_BRENT = commodity['ticker'] == 'BZ=F'
 # Brent: on a roll day Yahoo's continuous BZ=F switches to the next contract, so that day's return
-# includes the price gap between two contracts. Roll days (common.brent_roll_days, the ICE expiry
-# rule) are left out of the tail check, both from the 3-year VaR99 and from the last 252 days.
+# includes the price gap between two contracts. Roll days (common.brent_roll_set: the ICE expiry rule,
+# corrected by the roll check of the latest 30-day window, which finds the day Yahoo actually switched) are left
+# out of the tail check, both from the 3-year VaR99 and from the last 252 days.
 ref_rets_tail = ref['rets']
 brent_rolls = pd.DatetimeIndex([])
 if IS_BRENT:
-    brent_rolls = common.brent_roll_days(df_analysis['Price'].dropna().index).union(
-        common.brent_roll_days(ref['rets'].index))
+    brent_rolls = common.brent_roll_set(df_analysis['Price'].dropna().index, core['rolls']).union(
+        common.brent_roll_set(ref['rets'].index, core['rolls']))
     ref_rets_tail = ref['rets'][~ref['rets'].index.isin(brent_rolls)]
 var99_3y = float(np.percentile(ref_rets_tail, 1) * 100)
 tail_thr = TAIL_MULT * abs(var99_3y)
@@ -1173,9 +1174,10 @@ if commodity['ticker'] == 'TTF=F' and len(tail_days):
     ttf_flagged = [d for d in tail_days.index if d in _exp]
 
 if IS_BRENT:
-    roll_note = (" Brent roll days (the first trading day of each month except January and the last trading "
-                 "day of December, when the ICE front contract expires and the continuous series switches "
-                 f"contract) are excluded from the daily-loss check and its {ref_short} VaR99.")
+    roll_note = (" Brent roll days are excluded from the daily-loss check and its "
+                 f"{ref_short} VaR99: the first trading day after each ICE Brent contract's last trading day "
+                 "(normally the first trading day of the month), or, within the last 30 days, the day the roll "
+                 "check found the continuous series switching contract when Yahoo switched on another day.")
 elif commodity['ticker'] == 'TTF=F':
     roll_note = (" TTF expiry days are not removed: a flagged day on or just after a front-month expiry "
                  "is marked, because part of its move may be the gap between two contracts.")
@@ -1232,7 +1234,7 @@ elif latest_vol > vol_hi:
     anomalies.append({'level': '🟡 WARNING', 'type': 'Volatility Spike',
                       'detail': (f'30-day volatility of daily returns is {common.fmt_vol(latest_vol)}, above the '
                                  f'{VOL_HI_PCT}th percentile of {ref_name} ({common.fmt_vol(vol_hi)}); it sits at '
-                                 f'the {vol_pctile:.0f}th percentile. Fired on {n_hi} {_of}.')})
+                                 f'the {vol_pctile:.0f}th percentile of that window. Fired on {n_hi} {_of}.')})
 elif latest_vol < vol_lo:
     anomalies.append({'level': '🔵 WATCH', 'type': 'Unusual Calm',
                       'detail': (f'30-day volatility of daily returns is {common.fmt_vol(latest_vol)}, below the '
@@ -1276,8 +1278,8 @@ if has_corr:
     if corr_out:
         anomalies.append({'level': '🔵 WATCH', 'type': f'Correlation Outside {corr_short.title()} Range',
                           'detail': (f'30-day correlation of daily returns with {compare_label} is {corr_now:.2f}, '
-                                     f'outside its {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range of {corr_name} '
-                                     f'({corr_lo:.2f} to {corr_hi:.2f}; median {corr_med:.2f}). Fired on {n_corr} '
+                                     f'outside its {VOL_LO_PCT}th to {VOL_HI_PCT}th percentile range of {corr_name}: '
+                                     f'{corr_lo:.2f} to {corr_hi:.2f}, median {corr_med:.2f}. Fired on {n_corr} '
                                      f'of the {len(corr_last)} trading days to {corr_last.index[-1]:%d %b %Y}.'
                                      + corr_close_note)})
 
@@ -1290,7 +1292,13 @@ _tail_rule = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x {ref_short} VaR99)
 _last_ret = float(recent_all.iloc[-1])
 _last_is_roll = bool(_is_roll[-1]) if IS_BRENT else False
 _tail_now = (_last_ret < -tail_thr) and not _last_is_roll
+# The roll check's return of the contract the series switched to, when the latest day is an identified roll.
+_last_new_ret = next((nr for t, _, _, nr in (core['rolls'] or {}).get('rolls', [])
+                      if pd.Timestamp(t) == recent_all.index[-1]), None) if IS_BRENT else None
 _tail_latest = (f"latest {_last_ret:+.2f}%"
+                + (f" (a roll day, not checked; the contract it switched to {_last_new_ret * 100:+.2f}%)"
+                   if _last_is_roll and _last_new_ret is not None else
+                   " (a roll day, not checked)" if _last_is_roll else "")
                 + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
                    else f"; worst in window {recent_rets.min():.2f}%")
                 + (" (excl. roll days)" if IS_BRENT else ""))
@@ -1453,6 +1461,11 @@ _CROSS_VERB = re.compile(
     r"|return(?:s|ing)?|jump(?:s|ing)?|spik(?:e|es|ing)|exceed(?:s|ing)?|top(?:s|ping)|surpass(?:es|ing)?"
     r"|fall(?:s|ing)?|drop(?:s|ping)?|slip(?:s|ping)?"
     r"|dip(?:s|ping)?|sink(?:s|ing)?|eas(?:e|es|ing)|retreat(?:s|ing)?|declin(?:e|es|ing))\b", re.I)
+# Verbs that name no direction ("returns to 28%", "moves to 0.40"): the direction is taken from an explicit
+# word before the number (_DOWNWARD, _UPWARD), else from the level against the current value, so a sentence
+# about moving back to a level on the other side is not read as a crossing.
+_NEUTRAL_VERB = re.compile(r"^(?:mov(?:e|es|ing)|return(?:s|ing)?)$", re.I)
+_UPWARD = re.compile(r"\b(?:above|over|beyond|higher|up)\b", re.I)
 _DOWNWARD = re.compile(
     r"\b(?:below|under|beneath|down|lower|fall(?:s|ing)?|drop(?:s|ping)?|slip(?:s|ping)?|dip(?:s|ping)?"
     r"|sink(?:s|ing)?|eas(?:e|es|ing)|retreat(?:s|ing)?|declin(?:e|es|ing))\b", re.I)
@@ -1526,6 +1539,8 @@ def drop_crossed_watch_sentences(text, levels):
                 if not nums:
                     continue
                 downward = bool(_DOWNWARD.search(window[:nums[0][0]]))
+                neutral = (bool(_NEUTRAL_VERB.match(vm.group(0))) and not downward
+                           and not _UPWARD.search(window[:nums[0][0]]))
                 # The level named is the first number, with its other scale if it follows in brackets
                 # ("28% annualised (1.74% daily)"); later numbers belong to other parts of the sentence.
                 nums = nums[:1] + [x for x in nums[1:2]
@@ -1539,6 +1554,8 @@ def drop_crossed_watch_sentences(text, levels):
                             continue
                         if not _matches(num, dec, kind, sub, thr):
                             continue
+                        if neutral:
+                            continue          # direction from level vs current: never a crossing already made
                         if (not downward and cur > thr) or (downward and cur < thr):
                             bad = True
                             break
@@ -1559,7 +1576,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
                             top_neg_str, date_str, levels_str, tail_fact_str,
                             past_breaches_str="", garch_fit_str="", prewar_ref="the pre-war level (Oct to Dec 2025)",
                             trend_label="30-day", check_window_str="the last 3 years", ref_short_str="3-year",
-                            news_later=False):
+                            news_later=False, last_value_str=""):
     """`news_later` is True when the data date is in the past: the headlines are then from a later date, so the
     prompt gives no tone, no trend average and no headlines, and forbids mentioning news. `prewar_ref` names the
     fixed reference quarter as common.vol_summary does for the AI input ('' when there is no multiple, "the Oct
@@ -1670,6 +1687,7 @@ Checks and headlines
 - The headline field is raw scraped text, truncated and unverified.
 
 MARKET DATA AS OF {date_str}
+- Last value: {last_value_str or 'a close (settlement or exchange close).'}
 - Volatility summary: {risk_level_str}
 - 30-day rolling volatility: {vol_line}
 - VaR 95%, 1-day (historical, last 250 trading days): {var_95_v:.2f}%
@@ -1701,7 +1719,7 @@ HARD RULES
 - Never attribute a claim, forecast or warning to a named bank, agency, institution or analyst.
 - Never present a headline as established fact.
 - Do not assert a causal chain the data above cannot support. If a link is speculative, mark it as speculative.
-- Your only raw input is a series of daily closing prices. You have no term structure, no futures curve, no inventories, no storage, no positioning, no flows and no fundamentals. Never write about contango, backwardation, spreads, curve shape, stockpiles, supply, demand or hedging costs, and do not discuss roll risk in general. One exception: if the "Daily-loss check and contract rolls" field states that a day was a contract roll day and was excluded, or may be partly a roll, you may state that fact as given; never use an excluded roll day as evidence of tail risk.
+- Your only raw input is a series of daily prices: closes, except that the last value may not be a close when the "Last value" line says so; then never call the latest day's move a close or a settlement. You have no term structure, no futures curve, no inventories, no storage, no positioning, no flows and no fundamentals. Never write about contango, backwardation, spreads, curve shape, stockpiles, supply, demand or hedging costs, and do not discuss roll risk in general. One exception: if the "Daily-loss check and contract rolls" field states that a day was a contract roll day and was excluded, or may be partly a roll, you may state that fact as given; never use an excluded roll day as evidence of tail risk.
 - Do not introduce seasonal, geopolitical or fundamental drivers that are not present in the inputs above.
 - Avoid: "low-risk equilibrium", "market participants should", "underlying stress", "tranquility", "it is important to note".
 - Plain desk English. No padding.
@@ -1750,8 +1768,15 @@ level_lines, level_list = level_facts(
     garch['current_cond_vol'] if garch is not None else None, garch_forecast_10d, GARCH_HI, GARCH_LO,
     corr_v=corr_now if has_corr else None, corr_lo_v=float(corr_lo) if has_corr else None,
     corr_hi_v=float(corr_hi) if has_corr else None, corr_label=compare_label)
-_worst_txt = (f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_ret:+.2f}%, "
-              + ("beyond" if _tail_now else "within") + f" the daily-loss threshold of -{tail_thr:.2f}%. "
+_worst_txt = (((f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_ret:+.2f}% on the continuous "
+               "series, but this is a Brent roll day: the series switched to the next contract, so the figure "
+               "is mostly the price gap between two contracts, not a Brent price move"
+               + (f" (the contract it switched to moved {_last_new_ret * 100:+.2f}%)"
+                  if _last_new_ret is not None else "")
+               + f"; it is not checked against the daily-loss threshold of -{tail_thr:.2f}%. ")
+              if _last_is_roll else
+              (f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_ret:+.2f}%, "
+               + ("beyond" if _tail_now else "within") + f" the daily-loss threshold of -{tail_thr:.2f}%. "))
               + (f"The last loss beyond it was {tail_days.iloc[-1]:.2f}% on {tail_days.index[-1]:%d %b %Y}, "
                  f"{(recent_all.index[-1] - tail_days.index[-1]).days} days before the data date: a past event, "
                  "not a current signal." if len(tail_days) and not _tail_now else "")
@@ -1783,6 +1808,7 @@ narrative, error = generate_risk_narrative(
     check_window_str=ref_name,
     ref_short_str=ref_short,
     news_later=_past_end,
+    last_value_str=common.last_value_note(commodity['ticker'], end_date, _asof).strip(),
 )
 
 narrative_dropped = []

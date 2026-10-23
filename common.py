@@ -840,8 +840,13 @@ def roll_sentence(ticker, rc, window_returns):
     idx = window_returns.dropna().index
     parts = []
     if rc['rolls']:
+        # A roll found on a row that is not yet a settlement (futures_row_state) is read from a price that can
+        # still change, and Yahoo can rewrite the row, so the day says so.
         days = [f"{t:%d %b %Y} ({ticker} {cr * 100:+.2f}%, the {_contract_month(m, root)} contract it switched to "
-                f"{nr * 100:+.2f}%)" for t, m, cr, nr in rc['rolls']]
+                f"{nr * 100:+.2f}%"
+                + (f"; read from the latest price of {t:%d %b}, which can still change"
+                   if futures_row_state(t) != 'close' else "") + ")"
+                for t, m, cr, nr in rc['rolls']]
         parts.append(f"Contract roll days in this 30-day window: {' and '.join(days)}. On a roll day the "
                      "series' return includes the price gap between two contracts. With the new contract's own "
                      f"return on {'that day' if len(days) == 1 else 'those days'}, the 30-day volatility is "
@@ -1131,7 +1136,10 @@ def last_value_note(ticker, end_date, last_day, now=None):
             return (f" The last value, of {pd.Timestamp(last_day):%d %b}, may not yet be the settlement: "
                     f"{_UNSETTLED_WHY}.")
         return ""
-    if (pd.Timestamp(berlin_today()) - pd.Timestamp(end_date)).days > 3:
+    _today = (berlin_today() if now is None else
+              (pd.Timestamp(now) if pd.Timestamp(now).tzinfo else pd.Timestamp(now).tz_localize("UTC"))
+              .tz_convert("Europe/Berlin").date())
+    if (pd.Timestamp(_today) - pd.Timestamp(end_date)).days > 3:
         return ""
     if ticker.endswith(".L"):
         if london_session_row(last_day, now):
@@ -1391,21 +1399,49 @@ def garch_price_range(close, horizon=5, simulations=10000, conf=0.90, drop=None)
 
 
 def brent_roll_days(index):
-    """Days on which Yahoo's continuous Brent series (BZ=F) switches contract.
-
-    ICE Brent stops trading on the last business day of the second month before delivery, so the
-    front month changes on the first trading day of each month. In December the expiry moves one
-    business day earlier (ICE's rule for the business day before New Year's Day), so the January
-    roll happens on the last trading day of December instead. The first day of the series is
-    skipped (it may be mid-month).
+    """Days on which Yahoo's continuous Brent series (BZ=F) switches contract by the ICE rule: the first day of
+    `index` after each Brent contract's last trading day (contract_expiry("BZ", ...): the last London business
+    day of the second month before delivery, one London business day earlier in December). Normally that is
+    the first trading day of a month; when the month's last weekday is an English bank holiday (31 Aug 2026)
+    the contract stops on the business day before it and BZ=F, which follows NYMEX and trades that day, switches
+    on the holiday itself; for the February contract, which stops one day earlier, it is the last trading day
+    of December, so there is no roll on the first trading day of January. The first day of the series is
+    skipped (it may be mid-month). Yahoo's actual switch day can differ (brent_roll_set).
     """
-    months = pd.Series(index.to_period('M'), index=index)
-    first = months.ne(months.shift())
-    first.iloc[0] = False
-    first &= index.month != 1                      # no roll on the first trading day of January
-    last_dec = months.ne(months.shift(-1)) & (index.month == 12)
-    last_dec.iloc[-1] = False                      # the series may end mid-December
-    return index[(first | last_dec).values]
+    if len(index) == 0:
+        return index[:0]
+    idx = pd.DatetimeIndex(index)
+    norm = idx.normalize()
+    out = []
+    for m in pd.period_range((idx.min() - pd.DateOffset(months=1)).to_period('M') + 2,
+                             idx.max().to_period('M') + 3, freq='M'):
+        exp = contract_expiry("BZ", m.to_timestamp()).normalize()
+        pos = norm.searchsorted(exp, side='right')
+        if 0 < pos < len(idx):
+            out.append(pos)
+    return idx[sorted(set(out))]
+
+
+def brent_roll_set(index, rc=None):
+    """Brent roll days for `index`: the rule days (brent_roll_days) corrected by the roll check (`rc`, a
+    window_rolls result for the latest 30-day window). A day the roll check identifies as a roll is a roll day,
+    and the rule day of the same switch (the first day after the expiry of the contract before the new one) is
+    dropped when it is a different day, because the series had already switched: on 23 Oct 2026 BZ=F followed
+    the January 2027 contract a week before the December contract's last trading day (30 Oct), so 23 Oct is the
+    roll day and 2 Nov is not. Outside the 30-day window only the rule days are known."""
+    idx = pd.DatetimeIndex(index)
+    days = set(brent_roll_days(idx))
+    for t, m, _, _ in (rc.get('rolls') or [] if rc else []):
+        t = pd.Timestamp(t)
+        if t not in idx:
+            continue
+        prev = contract_delivery(m, "BZ") - pd.DateOffset(months=1)
+        exp = contract_expiry("BZ", prev).normalize()
+        pos = idx.normalize().searchsorted(exp, side='right')
+        if pos < len(idx) and idx[pos] != t:
+            days.discard(idx[pos])
+        days.add(t)
+    return pd.DatetimeIndex(sorted(days))
 
 
 def ttf_expiry_days(index):
@@ -1567,19 +1603,19 @@ EXPIRY_RULES = {
 # and the Friday before a Saturday 4 July; CME's Juneteenth 2026 settlement notice says no settlement prices for
 # NYMEX that day, cmegroup.com holiday calendar, read 2026-10-23), and the days XCME lists on which NYMEX energy
 # traded and settled are removed (_NYMEX_OPEN). Checked on 2026-10-23 against Yahoo Finance's CL=F, BZ=F and
-# TTF=F rows: from 2007 every listed holiday has no row, apart from 4 July 2025, Thanksgiving 2023 and Labor Day
-# 2006, and every other weekday has a row, apart from gaps in Yahoo's data; before 2007 the NYMEX floor also
+# TTF=F rows: from 2007 every listed holiday has no row, apart from two holidays with a row (Thanksgiving 2023
+# and 4 July 2025; also Labor Day 2006, before 2007), and every other weekday has a row, apart from gaps in Yahoo's data; before 2007 the NYMEX floor also
 # closed on some days after Thanksgiving and before or after Christmas, which are not modelled. Against CME's
 # published last trading days for every contract listed on 2026-10-23 (CME product calendars 425 WTI, 424
-# Brent Last Day Financial and 8378 Dutch TTF: 124, 100 and 122 contracts from Nov 2026 to Feb 2037): all
-# equal. Past contracts: WTI June 2020 stopped trading on Tue 19 May 2020 (The Energy Year, 19 May 2020), as the
+# Brent Last Day Financial and 8378 Dutch TTF: 124 contracts to Feb 2037, 100 to Mar 2035 and 122 to Dec 2036):
+# all equal. Past contracts: WTI June 2020 stopped trading on Tue 19 May 2020 (The Energy Year, 19 May 2020), as the
 # rule gives with Memorial Day (25 May 2020) not a business day.
 _CAL_YEARS = range(2000, 2041)
 _NYSE_NO_SETTLEMENT = {"Martin Luther King Jr. Day", "Washington's Birthday", "Memorial Day",
                        "Juneteenth National Independence Day", "Juneteenth National Independence Day (observed)",
                        "Labor Day", "Independence Day (observed)"}
-# Days of mourning in XCME on which NYMEX energy traded and settled: 14 Sep 2001 (NYMEX reopened after 11
-# September; Yahoo CL=F has a price), 2 Jan 2007 (Ford; CL=F has a price) and 9 Jan 2025 (Carter; CME notice of
+# Days of mourning or closure in XCME on which NYMEX energy traded and settled: 14 Sep 2001 (NYMEX reopened after
+# 11 September in a shortened session; Yahoo CL=F has a price), 2 Jan 2007 (Ford; CL=F has a price) and 9 Jan 2025 (Carter; CME notice of
 # 30 Dec 2024: normal trading hours for energy; CL=F, BZ=F and TTF=F have prices).
 _NYMEX_OPEN = {dt.date(2001, 9, 14), dt.date(2007, 1, 2), dt.date(2025, 1, 9)}
 _LONDON_HOLIDAYS = set(holidays.UK(subdiv="ENG", years=_CAL_YEARS).keys())
@@ -1587,6 +1623,14 @@ _NYMEX_HOLIDAYS = ((set(holidays.financial_holidays("XCME", years=_CAL_YEARS).ke
                     | {d for d, name in holidays.financial_holidays("NYSE", years=_CAL_YEARS).items()
                        if name in _NYSE_NO_SETTLEMENT})
                    - _NYMEX_OPEN)
+# Guard: the NYSE holidays are picked by name, so a `holidays` release that renamed them would silently drop
+# them; these known no-settlement days must be in the set (requirements.txt also pins the version).
+for _d in (dt.date(2026, 1, 19), dt.date(2026, 2, 16), dt.date(2026, 5, 25), dt.date(2026, 6, 19),
+           dt.date(2026, 7, 3), dt.date(2026, 9, 7)):
+    if _d not in _NYMEX_HOLIDAYS:
+        _NYMEX_HOLIDAYS = _NYMEX_HOLIDAYS | {d for d in holidays.financial_holidays("NYSE", years=_CAL_YEARS)
+                                             if d.weekday() < 5} - _NYMEX_OPEN
+        break
 LONDON_BDAYS = np.busdaycalendar(holidays=sorted(_LONDON_HOLIDAYS))
 NYMEX_BDAYS = np.busdaycalendar(holidays=sorted(_NYMEX_HOLIDAYS))
 _LONDON_NYMEX_BDAYS = np.busdaycalendar(holidays=sorted(_LONDON_HOLIDAYS | _NYMEX_HOLIDAYS))
@@ -1600,11 +1644,20 @@ _CAL_WORDS = {"CL": "the US holidays on which CME publishes no settlement prices
               "TTF": "England's bank holidays and the US holidays on which CME publishes no settlement prices"}
 
 
+# The last contract month CME listed on 23 Oct 2026 in each product calendar the rule was checked against
+# (425 WTI CLX26 to CLG37, 124 contracts; 424 Brent Last Day Financial BZZ26 to BZH35, 100; 8378 Dutch TTF Nov 2026
+# to Dec 2036, 122).
+_CME_CHECKED_TO = {"CL": "February 2037", "BZ": "March 2035", "TTF": "December 2036"}
+
+
 def expiry_cal_note(root):
     """'exchange holidays from ..., checked against ...' for `root`: what the expiry date's calendar is and how
     far it was checked against the exchange's published dates."""
-    return (f"exchange holidays from {_CAL_WORDS.get(root, 'weekdays only')}; the rule gives CME's published "
-            "last trading day for every contract listed in October 2026 (to February 2037)")
+    note = f"exchange holidays from {_CAL_WORDS.get(root, 'weekdays only')}"
+    if root in _CME_CHECKED_TO:
+        note += ("; the rule gives CME's published last trading day for every contract CME listed in October 2026 "
+                 f"(to {_CME_CHECKED_TO[root]})")
+    return note
 
 
 def contract_expiry(root, delivery):
@@ -1639,6 +1692,27 @@ def contract_expiry(root, delivery):
         last = np.busday_offset((m2 + pd.offsets.MonthEnd(0)).date(), 0, roll='backward', busdaycal=LONDON_BDAYS)
         return pd.Timestamp(np.busday_offset(last, -1, busdaycal=LONDON_BDAYS) if m2.month == 12 else last)
     return None
+
+
+def nymex_days_after(day, n):
+    """The n-th NYMEX business day after `day` (NYMEX_BDAYS). `day` can itself be a NYMEX holiday on which Yahoo
+    has a TTF=F row (Thanksgiving 2023, 4 July 2025): it is counted from, not refused, so the 5th day after
+    Fri 4 Jul 2025 is Fri 11 Jul."""
+    return pd.Timestamp(np.busday_offset(pd.Timestamp(day).date(), n, roll='backward', busdaycal=NYMEX_BDAYS))
+
+
+def nymex_path_days(start, n):
+    """`start` and the n NYMEX business days after it: the dates of a simulated price path (nymex_days_after)."""
+    return pd.DatetimeIndex([pd.Timestamp(start).normalize()] + [nymex_days_after(start, k) for k in range(1, n + 1)])
+
+
+def ice_endex_ttf_expiry(delivery):
+    """Last trading day of the ICE Endex Dutch TTF monthly contract: two UK business days before the first
+    calendar day of the delivery month (ICE Endex TTF contract specifications, ProductSpec_27996665, page 2),
+    on England's bank holidays. contract_expiry("TTF", ...) moves the NYMEX contract earlier when that day is not
+    a NYMEX business day (Jun 2022: ICE Mon 30 May, NYMEX Fri 27 May, Memorial Day)."""
+    first = pd.Timestamp(delivery).replace(day=1).date()
+    return pd.Timestamp(np.busday_offset(first, -2, roll='forward', busdaycal=LONDON_BDAYS))
 
 
 def exchange_busday_count(root, start, end):
