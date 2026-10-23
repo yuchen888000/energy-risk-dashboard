@@ -26,10 +26,13 @@ from scipy.stats import chi2
 CARBON_CANDIDATES = [
     {
         "ticker": "CARB.L",
-        "label": "EU Carbon ETC (CARB.L, USD)",
-        "short": "EU Carbon",
-        "name": "EU Carbon (EUA ETC, USD)",
-        "unit": "ETC price, USD (tracks EUA futures)",
+        # One name everywhere (label, short and name are kept as keys for the code, with the same value);
+        # the full description is given once per page through `first`.
+        "label": "EU Carbon ETC",
+        "short": "EU Carbon ETC",
+        "name": "EU Carbon ETC",
+        "first": "EU Carbon ETC (CARB.L: an exchange-traded commodity, priced in USD, that tracks EUA futures)",
+        "unit": "USD per share",
         "pure_eu": True,
         "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
                  "EUA futures, but the quote is an ETC share price in USD, not €/tCO2, so its "
@@ -37,10 +40,11 @@ CARBON_CANDIDATES = [
     },
     {
         "ticker": "KRBN",
-        "label": "Global Carbon (KRBN, EUA-weighted)",
-        "short": "Carbon",
-        "name": "Carbon Allowances (Global)",
-        "unit": "ETF price, USD",
+        "label": "Global Carbon ETF",
+        "short": "Global Carbon ETF",
+        "name": "Global Carbon ETF",
+        "first": "Global Carbon ETF (KRBN, USD, EUA-weighted)",
+        "unit": "USD per share",
         "pure_eu": False,
         "note": ("KraneShares Global Carbon Strategy ETF. EUA carries the dominant index weight, "
                  "but California (CCA), RGGI, UK (UKA) and Washington (WCA) allowances are also "
@@ -48,10 +52,11 @@ CARBON_CANDIDATES = [
     },
     {
         "ticker": "ICLN",
-        "label": "Clean Energy Proxy (ICLN)",
-        "short": "Clean Energy",
-        "name": "Clean Energy Proxy",
-        "unit": "ETF price, USD",
+        "label": "Clean Energy ETF",
+        "short": "Clean Energy ETF",
+        "name": "Clean Energy ETF",
+        "first": "Clean Energy ETF (ICLN, a clean-energy equity fund in USD, not a carbon price)",
+        "unit": "USD per share",
         "pure_eu": False,
         "note": ("Clean-energy equity ETF. This is NOT a carbon allowance price; it is a "
                  "last-resort proxy used only when no carbon instrument resolves."),
@@ -83,7 +88,8 @@ OIL_BARREL_TERMS = ['a barrel', 'per barrel', 'barrels a day', 'barrels per day'
 def build_commodities(carbon):
     """Commodity definitions. The carbon entry follows whichever benchmark resolved."""
     return {
-        "TTF Natural Gas": {
+        "TTF": {
+            "first": "TTF (front-month future, €/MWh)",
             "ticker": "TTF=F",
             "unit": "€/MWh",
             "color": "steelblue",
@@ -91,7 +97,8 @@ def build_commodities(carbon):
             "rss_query": "natural+gas+Europe+price",
             "news_term": "gas",   # one word for country and 30-day news queries
         },
-        "WTI Crude Oil": {
+        "WTI": {
+            "first": "WTI (NYMEX front-month future, $/barrel)",
             "ticker": "CL=F",
             "unit": "$/barrel",
             "color": "saddlebrown",
@@ -101,7 +108,8 @@ def build_commodities(carbon):
             "rss_query": "crude+oil+Europe+price",
             "news_term": "oil",   # one word for country and 30-day news queries
         },
-        "Brent Crude Oil": {
+        "Brent": {
+            "first": "Brent (front-month future, $/barrel)",
             "ticker": "BZ=F",
             "unit": "$/barrel",
             "color": "darkred",
@@ -110,6 +118,7 @@ def build_commodities(carbon):
             "news_term": "oil",   # one word for country and 30-day news queries
         },
         carbon["name"]: {
+            "first": carbon.get("first", carbon["name"]),
             "ticker": carbon["ticker"],
             "unit": carbon["unit"],
             "color": "seagreen",
@@ -149,7 +158,7 @@ def context():
         commodity=commodity,
         is_carbon=is_carbon,
         compare_ticker="TTF=F" if is_carbon else carbon["ticker"],
-        compare_label="TTF Natural Gas (€/MWh)" if is_carbon else carbon["label"],
+        compare_label="TTF" if is_carbon else carbon["label"],
         start_date=st.session_state.get("start_date", DEFAULT_START),
         end_date=st.session_state.get("end_date", berlin_today()),
     )
@@ -847,7 +856,7 @@ def roll_sentence(ticker, rc, window_returns):
                 + (f"; read from the latest price of {t:%d %b}, which can still change"
                    if futures_row_state(t) != 'close' else "") + ")"
                 for t, m, cr, nr in rc['rolls']]
-        parts.append(f"Contract roll days in this 30-day window: {' and '.join(days)}. On a roll day the "
+        parts.append(f"Roll days in this 30-day window: {' and '.join(days)}. On a roll day the "
                      "series' return includes the price gap between two contracts. With the new contract's own "
                      f"return on {'that day' if len(days) == 1 else 'those days'}, the 30-day volatility is "
                      f"{rc['adjusted_vol'] * ANNUAL:.0f}% annualised ({rc['adjusted_vol']:.2f}% daily).")
@@ -868,7 +877,7 @@ def roll_sentence(ticker, rc, window_returns):
         if cand:
             parts.append(rule_roll_sentence(cand))
     if rc['rolls']:
-        parts.append("The heading, the percentile and the pre-war multiple use the unadjusted figure, because "
+        parts.append("The heading, the percentile and the multiple of the Oct to Dec 2025 level use the unadjusted figure, because "
                      "the history they are compared with contains roll days too.")
     return " ".join(parts)
 
@@ -886,6 +895,13 @@ def rule_roll_sentence(cand):
             "on Yahoo Finance, so its close cannot be compared).")
 
 
+def display_name(ticker):
+    """The page name of a series (names table, 2026-10-23): codes such as CARB.L or TTF=F stay out of the text."""
+    names = {"TTF=F": "TTF", "CL=F": "WTI", "BZ=F": "Brent"}
+    names.update({c["ticker"]: c["name"] for c in CARBON_CANDIDATES})
+    return names.get(ticker, ticker)
+
+
 def _gap_sentence(what, counted, g, as_of):
     """'No 30-day <what> on <day>: ...' from a vol_gap or corr_gap of compute_core (count, window, stale runs)."""
     as_of = pd.Timestamp(as_of)
@@ -893,9 +909,9 @@ def _gap_sentence(what, counted, g, as_of):
     if g['stale']:
         t, a, b = g['stale'][-1]
         if g.get('ongoing'):
-            return (f"No 30-day {what} on {as_of:%d %b %Y}: the {t} prices from {a:%d %b %Y} are stale "
+            return (f"No 30-day {what} on {as_of:%d %b %Y}: the {display_name(t)} prices from {a:%d %b %Y} are stale "
                     f"({count}).")
-        return (f"No 30-day {what} on {as_of:%d %b %Y}: not enough prices since the stale {t} prices of "
+        return (f"No 30-day {what} on {as_of:%d %b %Y}: not enough prices since the stale {display_name(t)} prices of "
                 f"{a:%d %b %Y} to {b:%d %b %Y} ended ({count}).")
     return f"No 30-day {what} on {as_of:%d %b %Y}: not enough prices ({count})."
 
@@ -956,9 +972,11 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
         return out
     before_strikes = as_of < _STRIKES
     r = ctx['prewar_ratio']
-    level, level_ai = "its pre-war level", ("its Oct to Dec 2025 level" if before_strikes else "its pre-war level")
+    # One name for the fixed reference on the page and in the AI input, whatever the end date.
+    level = level_ai = "its Oct to Dec 2025 level"
     if r is None:
-        compare, compare_ai = "no pre-war reference", (None if before_strikes else "no pre-war reference")
+        compare = "no comparison with the Oct to Dec 2025 level"
+        compare_ai = None if before_strikes else compare
     elif r >= 1.1:
         compare, compare_ai = f"{r:.2f}x {level}", f"{r:.2f}x {level_ai}"
     elif r >= 0.9:
@@ -969,20 +987,22 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     pct = f"highest {span}" if ctx['top_all'] else f"{_ordinal(ctx['p_all'])} percentile {span}"
     # A roll day in the 30-day window lifts or lowers the large figures; say so in the heading itself.
     _n_rolls = len(rc['rolls']) if with_roll and rc is not None and rc['rolls'] else 0
-    roll_flag = ("" if not _n_rolls else " · includes a contract roll day (see below)" if _n_rolls == 1
-                 else f" · includes {_n_rolls} contract roll days (see below)")
+    roll_flag = ("" if not _n_rolls else " · includes a roll day (see below)" if _n_rolls == 1
+                 else f" · includes {_n_rolls} roll days (see below)")
     out['headline2'] = f"{compare} · {pct}{roll_flag}"
     headline2_ai = (f"{compare_ai} · " if compare_ai else "") + pct + roll_flag
     detail, detail_ai = "", ""
     if ctx['prewar_median'] is not None:
         _lvl = f"{ctx['prewar_median'] * ANNUAL:.0f}% annualised ({ctx['prewar_median']:.2f}% daily)"
-        detail += (f"Pre-war level: {_lvl}, the median of Oct to Dec 2025, the last full quarter before the strikes on "
-                   "Iran on 28 Feb 2026. ")
-        detail_ai += (f"Oct to Dec 2025 level: {_lvl}, the median of that quarter. " if before_strikes else
-                      detail)
+        _wstart = window_returns.dropna().index.min() if window_returns is not None else None
+        detail += (f"Oct to Dec 2025 level: {_lvl}, the median 30-day volatility of that quarter"
+                   + (", the last full quarter before the strikes on Iran on 28 Feb 2026" if not before_strikes else
+                      " (the latest 30-day window overlaps it)" if _wstart is not None
+                      and _wstart <= pd.Timestamp("2025-12-31") else "")
+                   + ". ")
+        detail_ai += detail
     elif ctx['prewar_incomplete']:
-        detail += ("No pre-war multiple: the reference quarter (Oct to Dec 2025, the last full quarter before the "
-                   f"strikes on Iran on 28 Feb 2026) is not complete by {as_of:%d %b %Y}. ")
+        detail += (f"No comparison with the Oct to Dec 2025 level: that quarter is not complete by {as_of:%d %b %Y}. ")
     # Name only the episodes that lie inside the history up to the end date (the war began with the strikes of
     # 28 Feb 2026, _WAR_START is the first day of the month after).
     # For oil the largest 30-day volatility in the history is the 2020 crash (Brent 141% annualised on
@@ -1011,8 +1031,7 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     out['detail'] = detail + ranks
     out['ai'] = (f"{out['headline']}; {headline2_ai.replace(' (see below)', '')}. {detail_ai + ranks}"
                  + (f" {out['roll']}" if out['roll'] else ""))
-    out['prewar_ai'] = ("" if r is None else
-                        "the Oct to Dec 2025 level" if before_strikes else "the pre-war level (Oct to Dec 2025)")
+    out['prewar_ai'] = "" if r is None else "the Oct to Dec 2025 level"
     return out
 
 
@@ -1169,7 +1188,7 @@ def london_session_row(day, now=None):
 # ─── Cross-commodity returns (correlation matrix, portfolio VaR, positions) ───
 def panel_tickers(carbon_short, carbon_ticker):
     """Column name -> Yahoo ticker of returns_panel, so a page can go back from a position to its prices."""
-    return {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", carbon_short: carbon_ticker}
+    return {"TTF": "TTF=F", "WTI": "CL=F", "Brent": "BZ=F", carbon_short: carbon_ticker}
 
 
 @st.cache_data(ttl=3600, show_spinner="Computing cross-commodity returns...")

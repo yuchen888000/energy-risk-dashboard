@@ -89,17 +89,17 @@ def test_gap_sentence():
         n=13, need=20, days=30, ongoing=False,
         stale=[("CARB.L", pd.Timestamp("2020-06-11"), pd.Timestamp("2021-08-31"))]))
     assert common.corr_gap_sentence(core) == (
-        "No 30-day correlation on 20 Sep 2021: not enough prices since the stale CARB.L prices of 11 Jun 2020 to "
+        "No 30-day correlation on 20 Sep 2021: not enough prices since the stale EU Carbon ETC prices of 11 Jun 2020 to "
         "31 Aug 2021 ended (13 of the 20 days with both returns needed in the last 30 trading days).")
     core['corr_gap'].update(ongoing=True, n=0)
     assert common.corr_gap_sentence(core) == (
-        "No 30-day correlation on 20 Sep 2021: the CARB.L prices from 11 Jun 2020 are stale (0 of the 20 days "
+        "No 30-day correlation on 20 Sep 2021: the EU Carbon ETC prices from 11 Jun 2020 are stale (0 of the 20 days "
         "with both returns needed in the last 30 trading days).")
     assert common.corr_gap_sentence(dict(vol_asof=as_of, corr_gap=None)) == ""
     # The volatility sentence keeps its words.
     vcore = dict(vol_asof=as_of, vol_gap=dict(n=13, need=20, days=30, stale=core['corr_gap']['stale']))
     assert common.vol_gap_sentence(vcore) == (
-        "No 30-day volatility on 20 Sep 2021: not enough prices since the stale CARB.L prices of 11 Jun 2020 to "
+        "No 30-day volatility on 20 Sep 2021: not enough prices since the stale EU Carbon ETC prices of 11 Jun 2020 to "
         "31 Aug 2021 ended (13 of the 20 returns needed in the last 30 trading days).")
 
 

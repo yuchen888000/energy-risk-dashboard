@@ -209,9 +209,9 @@ def available_years(df, mode):
 
 def dependency_key(commodity_name):
     """Country-section mode for a commodity: 'gas', 'oil' or 'carbon'."""
-    if commodity_name == 'TTF Natural Gas':
+    if commodity_name == 'TTF':
         return 'gas'
-    if commodity_name in ('WTI Crude Oil', 'Brent Crude Oil'):
+    if commodity_name in ('WTI', 'Brent'):
         return 'oil'
     return 'carbon'
 

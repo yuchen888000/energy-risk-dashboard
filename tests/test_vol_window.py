@@ -68,13 +68,13 @@ def _core(close, latest, ticker="CARB.L"):
 def test_no_latest_figure_says_why():
     close = _series(n_after=13)
     core = _core(close, None)
-    vs = common.vol_summary(core, name="EU Carbon", with_roll=True, past_end=True)
-    assert vs['headline'] == "EU Carbon 30-day volatility: not available"
+    vs = common.vol_summary(core, name="EU Carbon ETC", with_roll=True, past_end=True)
+    assert vs['headline'] == "EU Carbon ETC 30-day volatility: not available"
     assert vs['tile'] == "n/a"
     stale_first = close.index[300]          # first repeated day (the first day of the run is a real price)
     stale_last = close.index[300 + 60 - 1]
     assert vs['headline2'] == (
-        f"No 30-day volatility on {close.index[-1]:%d %b %Y}: not enough prices since the stale CARB.L prices of "
+        f"No 30-day volatility on {close.index[-1]:%d %b %Y}: not enough prices since the stale EU Carbon ETC prices of "
         f"{stale_first:%d %b %Y} to {stale_last:%d %b %Y} ended (12 of the 20 returns needed in the last 30 "
         "trading days).")
     assert "%" not in vs['headline'] + vs['headline2'] + vs['ai']
@@ -101,8 +101,10 @@ def test_ai_input_names_no_later_event(as_of, ratio, complete):
         assert "Oct to Dec 2025 level" in vs['ai'] and vs['prewar_ai'] == "the Oct to Dec 2025 level"
     else:
         assert "Oct to Dec 2025" not in vs['ai'] and vs['prewar_ai'] == ""
-    # the page keeps its own wording
-    assert ("pre-war" in vs['headline2']) or ("strikes on Iran" in vs['detail'])
+    # the page uses the same name for the reference (names table, 2026-10-23) and, before the strikes,
+    # names no later event either
+    for word in ("Iran", "strikes", "pre-war", "28 Feb 2026"):
+        assert not re.search(rf"\b{re.escape(word)}\b", vs['headline2'] + " " + vs['detail']), word
 
 
 def test_ai_input_after_the_strikes_is_the_page_text():
@@ -111,7 +113,8 @@ def test_ai_input_after_the_strikes_is_the_page_text():
     core.update(vol_asof=pd.Timestamp("2026-10-22"), vol_ctx=_ctx("2026-10-22", 1.85, True))
     vs = common.vol_summary(core, name="TTF", past_end=False)
     assert vs['ai'] == f"{vs['headline']}; {vs['headline2']}. {vs['detail']}"
-    assert vs['prewar_ai'] == "the pre-war level (Oct to Dec 2025)"
+    assert vs['prewar_ai'] == "the Oct to Dec 2025 level"
+    assert "pre-war" not in vs['headline2'] + vs['detail']
 
 
 def test_check_window_short_history_and_days_without_volatility():

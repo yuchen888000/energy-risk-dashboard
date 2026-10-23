@@ -23,25 +23,25 @@ exec(_block("# ─── Headline relevance ───", "# With an end date in t
 sys.path.insert(0, str(ROOT))
 import common  # noqa: E402  (no download at import)
 
-_COMS = common.build_commodities({"name": "EU Carbon (EUA ETC, USD)", "ticker": "CARB.L", "unit": "", "label": ""})
+_COMS = common.build_commodities({"name": "EU Carbon ETC", "ticker": "CARB.L", "unit": "", "label": ""})
 _KW = {k: _filt["_word_pattern"](v["keywords"]) for k, v in _COMS.items()}
 
 FILTER_CASES = [
-    ("WTI Crude Oil", "Tank barrel production returns to UK after 20 years", False, False),
-    ("Brent Crude Oil", "Tank barrel production returns to UK after 20 years", False, False),
-    ("Brent Crude Oil", "Brent rises above $95 a barrel as Hormuz traffic slows", False, True),
-    ("WTI Crude Oil", "Prices top $100 per barrel for first time since March", False, True),
-    ("TTF Natural Gas", "3 European Gas Stocks Investors Should Watch As Energy Costs Stay High", True, False),
-    ("TTF Natural Gas", "European gas prices rise as Norwegian outage cuts supply", True, True),
-    ("WTI Crude Oil", "EIA reports surprise draw in US crude inventories at Cushing", False, True),
-    ("WTI Crude Oil", "US gas prices at the pump fall, AAA says", False, False),
-    ("Brent Crude Oil", "EIA reports surprise draw in US crude inventories", False, False),
-    ("Brent Crude Oil", "Shell shares jump as oil majors rally", False, False),
+    ("WTI", "Tank barrel production returns to UK after 20 years", False, False),
+    ("Brent", "Tank barrel production returns to UK after 20 years", False, False),
+    ("Brent", "Brent rises above $95 a barrel as Hormuz traffic slows", False, True),
+    ("WTI", "Prices top $100 per barrel for first time since March", False, True),
+    ("TTF", "3 European Gas Stocks Investors Should Watch As Energy Costs Stay High", True, False),
+    ("TTF", "European gas prices rise as Norwegian outage cuts supply", True, True),
+    ("WTI", "EIA reports surprise draw in US crude inventories at Cushing", False, True),
+    ("WTI", "US gas prices at the pump fall, AAA says", False, False),
+    ("Brent", "EIA reports surprise draw in US crude inventories", False, False),
+    ("Brent", "Shell shares jump as oil majors rally", False, False),
     # "gas stocks" are inventories here, not shares
-    ("TTF Natural Gas", "Top 3 reasons European gas stocks are falling faster than expected", True, True),
-    ("TTF Natural Gas", "Germany's 5 largest gas stocks sites near 80% full", True, True),
-    ("TTF Natural Gas", "Top 5 gas stocks to buy as Europe heads into winter", True, False),
-    ("TTF Natural Gas", "5 dividend stocks for a European gas winter", True, False),
+    ("TTF", "Top 3 reasons European gas stocks are falling faster than expected", True, True),
+    ("TTF", "Germany's 5 largest gas stocks sites near 80% full", True, True),
+    ("TTF", "Top 5 gas stocks to buy as Europe heads into winter", True, False),
+    ("TTF", "5 dividend stocks for a European gas winter", True, False),
 ]
 
 
@@ -71,9 +71,9 @@ def test_stock_tip(headline, want):
 
 
 @pytest.mark.parametrize("name,headline,want", [
-    ("TTF Natural Gas", "Top 5 Gas Stocks for 2026", False),
-    ("Brent Crude Oil", "Top 10 oil stocks for dividends", False),
-    ("WTI Crude Oil", "Top 10 oil stocks for dividends", False),
+    ("TTF", "Top 5 Gas Stocks for 2026", False),
+    ("Brent", "Top 10 oil stocks for dividends", False),
+    ("WTI", "Top 10 oil stocks for dividends", False),
 ])
 def test_stock_picks_dropped(name, headline, want):
     keep_us = _COMS[name]["ticker"] == "CL=F"

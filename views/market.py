@@ -81,15 +81,15 @@ with st.sidebar.expander("Methodology: Market page"):
     - **Statistical checks**: volatility above the 95th or below the 5th percentile of the
       last 750 trading days up to the end date (3 years; longer where stale prices of a
       suspension are excluded, shorter where the data start later, and the page then gives
-      the dates), GARCH 10-day forecast 30%
+      the dates), GARCH forecast for day 10 30%
       above or below the average 30-day volatility of that window (the GARCH model for this
       check is fitted on the returns of that window), 30-day correlation outside its 5th to
       95th percentile range over its last 750 values, and daily losses beyond 2x the window's
-      99% VaR (Brent roll days excluded).
+      VaR 99% (Brent roll days excluded).
       Nothing after the end date is used. Each check shows on how many of the last 252 trading
       days with a price it fired, and the dates those 252 days run from and to. With fewer than 20 returns in the latest
       30-day window (after a suspension) the volatility checks give no value.
-    - **AI interpretation** (optional): the statistics on this page summarised in three
+    - **AI summary** (optional): the statistics on this page summarised in three
       sentences by Claude via the Anthropic API. It sees no fundamentals. A fixed rule removes
       a sentence that asks the reader to watch whether a value moves past a level it is
       already past, when the level is written as a number as on this page (annualised or
@@ -503,7 +503,7 @@ else:
         selected_year = country_years[0]
     st.caption(f"Years {country_years[0]} to {country_years[-1]}: every year from {country_years[0]} for which "
                "Eurostat publishes the EU-27 value of this measure. Last Eurostat updates: "
-               + ", ".join(f"{k} {v}" for k, v in country_updated.items() if v) + ". (p): Eurostat flags the "
+               + ", ".join(f"{k} {pd.Timestamp(v):%d %b %Y}" for k, v in country_updated.items() if v) + ". (p): Eurostat flags the "
                "value as provisional; a measure computed from a provisional input is marked too, and a country "
                "marked (p) has a provisional ranking measure.")
     if _past_end:
@@ -769,7 +769,7 @@ else:
 
 
 # ─── Section 2: Headline tone ───
-st.subheader("Headline Tone")
+st.subheader("Headline Tone, Last 7 Days")
 st.write(f"How positive or negative the wording of recent {selected_commodity} headlines is.")
 news_date_note()
 
@@ -877,7 +877,7 @@ else:
         for _, r in rows.iterrows():
             head = f"[{md_text(r['Headline'])}]({r['Link']})" if r['Link'] else md_text(r['Headline'])
             st.markdown(f"**[{r['Score']:+.3f}]** {head} · *{md_text(r['Publisher'])}, "
-                        f"{r['Published (UTC)'][:10]}*")
+                        f"{pd.Timestamp(r['Published (UTC)'][:10]):%d %b %Y}*")
     if not top_pos.empty:
         st.write("**Most positive wording:**")
         _show(top_pos)
@@ -1009,7 +1009,7 @@ if trend_hl is not None and trend_hl['Date'].nunique() > 3:
                "Scored with FinVADER only; the current reading above may come from FinBERT, which uses a "
                "different scale, so the two are not compared.")
 else:
-    st.subheader("Headline Tone, Recent Days")
+    st.subheader("Headline Tone, Last 30 Days")
     news_date_note()
     st.info("Not enough headlines from the last 30 days to draw a trend.")
 
@@ -1032,12 +1032,12 @@ _count_span = f"the {len(_count_days)} trading days from {_count_from:%d %b %Y} 
 # The end date falls inside a stale run (CARB.L to 30 Jun 2021): the checks stop at the last price before it.
 _stale_after = [(a, b) for a, b in common.stale_periods(commodity['ticker'], start_date, end_date)
                 if pd.Timestamp(a) > _asof]
-_stale_stop = (f" {commodity['ticker']} prices from {_stale_after[0][0]:%d %b %Y} are excluded as stale, so the checks "
+_stale_stop = (f" {selected_commodity} prices from {_stale_after[0][0]:%d %b %Y} are excluded as stale, so the checks "
                f"stop at {_asof:%d %b %Y}." if _stale_after else "")
 st.subheader("Statistical Checks")
 st.write(f"Is anything statistically unusual on {_asof:%d %b %Y}, the last trading day with a price in the selected "
          f"range, compared with this commodity's own {ref3y_span} up to that day? Each check shows on how many of "
-         f"{_count_span} it fired, so you can judge how rare a flag is.{_stale_stop}")
+         f"{_count_span} it fired, so you can judge how rare it is for a check to fire.{_stale_stop}")
 
 # The same volatility statement as the Risk page (common.vol_summary): references that do not roll with the
 # market, next to the 3-year checks below.
@@ -1175,15 +1175,15 @@ if commodity['ticker'] == 'TTF=F' and len(tail_days):
 
 if IS_BRENT:
     roll_note = (" Brent roll days are excluded from the daily-loss check and its "
-                 f"{ref_short} VaR99: the first trading day after each ICE Brent contract's last trading day "
+                 f"{ref_short} VaR 99%: the first trading day after each ICE Brent contract's last trading day "
                  "(normally the first trading day of the month), or, within the last 30 days, the day the roll "
                  "check found the continuous series switching contract when Yahoo switched on another day. Further back "
                  "only the rule days are used, so an earlier switch on another day is treated as an ordinary day.")
 elif commodity['ticker'] == 'TTF=F':
-    roll_note = (" TTF expiry days are not removed: a flagged day on or just after a front-month expiry "
+    roll_note = (" TTF expiry days are not removed: a large daily loss on or just after a front-month expiry "
                  "is marked, because part of its move may be the gap between two contracts.")
 elif commodity['ticker'] in ROLLING_FUTURES:
-    roll_note = (" On a continuous front-month future a contract roll day can produce {move} without a "
+    roll_note = (" On a continuous front-month future a roll day can produce {move} without a "
                  "real price change; roll days are not removed for this future.")
 else:
     roll_note = ""
@@ -1211,7 +1211,7 @@ else:
 # Closing times: TTF and the carbon ETC close in European hours, Brent and WTI in the New York afternoon.
 _EUROPEAN_CLOSE, _NEW_YORK_CLOSE = {'TTF=F', 'CARB.L'}, {'BZ=F', 'CL=F'}
 _pair = {commodity['ticker'], ctx.compare_ticker}
-corr_close_note = (" The two series close at different times (TTF and CARB.L in European hours, Brent and WTI in "
+corr_close_note = (f" The two series close at different times (TTF and {ctx.carbon['name']} in European hours, Brent and WTI in "
                    "the New York afternoon), so a move after the European close reaches the European series only "
                    "the next day, which pushes the same-day correlation down."
                    if _pair & _EUROPEAN_CLOSE and _pair & _NEW_YORK_CLOSE else "")
@@ -1225,9 +1225,9 @@ n_lo = int((vol_last < vol_lo).sum())
 # No 30-day volatility on the latest day (too few returns after a suspension): the two volatility checks
 # give no latest value and do not fire; the volatility line above the table says why.
 _vol_latest = common.fmt_vol(latest_vol) if latest_vol is not None else "n/a"
-checks.append(("Volatility spike", f"30-day vol above {common.fmt_vol(vol_hi)} ({VOL_HI_PCT}th pct)",
+checks.append(("Volatility spike", f"30-day volatility above {common.fmt_vol(vol_hi)} ({VOL_HI_PCT}th pct)",
                _vol_latest, None if latest_vol is None else latest_vol > vol_hi, f"{n_hi} of {len(vol_last)}"))
-checks.append(("Unusual calm", f"30-day vol below {common.fmt_vol(vol_lo)} ({VOL_LO_PCT}th pct)",
+checks.append(("Unusual calm", f"30-day volatility below {common.fmt_vol(vol_lo)} ({VOL_LO_PCT}th pct)",
                _vol_latest, None if latest_vol is None else latest_vol < vol_lo, f"{n_lo} of {len(vol_last)}"))
 if latest_vol is None:
     pass
@@ -1262,10 +1262,10 @@ if garch is not None and garch_ref:
                 f"{thr * common.ANNUAL:.1f}% ann. ({thr:.3f}% daily)")
     _g_hi_now, _g_hi_thr = _vol_pair(garch_forecast_10d, GARCH_HI * garch_ref)
     _g_lo_now, _g_lo_thr = _vol_pair(garch_forecast_10d, GARCH_LO * garch_ref)
-    checks.append(("GARCH forecast high", f"10-day forecast above {_g_hi_thr} "
-                   f"({GARCH_HI:.1f}x {ref_short} mean)", _g_hi_now, g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
-    checks.append(("GARCH forecast low", f"10-day forecast below {_g_lo_thr} "
-                   f"({GARCH_LO:.1f}x {ref_short} mean)", _g_lo_now, g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
+    checks.append(("GARCH forecast high", f"GARCH forecast for day 10 above {_g_hi_thr} "
+                   f"({GARCH_HI:.1f}x the {ref_short} average)", _g_hi_now, g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
+    checks.append(("GARCH forecast low", f"GARCH forecast for day 10 below {_g_lo_thr} "
+                   f"({GARCH_LO:.1f}x the {ref_short} average)", _g_lo_now, g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
     if g_ratio > GARCH_HI:
         anomalies.append({'level': '🟡 WARNING', 'type': f'GARCH Forecast Above {ref_short.title()} Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
@@ -1296,7 +1296,7 @@ if has_corr:
                                      + corr_close_note)})
 
 # 4. Large daily losses in the last 252 trading days of the reference window.
-_tail_rule = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x {ref_short} VaR99) on the latest day; breaches counted "
+_tail_rule = (f"loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the {ref_short} VaR 99%) on the latest day; breaches counted "
               f"over the {len(recent_all)} trading days to {_ref_end:%d %b %Y}"
               + (", Brent roll days excluded" if IS_BRENT else ""))
 # "Fires now" means the latest trading day, as for the other checks; the last breach in the window is
@@ -1318,7 +1318,7 @@ _tail_latest = (f"latest {_last_ret:+.2f}%"
                    if _last_is_roll and _last_new_ret is not None else
                    f" (a roll day, not checked{_roll_live_txt})" if _last_is_roll else "")
                 + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
-                   else f"; worst in window {recent_rets.min():.2f}%")
+                   else f"; worst day in window {recent_rets.min():.2f}%")
                 + (" (excl. roll days)" if IS_BRENT else ""))
 checks.append(("Large daily loss", _tail_rule, _tail_latest, _tail_now, f"{len(tail_days)} of {len(recent_rets)}"))
 if _last_is_roll:
@@ -1326,20 +1326,20 @@ if _last_is_roll:
         f"The latest day, {recent_all.index[-1]:%d %b %Y}, is a Brent roll day and is not checked"
         + (" (read from the latest price, which can still change)" if _roll_live else "") + ".")
 if len(tail_days):
-    _tail_detail = (f'{len(tail_days)} daily loss(es) in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
+    _tail_detail = (f'{len(tail_days)} daily {"loss" if len(tail_days) == 1 else "losses"} in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
                     + ("(Brent roll days excluded) " if IS_BRENT else "")
-                    + f'beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the {ref_short} 99% VaR of {var99_3y:.2f}%); '
-                    f'the largest was {tail_days.min():.2f}% on {tail_days.idxmin():%d %b %Y}.')
+                    + f'beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the {ref_short} VaR 99% of {var99_3y:.2f}%). '
+                    f'The largest was {tail_days.min():.2f}% on {tail_days.idxmin():%d %b %Y}.')
     if tail_roll_fact:
         _tail_detail += " " + tail_roll_fact
     elif roll_note_box and not IS_BRENT:
         _tail_detail += roll_note_box
     anomalies.append({'level': '🔵 WATCH' if _tail_now else '🟢 INFO',
-                      'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x {ref_short.title()} VaR99'
+                      'type': (f'Daily Loss Beyond {TAIL_MULT:.0f}x {ref_short.title()} VaR 99%'
                                + ('' if _tail_now else f' (last on {tail_days.index[-1]:%d %b %Y}, not on the latest day)')),
                       'detail': _tail_detail,
                       'past': (None if _tail_now else
-                               f'daily loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x {ref_short} VaR99): {len(tail_days)} in the '
+                               f'daily loss beyond {tail_thr:.2f}% ({TAIL_MULT:.0f}x the {ref_short} VaR 99%): {len(tail_days)} in the '
                                f'{len(recent_all)} trading days to {_ref_end:%d %b %Y}, the latest {tail_days.iloc[-1]:.2f}% on '
                                f'{tail_days.index[-1]:%d %b %Y}')})
 
@@ -1378,10 +1378,10 @@ if _vs['ctx'] is None:
 elif _vs['ctx']['prewar_ratio'] is None:
     _vs_against = "; the volatility line above the table places it against the whole history instead"
 else:
-    _vs_against = ("; the volatility line above the table places it against the pre-war level and the whole "
+    _vs_against = ("; the volatility line above the table places it against the Oct to Dec 2025 level and the whole "
                    "history instead")
 _check_notes = (
-    f"Reference window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
+    f"{ref_short.capitalize()} window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
     f"percentile by construction, and the count shows how much of that fell in {_count_span}.{corr_source} Latest values are "
     f"at the last trading day with a price in the selected range ({_asof:%d %b %Y})."
@@ -1395,10 +1395,10 @@ _check_notes = (
 # On the page: the window, the date of the latest values and what kind of price the last one is; the method,
 # definitions and roll notes are folded (the same text, nothing removed).
 _lv = common.last_value_note(commodity['ticker'], end_date, _asof)
-_kind = ("the last value is a live price, not a settlement" if "latest price" in _lv else
+_kind = ("the last value is the latest price, not the settlement" if "latest price" in _lv else
          "the last value may not yet be the settlement" if "may not yet be the settlement" in _lv else
          "the last value may be an intraday London price" if "London session" in _lv else "")
-st.caption(f"Reference window: {ref_source}. Latest values: {_asof:%d %b %Y}" + (f" ({_kind})" if _kind else "") + ".")
+st.caption(f"{ref_short.capitalize()} window: {ref_source}. Latest values: {_asof:%d %b %Y}" + (f" ({_kind})" if _kind else "") + ".")
 if corr_gap_note and has_corr_ref:
     st.caption(corr_gap_note)
 with st.expander("How the checks are built"):
@@ -1406,7 +1406,7 @@ with st.expander("How the checks are built"):
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
-st.subheader("🤖 AI Risk Interpretation")
+st.subheader("AI Summary")
 st.write(f"A three-sentence plain-language summary of the statistics on this page for {selected_commodity}.")
 
 
@@ -1602,12 +1602,12 @@ def drop_crossed_watch_sentences(text, levels):
 
 # No parameter starts with an underscore: st.cache_data skips such parameters when building the
 # cache key, and then a changed number could return an old narrative.
-@st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
+@st.cache_data(ttl=1800, show_spinner="Generating the AI summary...")
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
                             var_95_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
                             avg_score_v, score_model, avg_30d_v, anomaly_types_str,
                             top_neg_str, date_str, levels_str, tail_fact_str,
-                            past_breaches_str="", garch_fit_str="", prewar_ref="the pre-war level (Oct to Dec 2025)",
+                            past_breaches_str="", garch_fit_str="", prewar_ref="the Oct to Dec 2025 level",
                             trend_label="30-day", check_window_str="the last 3 years", ref_short_str="3-year",
                             news_later=False, last_value_str=""):
     """`news_later` is True when the data date is in the past: the headlines are then from a later date, so the
@@ -1628,7 +1628,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
     if garch_10d and garch_now:
         _dir = ("higher than" if garch_10d > garch_now * 1.02 else
                 "lower than" if garch_10d < garch_now * 0.98 else "roughly the same as")
-        garch_line = (f"GARCH daily volatility now {common.fmt_vol(garch_now)}; forecast for day 10 ahead {common.fmt_vol(garch_10d)}, "
+        garch_line = (f"Latest GARCH volatility {common.fmt_vol(garch_now)}; GARCH forecast for day 10 {common.fmt_vol(garch_10d)}, "
                       f"{_dir} now")
     elif garch_10d:
         garch_line = f"GARCH forecast of daily volatility on day 10 ahead: {common.fmt_vol(garch_10d)}"
@@ -1657,9 +1657,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
         vol_refs = ("- There is no current 30-day volatility for this date; the volatility summary says why. Do not "
                     "describe or estimate the level of volatility, and do not mention a percentile or a multiple of it.")
     elif prewar_ref:
-        _rule = ("State the pre-war multiple whenever you describe the level of volatility."
-                 if prewar_ref.startswith("the pre-war level") else
-                 f"State the multiple of {prewar_ref} whenever you describe the level of volatility.")
+        _rule = f"State the multiple of {prewar_ref} whenever you describe the level of volatility."
         vol_refs = ("- The volatility summary places current 30-day volatility against two references that do not "
                     f"roll with the market: its multiple of {prewar_ref} and its percentile among every 30-day "
                     f"volatility since the start of the data (named in the summary). {_rule}")
@@ -1722,7 +1720,7 @@ Checks and headlines
 MARKET DATA AS OF {date_str}
 - Last value: {last_value_str or 'a close (settlement or exchange close).'}
 - Volatility summary: {risk_level_str}
-- 30-day rolling volatility: {vol_line}
+- 30-day volatility: {vol_line}
 - VaR 95%, 1-day (historical, last 250 trading days): {var_95_v:.2f}%
 - {garch_line}
 {tone_now_line}
@@ -1858,7 +1856,7 @@ if narrative:
 _ai_scope = ("It only summarises the statistics on this page (volatility, VaR, GARCH, headline tone "
              "and the checks above); it does not see fundamentals such as storage, flows, positioning or "
              "the forward curve.")
-_dropped_note = (f" An automatic check removed {len(narrative_dropped)} sentence(s) that asked the reader to "
+_dropped_note = (f" An automatic check removed {len(narrative_dropped)} {'sentence' if len(narrative_dropped) == 1 else 'sentences'} that asked the reader to "
                  "watch for a level the data had already passed." if narrative_dropped else "")
 if narrative:
     _safe = html.escape(narrative).replace("$", "\\$")
@@ -1868,7 +1866,7 @@ if narrative:
         f"{_safe}</div>",
         unsafe_allow_html=True
     )
-    st.caption(f"Generated by Claude ({AI_MODEL}) · data as of {today_date_str} · {_ai_scope} "
+    st.caption(f"Generated by Claude ({AI_MODEL}) · data as of {df_analysis.index[-1]:%d %b %Y} · {_ai_scope} "
                "Cached for 30 minutes for identical inputs." + _dropped_note)
 elif narrative_dropped:
     st.caption("AI summary withheld: every sentence asked the reader to watch for a level the data had "
