@@ -146,6 +146,8 @@ def test_nearest_subject_over_first_named():
     # "returns to" and "moves to" name no direction: a level below the current value is a move back down, so the
     # sentence is kept (audit Market 2026-10-23 round 5, 4-1).
     ("Watch whether volatility returns to 28% annualised.", LEVELS),
+    # a direction word far from the number is not the direction of the move (audit Market round 6, 4-5)
+    ("Watch whether volatility returns over the coming days to 28% annualised.", LEVELS),
     ("Watch whether the correlation moves to 0.30 over the next ten days.", LEVELS),
 ])
 def test_neutral_verbs_keep_a_move_back(sentence, levels):

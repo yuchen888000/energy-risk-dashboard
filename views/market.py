@@ -1177,7 +1177,8 @@ if IS_BRENT:
     roll_note = (" Brent roll days are excluded from the daily-loss check and its "
                  f"{ref_short} VaR99: the first trading day after each ICE Brent contract's last trading day "
                  "(normally the first trading day of the month), or, within the last 30 days, the day the roll "
-                 "check found the continuous series switching contract when Yahoo switched on another day.")
+                 "check found the continuous series switching contract when Yahoo switched on another day. Further back "
+                 "only the rule days are used, so an earlier switch on another day is treated as an ordinary day.")
 elif commodity['ticker'] == 'TTF=F':
     roll_note = (" TTF expiry days are not removed: a flagged day on or just after a front-month expiry "
                  "is marked, because part of its move may be the gap between two contracts.")
@@ -1250,10 +1251,21 @@ if garch is not None and garch_ref:
     n_ghi = int((g_path > GARCH_HI * garch_ref).sum())
     n_glo = int((g_path < GARCH_LO * garch_ref).sum())
     _g_of = f"of the {len(g_path)} trading days to {g_path.index[-1]:%d %b %Y}"
-    checks.append(("GARCH forecast high", f"10-day forecast above {common.fmt_vol(GARCH_HI * garch_ref)} "
-                   f"({GARCH_HI:.1f}x {ref_short} mean)", f"{common.fmt_vol(garch_forecast_10d)}", g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
-    checks.append(("GARCH forecast low", f"10-day forecast below {common.fmt_vol(GARCH_LO * garch_ref)} "
-                   f"({GARCH_LO:.1f}x {ref_short} mean)", f"{common.fmt_vol(garch_forecast_10d)}", g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
+
+    def _vol_pair(latest, thr):
+        """Latest and threshold as the table shows them; one more decimal on both when they would print the same,
+        so a reader can see why the check does or does not fire."""
+        a, b = common.fmt_vol(latest), common.fmt_vol(thr)
+        if a != b:
+            return a, b
+        return (f"{latest * common.ANNUAL:.1f}% ann. ({latest:.3f}% daily)",
+                f"{thr * common.ANNUAL:.1f}% ann. ({thr:.3f}% daily)")
+    _g_hi_now, _g_hi_thr = _vol_pair(garch_forecast_10d, GARCH_HI * garch_ref)
+    _g_lo_now, _g_lo_thr = _vol_pair(garch_forecast_10d, GARCH_LO * garch_ref)
+    checks.append(("GARCH forecast high", f"10-day forecast above {_g_hi_thr} "
+                   f"({GARCH_HI:.1f}x {ref_short} mean)", _g_hi_now, g_ratio > GARCH_HI, f"{n_ghi} of {len(g_path)}"))
+    checks.append(("GARCH forecast low", f"10-day forecast below {_g_lo_thr} "
+                   f"({GARCH_LO:.1f}x {ref_short} mean)", _g_lo_now, g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
     if g_ratio > GARCH_HI:
         anomalies.append({'level': '🟡 WARNING', 'type': f'GARCH Forecast Above {ref_short.title()} Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
@@ -1295,14 +1307,24 @@ _tail_now = (_last_ret < -tail_thr) and not _last_is_roll
 # The roll check's return of the contract the series switched to, when the latest day is an identified roll.
 _last_new_ret = next((nr for t, _, _, nr in (core['rolls'] or {}).get('rolls', [])
                       if pd.Timestamp(t) == recent_all.index[-1]), None) if IS_BRENT else None
+# The roll was read from a row that may not be a close yet (common.futures_row_state): say it can still change.
+_roll_live = (IS_BRENT and _last_is_roll
+              and common.futures_row_state(recent_all.index[-1]) != 'close')
+_roll_live_txt = ", read from the latest price, which can still change" if _roll_live else ""
+# How much of the latest move is the gap between the contracts: the series' return minus the new contract's own.
+_roll_gap = (_last_ret / 100 - _last_new_ret) if (_last_is_roll and _last_new_ret is not None) else None
 _tail_latest = (f"latest {_last_ret:+.2f}%"
-                + (f" (a roll day, not checked; the contract it switched to {_last_new_ret * 100:+.2f}%)"
+                + (f" (a roll day, not checked; the contract it switched to {_last_new_ret * 100:+.2f}%{_roll_live_txt})"
                    if _last_is_roll and _last_new_ret is not None else
-                   " (a roll day, not checked)" if _last_is_roll else "")
+                   f" (a roll day, not checked{_roll_live_txt})" if _last_is_roll else "")
                 + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
                    else f"; worst in window {recent_rets.min():.2f}%")
                 + (" (excl. roll days)" if IS_BRENT else ""))
 checks.append(("Large daily loss", _tail_rule, _tail_latest, _tail_now, f"{len(tail_days)} of {len(recent_rets)}"))
+if _last_is_roll:
+    tail_roll_fact = (tail_roll_fact + " " if tail_roll_fact else "") + (
+        f"The latest day, {recent_all.index[-1]:%d %b %Y}, is a Brent roll day and is not checked"
+        + (" (read from the latest price, which can still change)" if _roll_live else "") + ".")
 if len(tail_days):
     _tail_detail = (f'{len(tail_days)} daily loss(es) in the {len(recent_all)} trading days to {_ref_end:%d %b %Y} '
                     + ("(Brent roll days excluded) " if IS_BRENT else "")
@@ -1358,7 +1380,7 @@ elif _vs['ctx']['prewar_ratio'] is None:
 else:
     _vs_against = ("; the volatility line above the table places it against the pre-war level and the whole "
                    "history instead")
-st.caption(
+_check_notes = (
     f"Reference window: {ref_source}. Thresholds and the counts of days fired come from this window and use no "
     f"data after {_ref_end:%d %b %Y}, so the counts are in-sample: about 5% of the window lies beyond each "
     f"percentile by construction, and the count shows how much of that fell in {_count_span}.{corr_source} Latest values are "
@@ -1370,6 +1392,17 @@ st.caption(
     "of daily returns, shown annualised (x √252) with the daily figure in brackets. These checks ask whether the "
     f"latest day is unusual for the {ref3y_span} before it" + _vs_against + ". " + _vs['detail']
     + (" " + _vs['roll'] if _vs['roll'] else "") + roll_note + corr_close_note)
+# On the page: the window, the date of the latest values and what kind of price the last one is; the method,
+# definitions and roll notes are folded (the same text, nothing removed).
+_lv = common.last_value_note(commodity['ticker'], end_date, _asof)
+_kind = ("the last value is a live price, not a settlement" if "latest price" in _lv else
+         "the last value may not yet be the settlement" if "may not yet be the settlement" in _lv else
+         "the last value may be an intraday London price" if "London session" in _lv else "")
+st.caption(f"Reference window: {ref_source}. Latest values: {_asof:%d %b %Y}" + (f" ({_kind})" if _kind else "") + ".")
+if corr_gap_note and has_corr_ref:
+    st.caption(corr_gap_note)
+with st.expander("How the checks are built"):
+    st.caption(_check_notes)
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
@@ -1540,7 +1573,7 @@ def drop_crossed_watch_sentences(text, levels):
                     continue
                 downward = bool(_DOWNWARD.search(window[:nums[0][0]]))
                 neutral = (bool(_NEUTRAL_VERB.match(vm.group(0))) and not downward
-                           and not _UPWARD.search(window[:nums[0][0]]))
+                           and not _UPWARD.search(window[max(0, nums[0][0] - 15):nums[0][0]]))
                 # The level named is the first number, with its other scale if it follows in brackets
                 # ("28% annualised (1.74% daily)"); later numbers belong to other parts of the sentence.
                 nums = nums[:1] + [x for x in nums[1:2]
@@ -1768,9 +1801,15 @@ level_lines, level_list = level_facts(
     garch['current_cond_vol'] if garch is not None else None, garch_forecast_10d, GARCH_HI, GARCH_LO,
     corr_v=corr_now if has_corr else None, corr_lo_v=float(corr_lo) if has_corr else None,
     corr_hi_v=float(corr_hi) if has_corr else None, corr_label=compare_label)
+_gap_words = ("includes the price gap between two contracts" if _roll_gap is None else
+              "is mostly the price gap between two contracts, not a Brent price move"
+              if abs(_roll_gap) > abs(_last_new_ret) else
+              "is partly the price gap between two contracts")
 _worst_txt = (((f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_ret:+.2f}% on the continuous "
-               "series, but this is a Brent roll day: the series switched to the next contract, so the figure "
-               "is mostly the price gap between two contracts, not a Brent price move"
+               "series, but this is a Brent roll day"
+               + (" (read from the latest price, which can still change)" if _roll_live else "")
+               + ": the series switched to the next contract, "
+               f"so the figure {_gap_words}"
                + (f" (the contract it switched to moved {_last_new_ret * 100:+.2f}%)"
                   if _last_new_ret is not None else "")
                + f"; it is not checked against the daily-loss threshold of -{tail_thr:.2f}%. ")
@@ -1781,6 +1820,7 @@ _worst_txt = (((f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_
                  f"{(recent_all.index[-1] - tail_days.index[-1]).days} days before the data date: a past event, "
                  "not a current signal." if len(tail_days) and not _tail_now else "")
               + (" Brent roll days excluded." if IS_BRENT else ""))
+_worst_txt = " ".join(_worst_txt.split())
 levels_for_llm = "\n".join(f"- {s}" for s in level_lines + [_worst_txt])
 
 narrative, error = generate_risk_narrative(
@@ -1847,6 +1887,8 @@ export_df.columns = [selected_commodity, compare_label, '30-day volatility of da
                      '30-day rolling correlation (returns)']
 export_df.insert(3, '30-day volatility, annualised (daily x sqrt(252), %)', df_analysis['Volatility'] * common.ANNUAL)
 export_df['Daily_Return_%'] = df_analysis['Returns'] * 100
+if IS_BRENT:
+    export_df['Brent roll day (excluded from the daily-loss check)'] = export_df.index.isin(brent_rolls)
 st.download_button(
     label=f"Download {selected_commodity} Risk Data (CSV)",
     data=export_df.to_csv(),

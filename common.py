@@ -968,8 +968,9 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     span = f"since {ctx['all_start']:%b %Y}" + (f" (to {as_of:%d %b %Y})" if past_end else "")
     pct = f"highest {span}" if ctx['top_all'] else f"{_ordinal(ctx['p_all'])} percentile {span}"
     # A roll day in the 30-day window lifts or lowers the large figures; say so in the heading itself.
-    roll_flag = (" · includes a contract roll day (see below)"
-                 if with_roll and rc is not None and rc['rolls'] else "")
+    _n_rolls = len(rc['rolls']) if with_roll and rc is not None and rc['rolls'] else 0
+    roll_flag = ("" if not _n_rolls else " · includes a contract roll day (see below)" if _n_rolls == 1
+                 else f" · includes {_n_rolls} contract roll days (see below)")
     out['headline2'] = f"{compare} · {pct}{roll_flag}"
     headline2_ai = (f"{compare_ai} · " if compare_ai else "") + pct + roll_flag
     detail, detail_ai = "", ""
