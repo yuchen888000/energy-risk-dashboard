@@ -305,7 +305,8 @@ def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=Fal
 # today's New York date or later is the latest price, the day before (Monday to Thursday) may not yet be the
 # settlement, older rows and Friday's from Saturday on are closes. The headline, the CSV column and the gas-purchase label all use these words.
 # A row on a NYMEX holiday (Yahoo has TTF=F rows on Thanksgiving 2023 and 4 July 2025, days on which NYMEX publishes
-# no settlement) is a price of that day's trading, not a close: 'holiday' (audit Power round 5, 3-1).
+# no settlement) is not a settlement, so it is not called a close: 'holiday' (audit Power round 5, 3-1). Whether
+# NYMEX traded on those days is not verified, so the page does not say it did.
 _PRICE_TYPE = {"live": "latest price, not the settlement", "unsettled": "may not yet be the settlement",
                "close": "close", "holiday": "price on a US holiday, no NYMEX settlement"}
 
@@ -766,7 +767,7 @@ st.write(f"The plant buys the gas for {month_label} on TTF {delivery_month:%b %y
          + f". If it waits {_WAIT_DAYS} business days (NYMEX business days, the days `TTF=F` settles: US exchange "
          "holidays such as Martin Luther King Jr. Day are skipped) instead of "
          f"buying on {_decide:%a %d %b}"
-         + (" (a US holiday: NYMEX trades but publishes no settlement that day)"
+         + (" (a US holiday on which NYMEX publishes no settlement)"
             if not np.is_busday(pd.Timestamp(_decide).date(), busdaycal=common.NYMEX_BDAYS) else "")
          + ", how much could that gas cost? This is the gas leg alone: a plant that "
          f"hedges its spread also sells its power forward at the same time, and {_corr_txt}, so the plant's real "
@@ -813,8 +814,8 @@ if wait is not None:
               help=_price_help + {"live": " This is the latest price, not the settlement.",
                                   "unsettled": f" It may not yet be the settlement: {common._UNSETTLED_WHY}.",
                                   "close": "",
-                                  "holiday": " That day is a US holiday: NYMEX trades but publishes no settlement, "
-                                             "so this is a price of the day's trading."}[_w_state])
+                                  "holiday": " That day is a US holiday on which NYMEX publishes no settlement, "
+                                             "so Yahoo's row for it is not a settlement price."}[_w_state])
     w2.metric(f"On {_wait_day:%a %d %b}, in {_WAIT_DAYS} NYMEX business days: 90% range (€/MWh)",
               f"{_half(lo):.1f} to {_half(hi):.1f}",
               help="Rounded to 0.5 €/MWh: the range comes from 10,000 simulated paths with a fixed random seed "
