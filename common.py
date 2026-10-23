@@ -773,6 +773,11 @@ def last_value_note(ticker, end_date):
 
 
 # ─── Cross-commodity returns (correlation matrix, portfolio VaR, positions) ───
+def panel_tickers(carbon_short, carbon_ticker):
+    """Column name -> Yahoo ticker of returns_panel, so a page can go back from a position to its prices."""
+    return {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", carbon_short: carbon_ticker}
+
+
 @st.cache_data(ttl=3600, show_spinner="Computing cross-commodity returns...")
 def returns_panel(start, end, carbon_short, carbon_ticker):
     """Daily returns of TTF, WTI, Brent and carbon, one column each (not NaN-aligned).
@@ -780,7 +785,7 @@ def returns_panel(start, end, carbon_short, carbon_ticker):
     Callers drop NaNs over the columns they use, so a short carbon history does not
     truncate a calculation that does not involve carbon.
     """
-    tickers = {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", carbon_short: carbon_ticker}
+    tickers = panel_tickers(carbon_short, carbon_ticker)
     returns = {}
     for name, ticker in tickers.items():
         close = load_close(ticker, start, end)
@@ -844,7 +849,10 @@ def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SP
     it is).
 
     Returns None when no candidate qualifies, else dict(start, end, ties, first_tie_end, var95, var99, es975,
-    search_from, search_to), losses as positive €.
+    search_from, search_to, var95_ties, n_tail), losses as positive €. The tied windows share the worst 7 days,
+    so their ES and VaR 99% (between the 3rd and 4th worst day) are the same, but VaR 95% (between the 13th and
+    14th worst) can differ: var95_ties is its (lowest, highest) over the tied windows. n_tail is the number of
+    days the ES averages.
     """
     cols = list(positions)
     sub = panel[cols].dropna()
@@ -863,9 +871,11 @@ def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SP
     ties = found['ties']
     k = int(ties[-1])
     w = pnl.iloc[k - window + 1:k + 1]
+    tie_var95 = [float(hist_var(pnl.iloc[int(t) - window + 1:int(t) + 1], 0.95)) for t in ties]
     return dict(start=w.index[0], end=w.index[-1], ties=len(ties), first_tie_end=idx[int(ties[0])],
                 var95=float(hist_var(w, 0.95)), var99=float(hist_var(w, 0.99)), es975=float(hist_es(w, 0.975)),
-                search_from=idx[0], search_to=idx[-1])
+                search_from=idx[0], search_to=idx[-1], var95_ties=(min(tie_var95), max(tie_var95)),
+                n_tail=int((w <= np.percentile(w, 2.5)).sum()))
 
 
 def _stress_search(values, index, score, window=STRESS_WINDOW, max_span=STRESS_MAX_SPAN):

@@ -15,6 +15,21 @@ def _ord(n):
     return "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
+def _es_below_var99(n_tail, n):
+    """Why ES 97.5% can come out below VaR 99%: written once, for the single-commodity VaR and the stress period."""
+    k = int((n - 1) * 0.01) + 1
+    return (f"Here ES averages the worst {n_tail} days while VaR 99% lies between the {k}{_ord(k)} and "
+            f"{k + 1}{_ord(k + 1)} worst, so ES 97.5% can come out slightly below VaR 99%, as it does now; that is "
+            "not a calculation error.")
+
+
+def _nonpos_why(n_days, where=""):
+    """Why a day with a zero or negative price drops out (common.simple_returns): written once, for the
+    single-commodity VaR and the positions block."""
+    return ("a percentage return is not defined across a zero or negative price, so the returns of "
+            + ("that day" if n_days == 1 else "each of those days") + f" and the next are left out{where}")
+
+
 ctx = common.context()
 selected_commodity = ctx.selected_commodity
 commodity = ctx.commodity
@@ -50,9 +65,9 @@ with st.sidebar.expander("Methodology: Risk page"):
       the pre-war level (median 30-day volatility of Oct to Dec 2025) and the percentile among every
       30-day volatility since the start of the data (2017; TTF from Oct 2017). No Normal / Elevated /
       Extreme label: there is no industry-standard cut-off for one.
-    - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 in which
-      they would have lost the most (largest ES 97.5%), equally weighted, after the Basel method
-      (BCBS MAR33.7), shown next to the last 250 days.
+    - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 (at most
+      400 calendar days) in which they have the largest ES 97.5%, equally weighted, after the Basel
+      method (BCBS MAR33.7), shown next to the last 250 days.
     - **Historical scenarios**: today's positions replayed through three past windows
       (Russia's invasion of Ukraine, the August 2022 gas peak, the 2026 Iran war). It shows
       what happened, not a forecast.
@@ -156,15 +171,15 @@ mc4.metric("VaR 95% (1-day, per unit)", f"{var_95:.2f}%",
 macro_events = {
     "2021-07-14": "EU Fit for 55 package",
     "2022-02-24": "Russia invades Ukraine",
-    "2022-06-03": "EU adopts Russian oil embargo",
+    "2022-06-03": "EU adopts oil embargo (6th package; pipeline exempt)",
     "2022-09-26": "Nord Stream sabotage",
     "2022-12-05": "EU ban on Russian seaborne crude applies",
-    "2023-02-15": "EU gas price cap can apply",
+    "2023-02-15": "EU gas market correction mechanism can apply",
     "2023-04-18": "EP adopts ETS reform incl. ETS 2",
     "2024-01-01": "EU ETS extended to shipping",
     "2026-01-01": "CBAM definitive period starts",
     "2026-02-28": "US-Israel strikes on Iran",
-    "2026-03-02": "Qatar halts LNG; IRGC says Hormuz closed",
+    "2026-03-02": "Qatar halts LNG; IRGC official: Hormuz closed",
     "2028-01-01": "EU ETS 2 starts (postponed)",
 }
 
@@ -489,10 +504,10 @@ for _col, _name, _recent, _full, _help in (
 _raw_px = common.load_close(commodity['ticker'], start_date, end_date)
 _nonpos = _raw_px[_raw_px <= 0]
 if len(_nonpos):
+    _why = _nonpos_why(len(_nonpos))
     st.caption(f"⚠️ {selected_commodity} settled at or below zero on "
                + ", ".join(f"{d:%d %b %Y} ({v:.2f})" for d, v in _nonpos.items())
-               + ". A percentage return is not defined across a zero or negative price, so the returns into and "
-                 "out of those days are left out, and the full-period max daily loss, VaR and ES do not include "
+               + f". {_why[0].upper() + _why[1:]}, and the full-period max daily loss, VaR and ES do not include "
                  "that move.")
 
 _worst_recent_day = _recent_ret.idxmin()
@@ -505,11 +520,7 @@ st.caption(f"Expected Shortfall (ES) 97.5% is the average return on the days at 
            f"({_n_tail} of the last {var_days} days): the average loss in the worst 2.5% of days. The Basel Committee "
            "chose ES 97.5% for FRTB because it gives \"a broadly similar level of risk capture as the existing 99th "
            "percentile VaR threshold\" (BCBS, Fundamental review of the trading book, October 2013, p. 18)"
-           + (f". Here ES averages the worst {_n_tail} days while VaR 99% lies between the {int((len(_recent_ret) - 1) * 0.01) + 1}"
-              f"{_ord(int((len(_recent_ret) - 1) * 0.01) + 1)} and {int((len(_recent_ret) - 1) * 0.01) + 2}"
-              f"{_ord(int((len(_recent_ret) - 1) * 0.01) + 2)} worst, so "
-              "ES 97.5% can come out slightly below VaR 99%, as it does now; that is not a calculation error."
-              if abs(es_975) < abs(var_99) else "."))
+           + (". " + _es_below_var99(_n_tail, len(_recent_ret)) if abs(es_975) < abs(var_99) else "."))
 
 
 _brent_roll_days = common.brent_roll_days
@@ -733,8 +744,9 @@ else:
                    help="Daily book loss exceeded on 1% of the last 250 days.")
         pl3.metric("Expected Shortfall 97.5%", f"€{book_es975 / 1e6:,.2f}m",
                    help=f"Average loss on the {_n_tail_book} days (of {len(recent)}) at or below the 2.5% quantile, "
-                        "1-day horizon. 97.5% is the confidence level Basel FRTB uses; FRTB also scales by "
-                        "liquidity horizon and a stress period, which this does not.")
+                        "1-day horizon. 97.5% is the confidence level Basel FRTB uses. FRTB also scales the ES by "
+                        "liquidity horizon and calibrates it to a stress period; this figure is not scaled, and "
+                        "the stress-period figures are below.")
         pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
                    help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
         st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span>, "
@@ -760,7 +772,9 @@ else:
                    f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR).")
 
         # ── Stress period (after Basel MAR33.7) ──
-        st.write("**Stress period: today's positions in the 12 months they would have lost the most**")
+        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months: normally about 370 "
+                 f"calendar days, at most {common.STRESS_MAX_SPAN}) in which today's positions have the largest "
+                 "ES 97.5%**")
         _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
         _sp = (common.stress_period(_stress_panel[list(positions)], positions)
                if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
@@ -780,15 +794,46 @@ else:
             _tie_txt = (f" The ES is the same in {_sp['ties']} windows ending {_sp['first_tie_end']:%d %b %Y} to "
                         f"{_sp['end']:%d %b %Y}, because ES 97.5% over 250 days depends only on the worst 7 days "
                         "and these windows all contain them; the latest is shown." if _sp['ties'] > 1 else "")
+            # 3-1: VaR 95% depends on the 13th and 14th worst days, so it can differ across the tied windows.
+            _v95_lo, _v95_hi = (f"€{_v / 1e6:,.2f}m" for _v in _sp['var95_ties'])
+            if _sp['ties'] > 1 and _v95_lo != _v95_hi:
+                _tie_txt += f" VaR 95% ranges {_v95_lo} to {_v95_hi} across these windows."
+            # 4-3: the same explanation as the single-commodity VaR when ES 97.5% is below VaR 99%.
+            _es_txt = (" " + _es_below_var99(_sp['n_tail'], common.STRESS_WINDOW)
+                       if _sp['es975'] < _sp['var99'] else "")
+            # 1-1: a held instrument with a zero or negative price inside the stress period or the last
+            # 250 days (WTI on 20 Apr 2020): that day and the next drop out of the book P&L. Found from the prices.
+            _nonpos_txt = ""
+            _tickers = common.panel_tickers(CARBON_SHORT, CARBON_TICKER)
+            for _k, _v in positions.items():
+                _px = common.load_close(_tickers[_k], common.STRESS_FROM, end_date).dropna()
+                _bad = [i for i, x in enumerate(_px.values) if x <= 0]
+                for _i in _bad:
+                    _d = _px.index[_i]
+                    _in = [_lab for _lab, _a, _b in (("stress-period", _sp['start'], _sp['end']),
+                                                     (f"last-{len(recent)}-day", recent.index[0], recent.index[-1]))
+                           if _a <= _d <= _b]
+                    if not _in:
+                        continue
+                    _figs = f"the {' and '.join(_in)} VaR and ES"
+                    _nonpos_txt += (f" {_k} settled at {_px.iloc[_i]:.2f} on {_d:%d %b %Y}"
+                                    + (f", from {_px.iloc[_i - 1]:.2f} the day before" if _i > 0 else "")
+                                    + ": " + _nonpos_why(1, " of the book P&L"))
+                    if _v > 0:
+                        _nonpos_txt += f". For a long {_k} position {_figs} therefore understate that day's loss."
+                    elif _i + 1 < len(_px):
+                        _nonpos_txt += (f". For a short {_k} position that day was a gain, and the next day, when "
+                                        f"{_k} rose back to {_px.iloc[_i + 1]:.2f}, a loss; {_figs} include neither.")
+                    else:
+                        _nonpos_txt += f". For a short {_k} position that day was a gain, left out of {_figs}."
             st.caption(
-                f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, the {common.STRESS_WINDOW} trading "
-                f"days from {_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y} in which today's positions would "
-                f"have had the largest ES 97.5%, all days equally weighted. As above, only days on which every "
-                f"instrument held has a return count, and the {common.STRESS_WINDOW} days must fall within "
-                f"{common.STRESS_MAX_SPAN} calendar days"
-                + (", which leaves out the carbon ETC's suspension (Jun 2020 to Aug 2021) and its sparse prices "
-                   "before 2018" if CARBON_SHORT in positions else "")
-                + f".{_tie_txt} It changes when the "
+                f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, searched from "
+                f"{_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y}: the {common.STRESS_WINDOW} trading "
+                f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted. "
+                "As above, only days on which every instrument held has a return count"
+                + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out the carbon ETC's suspension (Jun 2020 to "
+                   "Aug 2021) and its sparse prices before 2018" if CARBON_SHORT in positions else "")
+                + f".{_tie_txt}{_es_txt}{_nonpos_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
                 "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "
                 "scaling; here the horizon is 1 day, as above. The search starts in 2017: TTF=F starts on 23 Oct "
