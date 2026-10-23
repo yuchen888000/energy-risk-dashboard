@@ -11,6 +11,16 @@ import streamlit as st
 
 import common
 
+def _folded(label, *texts):
+    """Method notes and caveats under a section, folded into one expander so the figures and the warnings that
+    change how a figure reads stay on top. Empty texts are skipped; nothing is drawn when all are empty."""
+    texts = [t.strip() for t in texts if t and t.strip()]
+    if texts:
+        with st.expander(label):
+            for t in texts:
+                st.caption(t)
+
+
 def _ord(n):
     return "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
@@ -113,10 +123,6 @@ _vs = common.vol_summary(core, name=selected_commodity, with_roll=True, past_end
 st.markdown(f"<div style='font-size:1.9rem; font-weight:600; opacity:0.85; line-height:1.3'>{_vs['headline']}</div>"
             f"<div style='font-size:1.25rem; font-weight:500; opacity:0.85; margin:0.2rem 0 0.6rem'>"
             f"{_vs['headline2']}</div>", unsafe_allow_html=True)
-if _vs['roll']:
-    st.markdown(f"<div style='font-size:0.95rem; margin-bottom:0.4rem'>{_vs['roll']}</div>", unsafe_allow_html=True)
-if _vs['detail']:
-    st.markdown(f"<div style='font-size:0.95rem'>{_vs['detail']}</div>", unsafe_allow_html=True)
 st.caption("This compares volatility with the commodity's own past; it is not a measure of overall risk: low "
            "volatility says nothing about supply, storage or position size.")
 _last_px = df_analysis['Price'].dropna().index.max()
@@ -142,17 +148,25 @@ if _last_cmp is not None:
     _cn = common.last_value_note(ctx.compare_ticker, end_date, _last_cmp)
     if _cn.startswith(" The last value") and ("may" in _cn or "latest price" in _cn):
         _cmp_value_note = f" For {compare_label}, the last value" + _cn[len(" The last value"):]
-st.caption(f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
-           + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
-           + "." + _ttf_late
-           # A futures row of today's New York date is a latest price, one of the day before (Monday to Thursday)
-           # may not yet be the settlement (common.futures_row_state, the same rule as the forward curve below).
-           + common.last_value_note(commodity['ticker'], end_date, _last_px)
-           + _cmp_value_note
-           + (" The volatility, percentile, pre-war multiple, VaR and the roll check"
-              if commodity['ticker'] in common.CURVE_ROOTS else
-              " The volatility, percentile, pre-war multiple and VaR")
-           + " all come from one download of the series, computed together.")
+_last_note = common.last_value_note(commodity['ticker'], end_date, _last_px)
+_data_full = (f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
+              + (f", {_last_cmp:%d %b %Y} for {compare_label}" if _last_cmp is not None else "")
+              + "." + _ttf_late
+              # A futures row of today's New York date is a latest price, one of the day before (Monday to
+              # Thursday) may not yet be the settlement (common.futures_row_state, the same rule as the curve).
+              + _last_note
+              + _cmp_value_note
+              + (" The volatility, percentile, pre-war multiple, VaR and the roll check"
+                 if commodity['ticker'] in common.CURVE_ROOTS else
+                 " The volatility, percentile, pre-war multiple and VaR")
+              + " all come from one download of the series, computed together.")
+# On the page: the dates, what kind of price the last one is (in a few words; the full sentence is in the details)
+# and a late TTF row, which changes what the latest figures cover. Definitions and the roll check are folded.
+_kind = ("the last value is a live price, not a settlement" if "latest price" in _last_note else
+         "the last value may not yet be the settlement" if "may not yet be the settlement" in _last_note else
+         "the last value may be an intraday London price" if "London session" in _last_note else "")
+st.caption(f"Data up to {_last_px:%d %b %Y}" + (f" ({_kind})" if _kind else "") + "." + _ttf_late)
+_folded("How these volatility figures are built", _vs['roll'], _vs['detail'], _data_full)
 
 _vol_series = df_analysis['Volatility'].dropna()
 _corr_pairs = df_analysis[['Returns', 'Compare_Returns']].dropna()
@@ -400,18 +414,18 @@ else:
             st.dataframe(curve.assign(Delivery=curve['Delivery'].map(lambda d: f"{d:%b %Y}"),
                                       **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')}),
                          width="stretch", hide_index=True)
-        st.caption(
-            (f"The curve is today's, not as of the end date ({end_date:%d %b %Y}). " if _past_end else "")
-            + shape_note
-            + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
-            f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
-            "days and has not passed its last trading day (exchange rule and holiday calendar; a contract "
-            "on its last trading day is shown), "
-            + _curve_words['caption']
-            + "Contracts past their last trading day are not shown, even while Yahoo Finance still "
-            "lists them; older or missing contracts are left out and nothing is interpolated. "
-            f"{n_curve} of 12 contracts available."
-        )
+        if _past_end:
+            st.caption(f"The curve is today's, not as of the end date ({end_date:%d %b %Y}).")
+        _folded("How the curve is built",
+                shape_note
+                + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
+                f"A contract is shown if it has a daily close within the last {common.CURVE_FRESH_DAYS} trading "
+                "days and has not passed its last trading day (exchange rule and holiday calendar; a contract "
+                "on its last trading day is shown), "
+                + _curve_words['caption']
+                + "Contracts past their last trading day are not shown, even while Yahoo Finance still "
+                "lists them; older or missing contracts are left out and nothing is interpolated. "
+                f"{n_curve} of 12 contracts available.")
 
 # ─── Section 3: Volatility & Correlation ───
 vcol1, vcol2 = st.columns(2)
@@ -494,7 +508,8 @@ if corr_full is not None:
                        "carbon ETC's stale prices.")
 
     st.caption("Blue = positive correlation (move together). Red = negative (move inversely); for a hedged book a "
-               "negative correlation is not in itself bad. "
+               "negative correlation is not in itself bad.")
+    _folded("How the matrix is built",
                "Only days on which all four series have a return are used; the recent matrix uses the last 30 "
                "trading days on which any of the four has a return, and needs at least 20 of them with all four. Compare full "
                "period with the last 30 days to see whether relationships have shifted. The series do not close at the same "
@@ -549,7 +564,8 @@ vc4.metric("Max daily loss", f"{_recent_ret.min() * 100:.2f}%",
            help=f"Worst daily return in the last {var_days} trading days, on {_worst_recent_day:%d %b %Y}.")
 vc4.caption(f"on {_worst_recent_day:%d %b %Y}; {full_label}: **{returns_clean.min() * 100:.2f}%** "
             f"({_worst_full_day:%d %b %Y})")
-st.caption(f"Expected Shortfall (ES) 97.5% is the average return on the days at or below the 2.5% quantile "
+_var_notes = []
+_var_notes.append(f"Expected Shortfall (ES) 97.5% is the average return on the days at or below the 2.5% quantile "
            f"({_n_tail} of the last {var_days} days): the average loss in the worst 2.5% of days. The Basel Committee "
            "chose ES 97.5% for FRTB because it gives \"a broadly similar level of risk capture as the existing 99th "
            "percentile VaR threshold\" (BCBS, Fundamental review of the trading book, October 2013, p. 18)"
@@ -570,7 +586,7 @@ if commodity['ticker'] == "BZ=F":
                    "the move can be the price gap between the two contracts, not a real loss. Excluding roll "
                    f"days, the worst day was {_ex_roll.min() * 100:.2f}% on {_ex_roll.idxmin():%d %b %Y}.")
     else:
-        st.caption(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
+        _var_notes.append(f"The worst day ({_worst_recent_day:%d %b %Y}) is not a Brent roll day (the first trading "
                    "day after an ICE Brent contract's last trading day: normally the first trading day of the "
                    "month, the last trading day of December for the February contract).")
 if commodity['ticker'] == "TTF=F":
@@ -583,13 +599,15 @@ if commodity['ticker'] == "TTF=F":
                    "so part of that day's move may be the gap between two contracts if the continuous series "
                    "switched on it. Which contract Yahoo's series followed that day is not verified.")
 if commodity['ticker'].endswith("=F"):
-    st.caption(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
+    _var_notes.append(f"`{commodity['ticker']}` is Yahoo Finance's continuous front-month future. When the front "
                "contract rolls to the next month, the series switches contract and that day's return is "
                "not a real price move: when the next contract trades below the expiring one, "
                "the series shows a drop that no contract actually had. Roll days are not removed, so they can "
                "distort the volatility, the max daily loss, the tails, the VaR and the backtest exceptions. When "
                "the latest 30-day window contains a roll day, the line under the volatility heading gives the "
                "30-day volatility with the new contract's own return on that day.")
+
+_folded("How VaR and ES are calculated", *_var_notes)
 
 fig_var, (ax_hist, ax_ts) = plt.subplots(1, 2, figsize=(14, 4))
 
@@ -643,7 +661,7 @@ if len(_bt) >= 100:
     st.write(f"**VaR Backtest ({selected_commodity}), last {_n} trading days "
              f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt + " " + _kup + ".")
     st.dataframe(pd.DataFrame(_rows).set_index('VaR level'), width="stretch")
-    st.caption(f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
+    _folded("How the backtest works", f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
                "and compared with that day's return. Kupiec also rejects too few exceptions. Basel zones: "
                "green 0 to 4, yellow 5 to 9, red 10 or more exceptions at 99% over 250 days.")
 else:
@@ -880,14 +898,17 @@ else:
                                         "counted this way, a window containing these days could have a larger ES than the stress "
                                         "period shown.")
                     _i = _j + 1
-            st.caption(
+            st.caption(f"Stress period: **{_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}**.")
+            if _nonpos_txt.strip():
+                st.caption("⚠️ " + _nonpos_txt.strip())
+            _folded("How the stress period is chosen",
                 f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, searched from "
                 f"{_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y}: the {common.STRESS_WINDOW} trading "
                 f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted. "
                 "As above, only days on which every instrument held has a return count"
                 + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out the carbon ETC's suspension (Jun 2020 to "
                    "Aug 2021) and its sparse prices before 2018" if CARBON_SHORT in positions else "")
-                + f".{_tie_txt}{_es_txt}{_nonpos_txt} The stress period changes when the "
+                + f".{_tie_txt}{_es_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
                 "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "
                 "scaling; here the horizon is 1 day, as above. The search starts in 2017: TTF=F starts on 23 Oct "
@@ -925,7 +946,7 @@ else:
         plt.tight_layout()
         st.pyplot(fig_bt)
 
-        st.caption(
+        _folded("How the book VaR and its backtest work",
             f"Historical simulation on the last {_LOOKBACK} trading days, 1-day horizon. Only days on which "
             "every instrument held has a return count: a move of one instrument on the other's holiday is "
             "left out, and the other's next return spans both days. "
@@ -1061,8 +1082,9 @@ else:
             plt.tight_layout()
             st.pyplot(fig_sc)
 
-        st.caption(
-            "This replays what happened; it is not a forecast or a probability. Today's positions are entered "
+        st.caption("This replays what happened; it is not a forecast or a probability.")
+        _folded("How the replay works",
+            "Today's positions are entered "
             "at the close before each window and held unchanged (no rebalancing, hedging or stop-loss): P&L = "
             "position × the instrument's cumulative return, and the worst day is the largest one-day loss of "
             "the book inside the window. Windows: "
