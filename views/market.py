@@ -1,28 +1,21 @@
-"""Market page: country exposure, headline tone, statistical checks and an AI summary.
+"""Market page: country exposure, recent headlines, statistical checks and an AI summary.
 
 Designed with data and analytics firms in mind.
 """
-import datetime as dt
 import html
 import os
 import re
-import time
-from urllib.parse import quote_plus
 
-import feedparser
 import matplotlib.pyplot as plt
-import nltk
 import numpy as np
 import pandas as pd
 import requests as req
 import streamlit as st
 
 import common
+import news_data
 from country_data import (EU27, MODES, available_years, dependency_key, is_provisional, load_country_data,
                           measure_column, mentions_country)
-
-nltk.download('vader_lexicon', quiet=True)
-from nltk.sentiment.vader import SentimentIntensityAnalyzer  # noqa: E402
 
 ctx = common.context()
 selected_commodity = ctx.selected_commodity
@@ -32,20 +25,14 @@ start_date, end_date = ctx.start_date, ctx.end_date
 CARBON_TICKER = ctx.carbon["ticker"]
 
 NEWS_DAYS = 7          # headlines older than this are not "current"
-PER_FEED_CAP = 4       # at most this many headlines from one feed, so no single feed dominates
-# Google News edition: UK English, set explicitly (language, country and edition), so the feeds are not
-# left to Google's default edition.
-GN_EDITION = "hl=en-GB&gl=GB&ceid=GB:en"
-GN_CAP = 100           # Google News returns at most this many entries per RSS query
+PER_SITE_CAP = 3       # at most this many headlines from one site, so no single publisher dominates
+MAX_HEADLINES = 15     # the recent headlines list shows at most this many
 CHECK_DAYS = 252       # base rates of the statistical checks: the last 252 trading days
 VOL_LO_PCT, VOL_HI_PCT = 5, 95       # volatility and correlation checks: percentiles of the last 3 years
 GARCH_HI, GARCH_LO = 1.30, 0.70      # GARCH forecast vs the 3-year average 30-day volatility
 TAIL_MULT = 2.0                      # tail check: loss beyond 2x the 3-year 99% VaR
 ROLLING_FUTURES = ('TTF=F', 'CL=F', 'BZ=F')
 AI_MODEL = "claude-sonnet-5-5"       # Anthropic model ID of the AI interpretation
-# Tone colours carry no good/bad meaning: positive wording is not good news for a price.
-TONE_COLORS = {'Positive': 'steelblue', 'Negative': 'darkorange', 'Neutral': 'lightgray'}
-
 with st.sidebar.expander("Methodology: Market page"):
     st.markdown("""
     - **Country exposure**: Eurostat data only (nrg_ind_id, nrg_bal_c, nrg_ind_ren,
@@ -55,15 +42,15 @@ with st.sidebar.expander("Methodology: Market page"):
       For carbon, by greenhouse-gas emissions per euro of GDP at 2020 prices. Values Eurostat
       flags as provisional are marked (p). Storage, supplier concentration and LNG capacity
       are not included.
-    - **Headline tone**: headlines from the last 7 days, at most 4 per feed, duplicates
-      removed and the publisher name stripped before scoring. Scored with FinBERT
-      (ProsusAI/finbert via the Hugging Face Inference API) when it is available, otherwise
-      with FinVADER: VADER with the SentiBigNomics and Henry financial word lists, which per
-      its authors scores better than VADER on Financial PhraseBank. FinBERT needs a Hugging
-      Face token with inference credits; without a working token FinVADER is what runs, and
-      the page names the model used. FinBERT is fine-tuned on sentences from financial news
-      (Financial PhraseBank); FinVADER uses finance word lists. Either way the score is the
-      tone of the wording, not a price direction.
+    - **Recent headlines**: from the GDELT Project's DOC 2.0 API (gdeltproject.org), which
+      allows any use with a citation and a link. One search over the last 7 days in
+      English-language sources (the commodity's own phrases: for gas "natural gas", LNG, TTF
+      and similar with a European place, for carbon "EU ETS", "carbon price" and similar),
+      then the headline filter below; at most 15 headlines and 3 per site, duplicates
+      removed. The page says how many of the headlines returned it kept. The time shown is when
+      GDELT first saw the article. Headlines are listed, not scored: a tone score of the
+      wording is not a price direction ("gas prices surge" reads as negative). Google News
+      and Bing News feeds are not used: their terms allow them only in a personal feed reader.
     - **Which headlines count**: a commodity keyword in the headline ("barrel" only as a price
       unit: "a barrel", "per barrel", "barrels a day"); for TTF an explicit natural-gas term
       (natural gas, LNG, TTF, gas storage, gas supply, Gazprom, Equinor and similar) or "gas"
@@ -74,10 +61,6 @@ with st.sidebar.expander("Methodology: Market page"):
       are not news (exchange product pages, bare report titles), and, except for WTI,
       US-domestic stories with no link to Europe. WTI is a NYMEX contract, so US inventory
       and production stories are kept for it.
-    - **Recent tone trend**: Google News (UK edition) headlines requested for the last 30
-      days, same filter, scored with FinVADER; the average is over all headlines, with the
-      daily count shown. Google News returns at most 100 headlines per query, so the page
-      states the dates the headlines actually cover.
     - **Statistical checks**: volatility above the 95th or below the 5th percentile of the
       last 750 trading days up to the end date (3 years; longer where stale prices of a
       suspension are excluded, shorter where the data start later, and the page then gives
@@ -94,13 +77,12 @@ with st.sidebar.expander("Methodology: Market page"):
       a sentence that asks the reader to watch whether a value moves past a level it is
       already past, when the level is written as a number as on this page (annualised or
       daily volatility, or a correlation with its sign, to the page's rounding, also at the
-      end of a sentence); other wordings are not caught. With an end date in the past it is
-      given no headlines or tone, because the page's headlines are today's, and no event
-      after that date.
+      end of a sentence); other wordings are not caught. It is given no headlines, and with an
+      end date in the past no event after that date.
     """)
 
 st.title("Market Intelligence")
-st.markdown(f"Country exposure, headline tone and statistical checks for **{selected_commodity}**")
+st.markdown(f"Country exposure, recent headlines and statistical checks for **{selected_commodity}**")
 
 core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, end_date)
 if core is None:
@@ -133,28 +115,6 @@ garch_returns = ref3y['rets']
 garch = common.fit_garch(garch_returns, garch_ref)
 garch_forecast_10d = garch['forecast_10d'] if garch is not None else None
 
-# ─── FinBERT via HuggingFace Inference API ───
-# Used by the country headlines and the headline tone section.
-_FINBERT_REASONS = {
-    401: "Hugging Face token missing or invalid",
-    402: "Hugging Face inference credits exhausted",
-    403: "Hugging Face token lacks the inference permission",
-    404: "model not served at this endpoint",
-    410: "model no longer served",
-    429: "Hugging Face rate limit reached",
-    503: "model still loading on Hugging Face",
-}
-
-
-def finbert_reason_for_status(status):
-    """Short reason for a failed FinBERT call, from the HTTP status only (never the error body)."""
-    if status in _FINBERT_REASONS:
-        return _FINBERT_REASONS[status]
-    if status >= 500:
-        return "Hugging Face service error"
-    return "Hugging Face request failed"
-
-
 # ─── Escaping headline text ───
 # Headlines are scraped text. Two dollar signs in one headline ("erase $1 trillion ... to $110")
 # are read as a math formula by both matplotlib and st.markdown, so "$" is escaped before display.
@@ -162,110 +122,6 @@ def md_text(s):
     """Headline text safe for st.markdown: "$" shown literally, no stray link brackets."""
     return (str(s).replace("\\", "\\\\").replace("$", "\\$")
             .replace("[", "\\[").replace("]", "\\]"))
-
-
-def mpl_text(s):
-    """Headline text safe for a matplotlib label: "$" shown literally."""
-    return str(s).replace("$", r"\$")
-
-
-@st.cache_data(ttl=600, show_spinner="Scoring headlines with FinBERT...")
-def finbert_analyze(texts):
-    """Score headlines with ProsusAI/finbert on the Hugging Face router.
-
-    Returns (scores, labels, ok, reason). When ok is False, reason is one short phrase on
-    why FinBERT was not used, taken from a fixed list by HTTP status (402 = inference
-    credits exhausted). The provider's error body is never shown. Results are cached for
-    10 minutes.
-    """
-    API_URL = "https://router.huggingface.co/hf-inference/models/ProsusAI/finbert"
-    hf_token = None
-    try:
-        hf_token = st.secrets.get("HF_TOKEN", None)
-    except Exception:
-        pass
-    if not hf_token:
-        hf_token = os.environ.get("HF_TOKEN", None)
-    if not hf_token:
-        # The router always answers 401 without a token, so don't call it.
-        return None, None, False, "no Hugging Face token set"
-    headers = {"Authorization": f"Bearer {hf_token}"}
-
-    def parse_results(results, n_texts):
-        scores, labels = [], []
-        if not isinstance(results, list):
-            return None, None
-        # The router returns one of three shapes: a list per headline ([[{..}x3], ...]),
-        # one dict per headline ([{..}, ...]), or, for a batch, a single outer list that
-        # holds the top label of every headline ([[{top1}, {top1}, ...]]). Unwrap the last.
-        if (n_texts > 1 and len(results) == 1 and isinstance(results[0], list)
-                and len(results[0]) == n_texts
-                and all(isinstance(x, dict) for x in results[0])):
-            results = results[0]
-        for item in results:
-            if isinstance(item, list):
-                best = max(item, key=lambda x: x['score'])
-            elif isinstance(item, dict) and 'label' in item:
-                best = item
-            else:
-                scores.append(0.0); labels.append('Neutral')
-                continue
-            lbl = best['label'].lower()
-            sc = best['score']
-            if lbl == 'negative':
-                scores.append(-sc); labels.append('Negative')
-            elif lbl == 'positive':
-                scores.append(sc); labels.append('Positive')
-            else:
-                scores.append(0.0); labels.append('Neutral')
-        if len(scores) == n_texts:
-            return scores, labels
-        return None, None
-
-    reason_for = finbert_reason_for_status
-
-    # 503 = model loading, 429 / 5xx = transient: retry. 401 / 403 / 404 / 410 will not
-    # change on retry, so stop at once and report them.
-    reason = "no attempt made"
-    for attempt in range(3):
-        try:
-            response = req.post(API_URL, headers=headers, json={"inputs": list(texts)}, timeout=60)
-        except Exception:
-            reason = "no response from Hugging Face"
-            if attempt < 2:
-                time.sleep(10)
-            continue
-        if response.status_code == 200:
-            try:
-                sc, lb = parse_results(response.json(), len(texts))
-            except Exception:
-                sc, lb = None, None
-            if sc is not None:
-                return sc, lb, True, ""
-            return None, None, False, "unexpected response from Hugging Face"
-        reason = reason_for(response.status_code)
-        if response.status_code == 503:
-            try:
-                wait_time = float(response.json().get('estimated_time', 20))
-            except Exception:
-                wait_time = 20
-            time.sleep(min(wait_time + 5, 45))
-            continue
-        if response.status_code == 429 or response.status_code >= 500:
-            time.sleep(5)
-            continue
-        break
-    return None, None, False, reason
-
-
-def finvader_score(text):
-    """FinVADER fallback: VADER + SentiBigNomics + Henry financial lexicons."""
-    try:
-        from finvader import finvader
-        return float(finvader(text, use_sentibignomics=True, use_henry=True, indicator='compound'))
-    except Exception:
-        sia = SentimentIntensityAnalyzer()
-        return sia.polarity_scores(text)['compound']
 
 
 # ─── Headline relevance ───
@@ -294,13 +150,6 @@ _EUROPE_OR_GLOBAL = _word_pattern([
 # US LNG exports are Europe's largest source of LNG, so they are kept even without "Europe".
 _LNG_EXPORT = (_word_pattern(["LNG"]),
                _word_pattern(["export", "exporter", "cargo", "cargoe", "shipment", "terminal"]))
-
-
-def headline_text(entry_title, source=""):
-    """The headline without the " - Publisher" suffix Google News appends."""
-    if source and entry_title.endswith(f" - {source}"):
-        return entry_title[:-len(source) - 3]
-    return entry_title
 
 
 def is_us_domestic(headline):
@@ -380,8 +229,27 @@ _STORAGE_SIGNAL = re.compile(r"(?<![A-Za-z])(?:storage|inventory|inventories|inj
                              r"|draws?|builds?)(?![A-Za-z])", re.I)
 
 
+# Equity-market stories that mention oil in passing ("Sharp drops for AI stocks overwhelm markets worldwide as oil
+# prices jump", "Sensex, Nifty extend losses as crude surges"), and fund or index stories ("Defiance Oil Enhanced
+# Options Income ETF to go ex-dividend"): the subject is a stock market or a fund, not the commodity.
+_EQUITY_MARKET = re.compile(r"\b(?:Wall Street|Nasdaq|S&P 500|Dow Jones|Big Tech|stock markets?|equity markets?"
+                            r"|Sensex|Nifty|FTSE|DAX|CAC 40|Hang Seng|Nikkei|bullion"
+                            r"|ETFs?|ex-dividend|dividend yield|options income"
+                            r"|(?:AI|tech|bank|chip) stocks)\b", re.I)
+
+
+# Index and equity moves ("European stocks edge lower as oil prices rise", "Indian markets snap a 1-week rally"):
+# the subject is the stock market. "gas stocks", "crude stocks" and "oil stocks" mean inventories, so a move right
+# after one of those words, or any storage signal in the headline, does not count.
+_EQUITY_MOVE = re.compile(r"(?<!\bgas )(?<!\bcrude )(?<!\boil )\b(?:stocks|equities|markets)\s+"
+                          r"(?:" + _SHARE_MOVE + r"|edge|edges|edged|snap|snaps|snapped|extend|extends|extended"
+                          r"|close|closes|closed|open|opens|opened|rally|rallies|rallied)\b", re.I)
+
+
 def is_stock_tip(headline):
-    if any(p.search(headline) for p in _STOCK_TIP):
+    if any(p.search(headline) for p in _STOCK_TIP) or _EQUITY_MARKET.search(headline):
+        return True
+    if _EQUITY_MOVE.search(headline) and not _STORAGE_SIGNAL.search(headline):
         return True
     return bool(_STOCKS_WORD.search(headline) and any(p.search(headline) for p in _PICK_SIGNAL)
                 and not _STORAGE_SIGNAL.search(headline))
@@ -441,42 +309,38 @@ IS_GAS = commodity['ticker'] == 'TTF=F'
 KEEP_US = commodity['ticker'] == 'CL=F'   # WTI: US-domestic stories are kept
 
 
-
-def published_at(entry):
-    """Publication time of a feed entry in UTC, or None when the feed gives none."""
-    t = entry.get('published_parsed') or entry.get('updated_parsed')
-    return pd.Timestamp(dt.datetime(*t[:6]), tz='UTC') if t else None
-
-
 def dedup_key(text):
-    """Headline reduced to lower-case words, so the same story from two feeds counts once."""
+    """Headline reduced to lower-case words, so the same story from two searches or sites counts once."""
     return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
 
 
-def tone_label(score):
-    if score > 0.05:
-        return 'Positive'
-    if score < -0.05:
-        return 'Negative'
-    return 'Neutral'
+# GDELT asks for a citation and a link wherever its data are used (news_data.py).
+GDELT_NOTE = ("Source: the GDELT Project (https://www.gdeltproject.org/), English-language sources; the time is "
+              "when GDELT first saw the article (UTC).")
 
 
-def score_headlines(texts):
-    """(scores, labels, model name, FinBERT ok, reason) for a list of headline texts.
-    FinBERT first, then FinVADER, then plain VADER."""
-    scores, labels, ok, reason = finbert_analyze(tuple(texts))
-    if ok:
-        return scores, labels, "FinBERT", True, ""
+@st.cache_data(ttl=7200, show_spinner="Fetching headlines from GDELT...")
+def gdelt_articles(query, days):
+    """news_data.fetch, cached for 2 hours. A NewsError is not cached, so the next run asks again."""
+    return news_data.fetch(query, days)
+
+
+def gdelt_try(query, days):
+    """(articles, "") or ([], the reason in words) when GDELT gives nothing back this time."""
     try:
-        from finvader import finvader as _fv
-        scores = [float(_fv(h, use_sentibignomics=True, use_henry=True, indicator='compound'))
-                  for h in texts]
-        model = "FinVADER"
-    except Exception:
-        sia = SentimentIntensityAnalyzer()
-        scores = [sia.polarity_scores(h)['compound'] for h in texts]
-        model = "VADER"
-    return scores, [tone_label(s) for s in scores], model, False, reason
+        return gdelt_articles(query, days), ""
+    except news_data.NewsError as e:
+        return [], str(e)
+
+
+def headline_list_md(rows):
+    """A markdown list: the headline linked to the article, then the site and the time GDELT saw it."""
+    out = []
+    for a in rows:
+        url = a['url'].replace('(', '%28').replace(')', '%29').replace(' ', '%20')
+        head = f"[{md_text(a['title'])}]({url})" if url.startswith('http') else md_text(a['title'])
+        out.append(f"- {head} · *{md_text(a['domain'])}, {a['seen']:%d %b %H:%M} UTC*")
+    return "\n".join(out)
 
 
 # ─── Section 1: European country exposure ───
@@ -737,292 +601,70 @@ else:
             st.caption(f"Eurostat publishes no {' or '.join(_missing)} for {selected_country} in "
                        f"{country_years[0]} to {country_years[-1]}, so no trend is drawn for it.")
 
-        # Per-country news tone: same models and caveats as the headline tone section below.
-        st.write(f"**{selected_country}: tone of recent energy headlines**")
+        # Per-country headlines: the same source and filters as the recent headlines section below.
+        st.write(f"**{selected_country}: recent energy headlines**")
         news_date_note()
-        _country_q = quote_plus(f"{selected_country} energy {commodity['news_term']}")
-        country_rss_url = f"https://news.google.com/rss/search?q={_country_q}+when:{NEWS_DAYS}d&{GN_EDITION}"
+        _c_arts, _c_err = gdelt_try(news_data.build_query(selected_country, "energy", commodity['news_term']),
+                                    NEWS_DAYS)
+        _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
+                                                            'fuel', 'electricity', 'pipeline', 'LNG',
+                                                            'emission', 'climate', 'price', 'supply',
+                                                            'tanker', 'refinery', 'fossil', 'renewable',
+                                                            'heating', 'Hormuz', 'sanction', 'ETS'])
         country_rows, _seen_c = [], set()
-        try:
-            country_feed = feedparser.parse(country_rss_url)
-            _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
-                                                                'fuel', 'electricity', 'pipeline', 'LNG',
-                                                                'emission', 'climate', 'price', 'supply',
-                                                                'tanker', 'refinery', 'fossil', 'renewable',
-                                                                'heating', 'Hormuz', 'sanction', 'ETS'])
-            for entry in country_feed.entries[:50]:
-                publisher = entry.get('source', {}).get('title', '')
-                # Google News appends " - Publisher": match and score the headline only, so an
-                # outlet name such as "Irish Times" neither counts as a mention nor adds tone.
-                headline = headline_text(entry.title, publisher)
-                if dedup_key(headline) in _seen_c:
-                    continue
-                if (_energy_re.search(headline) and mentions_country(headline, selected_country)
-                        and not is_non_news(headline) and not is_us_retail_fuel(headline)
-                        and not is_stock_tip(headline)):
-                    country_rows.append((headline, publisher))
-                    _seen_c.add(dedup_key(headline))
-                if len(country_rows) >= 5:
-                    break
-        except Exception:
-            pass
-
+        for _a in _c_arts:
+            _h, _k = _a['title'], dedup_key(_a['title'])
+            if not _k or _k in _seen_c:
+                continue
+            if (_energy_re.search(_h) and mentions_country(_h, selected_country)
+                    and not is_non_news(_h) and not is_us_retail_fuel(_h) and not is_stock_tip(_h)):
+                country_rows.append(_a)
+                _seen_c.add(_k)
+            if len(country_rows) >= 5:
+                break
         if country_rows:
-            c_texts = [h for h, _ in country_rows]
-            c_scores, _, c_model, _, _ = score_headlines(c_texts)
-            c_avg = float(np.mean(c_scores))
-            st.markdown(f"Average tone **{tone_label(c_avg).lower()} ({c_avg:+.3f})** over "
-                        f"{len(c_texts)} headlines from the last {NEWS_DAYS} days · {c_model}. "
-                        "Tone of the wording, not a price direction.")
-            for (h, pub), sc in zip(country_rows, c_scores):
-                st.markdown(f"**[{sc:+.3f}]** {md_text(h)}" + (f" · *{md_text(pub)}*" if pub else ""))
+            st.markdown(headline_list_md(country_rows))
+            st.caption(GDELT_NOTE)
+        elif _c_err:
+            st.info(f"No headlines this time: {_c_err}. The page asks again on the next run.")
         else:
             st.info(f"No energy headline from the last {NEWS_DAYS} days mentions {selected_country} by name or adjective.")
 
 
-# ─── Section 2: Headline tone ───
-st.subheader("Headline Tone")
-st.write(f"How positive or negative the wording of recent {selected_commodity} headlines is.")
+# ─── Section 2: Recent headlines ───
+st.subheader("Recent Headlines")
+st.write(f"{selected_commodity}-related headlines from the last {NEWS_DAYS} days, newest first. They are listed "
+         "for context and not scored: the tone of a headline's wording says little about the price.")
 news_date_note()
 
-_when = f"+when:{NEWS_DAYS}d"
-rss_feeds = {
-    "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "OilPrice": "https://oilprice.com/rss/main",
-    f"Google ({selected_commodity})": f"https://news.google.com/rss/search?q={commodity['rss_query']}{_when}&{GN_EDITION}",
-    "Google EU Energy": f"https://news.google.com/rss/search?q=European+energy+market{_when}&{GN_EDITION}",
-    "Google EU Carbon": f"https://news.google.com/rss/search?q=EU+carbon+ETS{_when}&{GN_EDITION}",
-}
-_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'}
-_cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=NEWS_DAYS)
-
-news_rows, _seen = [], set()
-for feed_name, url in rss_feeds.items():
-    try:
-        resp = req.get(url, headers=_HEADERS, timeout=15)
-        feed = feedparser.parse(resp.content)
-    except Exception:
-        try:
-            feed = feedparser.parse(url)
-        except Exception:
-            continue
-    count = 0
-    for entry in feed.entries[:100]:
-        if count >= PER_FEED_CAP:
-            break
-        try:
-            publisher = entry.get('source', {}).get('title', '')
-            # Score the headline only: the " - Publisher" suffix has a tone of its own.
-            text = headline_text(entry.title.strip(), publisher)
-            key = dedup_key(text)
-            if not key or key in _seen:
-                continue
-            pub = published_at(entry)
-            if pub is None or pub < _cutoff:
-                continue
-            # Same test for every feed: a commodity keyword in the headline, no US-domestic story (except WTI).
-            if not is_relevant(text, commodity_kw_re, gas=IS_GAS, keep_us=KEEP_US):
-                continue
-            news_rows.append({'Headline': text, 'Publisher': publisher or feed_name.split(' (')[0],
-                              'Feed': feed_name, 'Published (UTC)': pub.strftime('%Y-%m-%d %H:%M'),
-                              'Link': entry.get('link', '')})
-            _seen.add(key)
-            count += 1
-        except Exception:
-            continue
-
-# No placeholder headlines: if every feed fails, no tone is computed at all.
-is_live = bool(news_rows)
-if not is_live:
-    finbert_success, finbert_reason = False, "no headlines"
-    nlp_model_name = "none"
-    sent_df = pd.DataFrame(columns=['Headline', 'Publisher', 'Feed', 'Published (UTC)', 'Link', 'Score', 'Label'])
-    avg_score = None
-    st.info(f"No relevant headline from the last {NEWS_DAYS} days could be retrieved right now, so no tone "
-            "is shown. The page does not score placeholder text.")
-else:
-    sent_df = pd.DataFrame(news_rows)
-    _scores, _labels, nlp_model_name, finbert_success, finbert_reason = score_headlines(sent_df['Headline'].tolist())
-    sent_df['Score'], sent_df['Label'] = _scores, _labels
-    sent_df = sent_df.sort_values('Published (UTC)', ascending=False).reset_index(drop=True)
-    avg_score = float(sent_df['Score'].mean())
-    n_pos, n_neg, n_neut = ((sent_df['Label'] == lab).sum() for lab in ('Positive', 'Negative', 'Neutral'))
-
-    st.markdown(f"#### Average tone ({nlp_model_name}): {tone_label(avg_score)} ({avg_score:+.3f})"
-                + (f" · {len(sent_df)} headlines: too few to read as a trend" if len(sent_df) < 10 else ""))
-    st.caption("The score is the tone of the wording: FinBERT is fine-tuned on sentences from financial news "
-               "(Financial PhraseBank, where annotators judged news for a company's share price); FinVADER uses "
-               "finance word lists. It is not a price direction and not bullish or bearish: \"gas prices "
-               "surge\" can score negative although it describes a price rise. Between -0.05 and +0.05 is neutral.")
-
-    sc2, sc3, sc4 = st.columns(3)
-    sc2.metric("Positive wording", f"{n_pos}", help="The average above is a simple average over all headlines below.")
-    sc3.metric("Negative wording", f"{n_neg}")
-    sc4.metric("Neutral", f"{n_neut}")
-
-    _per_feed = sent_df['Feed'].value_counts()
-    st.caption(f"{len(sent_df)} headlines from the last {NEWS_DAYS} days, at most {PER_FEED_CAP} per feed, "
-               "duplicates across feeds removed: " + ", ".join(f"{k} {v}" for k, v in _per_feed.items())
-               + f" · Model: {nlp_model_name}")
-    if not finbert_success:
-        st.caption(f"Scored with {nlp_model_name} (FinBERT not available in this deployment).")
-
-    fig3, ax4 = plt.subplots(figsize=(12, max(3, len(sent_df) * 0.3)))
-    ax4.barh(range(len(sent_df)), sent_df['Score'], color=[TONE_COLORS[l] for l in sent_df['Label']], height=0.6)
-    ax4.set_yticks(range(len(sent_df)))
-    ax4.set_yticklabels([mpl_text(h[:60] + '...' if len(h) > 60 else h) for h in sent_df['Headline']],
-                        fontsize=7)
-    ax4.axvline(x=0, color='black', linewidth=0.5)
-    for x in (0.05, -0.05):
-        ax4.axvline(x=x, color='gray', linewidth=0.5, linestyle='--', alpha=0.5)
-    ax4.set_xlabel(f'Tone score ({nlp_model_name}), newest headline at the top')
-    ax4.set_title('Tone of each headline')
-    ax4.invert_yaxis()
-    plt.tight_layout()
-    st.pyplot(fig3)
-
-    top_pos = sent_df[sent_df['Score'] > 0.05].nlargest(3, 'Score')
-    top_neg = sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score')
-
-    def _show(rows):
-        for _, r in rows.iterrows():
-            head = f"[{md_text(r['Headline'])}]({r['Link']})" if r['Link'] else md_text(r['Headline'])
-            st.markdown(f"**[{r['Score']:+.3f}]** {head} · *{md_text(r['Publisher'])}, "
-                        f"{r['Published (UTC)'][:10]}*")
-    if not top_pos.empty:
-        st.write("**Most positive wording:**")
-        _show(top_pos)
-    if not top_neg.empty:
-        st.write("**Most negative wording:**")
-        _show(top_neg)
-    if top_pos.empty and top_neg.empty:
-        st.info("All current headlines score as neutral wording.")
-
-# ─── Section 2b: recent tone trend ───
-@st.cache_data(ttl=7200, show_spinner="Fetching recent news history...")
-def _trend_query(q, keywords, gas, keep_us):
-    """One Google News query for the last 30 days: (rows, meta). Rows are the headlines kept by the same
-    filter as the current headlines, publisher suffix removed, each scored with FinVADER, with their
-    de-duplication key. Google News returns at most GN_CAP entries per query, so meta gives how many it
-    returned and the date of its oldest entry (Berlin calendar day), where its coverage really starts.
-    Raises when Google News does not answer or returns nothing, so a failed query is not cached."""
-    feed = feedparser.parse(f"https://news.google.com/rss/search?q={q}+when:30d&{GN_EDITION}")
-    if getattr(feed, 'status', 200) != 200 or not feed.entries:
-        raise RuntimeError("no headlines from Google News")
-    keyword_re = _word_pattern(keywords)
-    entries = feed.entries[:GN_CAP]
-    pubs = [t for t in (published_at(e) for e in entries) if t is not None]
-    meta = dict(query=q.replace('+', ' '), n=len(entries), capped=len(feed.entries) >= GN_CAP, failed=False,
-                earliest=(min(pubs).tz_convert('Europe/Berlin').tz_localize(None).normalize() if pubs else None))
-    rows = []
-    for entry in entries:
-        source = entry.get('source', {}).get('title', '')
-        text = headline_text(entry.get('title', ''), source)
-        key = dedup_key(text)
-        pub = published_at(entry)
-        if not key or pub is None or not is_relevant(text, keyword_re, gas=gas, keep_us=keep_us):
-            continue
-        rows.append({'Date': pub.tz_convert('Europe/Berlin').tz_localize(None).normalize(), 'Headline': text,
-                     'Publisher': source, 'Score': finvader_score(text), 'key': key})
-    return rows, meta
-
-
-def get_sentiment_trend(rss_query, news_term, keywords, gas, keep_us):
-    """Headlines requested for the last 30 days from two Google News queries (_trend_query), de-duplicated
-    across the queries. Returns (one row per headline or None, one meta dict per query)."""
-    rows, seen, meta = [], set(), []
-    for q in (rss_query, f"European+energy+{news_term}"):
-        try:
-            q_rows, q_meta = _trend_query(q, keywords, gas, keep_us)
-        except Exception:
-            meta.append(dict(query=q.replace('+', ' '), n=0, capped=False, failed=True, earliest=None))
-            continue
-        meta.append(q_meta)
-        for r in q_rows:
-            if r['key'] not in seen:
-                seen.add(r['key'])
-                rows.append({k: v for k, v in r.items() if k != 'key'})
-    if not rows:
-        return None, meta
-    return pd.DataFrame(rows).sort_values('Date').reset_index(drop=True), meta
-
-
-trend_hl, trend_meta = get_sentiment_trend(commodity['rss_query'], commodity['news_term'],
-                                           tuple(commodity['keywords']), IS_GAS, KEEP_US)
-avg_30d = None
-trend_label = "recent"     # "N-day", from the dates the headlines actually cover
 _filter_note = ("US stories are kept for WTI, and the filter does not require a European subject" if KEEP_US else
                 "the filter drops US domestic stories; it does not require a European subject")
-today_ts = pd.Timestamp.now(tz='Europe/Berlin').tz_localize(None).normalize()   # Berlin calendar days
+_arts, _news_err = gdelt_try(news_data.gdelt_query(commodity['news_query']), NEWS_DAYS)
+# Newest first from GDELT; the caps keep one site from filling the list.
+news_rows, _seen, _per_site = [], set(), {}
+for _a in _arts:
+    _k = dedup_key(_a['title'])
+    if not _k or _k in _seen or _per_site.get(_a['domain'], 0) >= PER_SITE_CAP:
+        continue
+    # Same test as the country headlines: a commodity keyword in it, no US-domestic story (except WTI).
+    if not is_relevant(_a['title'], commodity_kw_re, gas=IS_GAS, keep_us=KEEP_US):
+        continue
+    _seen.add(_k)
+    _per_site[_a['domain']] = _per_site.get(_a['domain'], 0) + 1
+    news_rows.append(_a)
+    if len(news_rows) >= MAX_HEADLINES:
+        break
 
-if trend_hl is not None and trend_hl['Date'].nunique() > 3:
-    daily = trend_hl.groupby('Date')['Score'].agg(['mean', 'size'])
-    avg_30d = float(trend_hl['Score'].mean())   # every headline counts once
-    _first, _last = trend_hl['Date'].min(), trend_hl['Date'].max()
-    # Calendar days from the oldest headline to today, at most 30: the query asks for the last 30 days
-    # (when:30d, 30 x 24 hours), which touches 31 Berlin calendar days when both ends are counted.
-    # One end date for the heading, the text and the tile's help: today (Berlin), or the newest headline if later.
-    _trend_end = max(today_ts, _last)
-    _n_days = min((_trend_end - _first).days + 1, 30)
-    trend_label = f"{_n_days}-day"
-    _capped = [m for m in trend_meta if m['capped']]
-    _starts = [m['earliest'] for m in trend_meta if m['earliest'] is not None]
-    _reach = "; ".join(f"\"{m['query']}\": " + ("no headlines returned by Google News this time" if m['failed'] else
-                                                  f"{m['n']} headlines"
-                                                  + (f", oldest {m['earliest']:%d %b}" if m['earliest'] is not None else "")
-                                                  + (" (limit reached)" if m['capped'] else ""))
-                       for m in trend_meta)
-    st.subheader(f"Headline Tone, Last {_n_days} Days")
-    news_date_note()
-    st.write(f"Daily tone of {selected_commodity}-related energy headlines from {_first:%d %b} to "
-             f"{_trend_end:%d %b %Y} ({_filter_note}). Google News was asked for the last 30 days but returns at "
-             f"most {GN_CAP} headlines per query, so the headlines reach back only to {_first:%d %b}."
-             if _capped and _n_days < 30 else
-             f"Daily tone of {selected_commodity}-related energy headlines from {_first:%d %b} to "
-             f"{_trend_end:%d %b %Y} ({_filter_note}).")
-    tc1, tc2, tc3 = st.columns(3)
-    if today_ts in daily.index:
-        tc1.metric("Today's average tone (FinVADER)", f"{daily.loc[today_ts, 'mean']:+.3f}")
-        tc2.metric("Today's headlines", f"{int(daily.loc[today_ts, 'size'])}")
-    else:
-        tc1.metric("Today's average tone (FinVADER)", "N/A")
-        tc2.metric("Today's headlines", "0")
-    tc3.metric(f"{_n_days}-day average tone (FinVADER)", f"{avg_30d:+.3f}",
-               help=f"Average over all {len(trend_hl)} headlines from {_first:%d %b} to {_trend_end:%d %b %Y}, not "
-                    "an average of daily averages.")
-
-    fig_trend, (ax_trend, ax_cnt) = plt.subplots(2, 1, figsize=(14, 5), sharex=True,
-                                                 gridspec_kw={'height_ratios': [3, 1]})
-    ax_trend.bar(daily.index, daily['mean'], color=[TONE_COLORS[tone_label(s)] for s in daily['mean']],
-                 width=0.8)
-    ax_trend.axhline(y=0, color='black', linewidth=0.5)
-    ax_trend.axhline(y=avg_30d, color='navy', linewidth=1, linestyle='--', alpha=0.6,
-                     label=f'{_n_days}-day average over all headlines: {avg_30d:+.3f}')
-    ax_trend.set_ylabel('Daily average tone')
-    ax_trend.set_title(f'{selected_commodity}: headline tone per day (FinVADER)')
-    ax_trend.legend(fontsize=8)
-    ax_cnt.bar(daily.index, daily['size'], color='gray', width=0.8)
-    ax_cnt.set_ylabel('Headlines')
-    ax_cnt.set_title(f'Headlines per day (at most {GN_CAP} per Google News query, so the count is not news volume)',
-                     fontsize=9)
-    ax_cnt.tick_params(axis='x', rotation=45)
-    plt.tight_layout()
-    st.pyplot(fig_trend)
-
-    st.caption(f"{len(trend_hl)} distinct headlines over {len(daily)} days. Queries: {_reach}. "
-               + (f"Because a query stops at {GN_CAP} headlines, the daily count reflects that cap, not only how "
-                  "much news there was. " if _capped else "")
-               + (f"Days before {max(_starts):%d %b} are covered by one query only. "
-                  if len(set(_starts)) > 1 else "")
-               + ("One query returned nothing this time, so the trend rests on the other; the page tries again "
-                  "on the next run. " if any(m['failed'] for m in trend_meta) else "")
-               + "A day with one headline is as noisy as one headline: read the bars with the count below them. "
-               "Scored with FinVADER only; the current reading above may come from FinBERT, which uses a "
-               "different scale, so the two are not compared.")
+if news_rows:
+    st.markdown(headline_list_md(news_rows))
+    st.caption(f"{len(news_rows)} of the {len(_arts)} headlines GDELT returned for this search, at most "
+               f"{MAX_HEADLINES} and at most {PER_SITE_CAP} per site, duplicates removed ({_filter_note}). "
+               + GDELT_NOTE)
+elif _news_err:
+    st.info(f"No headlines this time: {_news_err}. The page asks again on the next run.")
 else:
-    st.subheader("Headline Tone, Recent Days")
-    news_date_note()
-    st.info("Not enough headlines from the last 30 days to draw a trend.")
+    st.info(f"GDELT returned {len(_arts)} headlines for this search, none of which passed the filter "
+            f"({_filter_note}).")
 
 
 # ─── Section 3: Statistical checks ───
@@ -1634,13 +1276,11 @@ def drop_crossed_watch_sentences(text, levels):
 @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
                             var_95_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
-                            avg_score_v, score_model, avg_30d_v, anomaly_types_str,
-                            top_neg_str, date_str, levels_str, tail_fact_str,
+                            anomaly_types_str, date_str, levels_str, tail_fact_str,
                             past_breaches_str="", garch_fit_str="", prewar_ref="the pre-war level (Oct to Dec 2025)",
-                            trend_label="30-day", check_window_str="the last 3 years", ref_short_str="3-year",
-                            news_later=False, last_value_str=""):
-    """`news_later` is True when the data date is in the past: the headlines are then from a later date, so the
-    prompt gives no tone, no trend average and no headlines, and forbids mentioning news. `prewar_ref` names the
+                            check_window_str="the last 3 years", ref_short_str="3-year", last_value_str=""):
+    """The prompt has no headlines: the page lists them unscored, and unverified text would only invite the model
+    to present a headline as fact or read a direction into it. `prewar_ref` names the
     fixed reference quarter as common.vol_summary does for the AI input ('' when there is no multiple, "the Oct
     to Dec 2025 level" before the strikes of 28 Feb 2026), so the prompt names no event after the data date.
     `latest_vol_v` is None when there is no 30-day volatility on the data date (the summary says why)."""
@@ -1670,18 +1310,6 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
     past_line = past_breaches_str if past_breaches_str else "None"
 
-    headline_line = top_neg_str if top_neg_str else "None retrieved"
-    sentiment_30d_line = (f"{avg_30d_v:+.3f}" if avg_30d_v is not None else "N/A")
-    # Whether the two tone readings come from different models: the trend is always FinVADER.
-    if score_model == "FinBERT":
-        tone_models = ("- The current reading (FinBERT) and the trend average (FinVADER) come from DIFFERENT models "
-                       "and are NOT on a common scale. Never compare them numerically and never describe a move "
-                       "from one to the other.")
-    else:
-        tone_models = (f"- The current reading and the trend average are both scored with {score_model}, but over "
-                       "different headlines (at most twenty from several feeds over the last 7 days against Google "
-                       "News headlines over a longer period). A difference between them is not a trend: do not "
-                       "describe a move from one to the other.")
     if latest_vol_v is None:
         vol_refs = ("- There is no current 30-day volatility for this date; the volatility summary says why. Do not "
                     "describe or estimate the level of volatility, and do not mention a percentile or a multiple of it.")
@@ -1701,28 +1329,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
                 if latest_vol_v is not None else
                 f"not available on the data date (see the volatility summary); average over the selected period "
                 f"{common.fmt_vol(avg_vol_v)}")
-    sentiment_now_line = (f"{avg_score_v:+.3f} ({score_model})" if avg_score_v is not None
-                          else "N/A (news feeds unreachable, no tone computed)")
     tail_line = tail_fact_str if tail_fact_str else "None"
-    if news_later:
-        # Today's headlines under an earlier data date would be read as news of that date. Their date is not
-        # given either: the input names no date after the data date.
-        _not_given = "not given: the headlines are from a later date, not from the data date"
-        tone_now_line = f"- Headline tone: {_not_given}"
-        headline_line = _not_given
-        tone_section = ("Headline tone - not given\n- The page's headlines are from a later date than the data date, "
-                        "so no tone, tone average or headline is given.")
-        news_rule = ("\n- The data date is in the past and the headlines are from a later date: do not mention news, "
-                     "headlines, headline tone or sentiment anywhere in your answer.")
-    else:
-        tone_now_line = (f"- Headline tone now: {sentiment_now_line} | {trend_label} average (FinVADER): "
-                         f"{sentiment_30d_line}")
-        tone_section = f"""Headline tone - weak evidence, handle with care
-- Computed from at most twenty scraped headlines of the last 7 days, by FinBERT (fine-tuned on sentences from financial news) or FinVADER (finance word lists). It is the tone of the wording, NOT a price direction: a headline about a price surge can score negative.
-{tone_models}
-- Anything between -0.05 and +0.05 is NEUTRAL. Do not call it mildly positive or mildly negative."""
-        news_rule = ""
-
     prompt = f"""You are a senior risk analyst on a European energy trading desk, writing the short risk comment on {commodity_name} for the date shown below.
 
 HOW TO READ THE INPUTS
@@ -1742,11 +1349,8 @@ Volatility summary
 VaR
 - VaR 95% is the 5th percentile of daily returns over the last 250 trading days: a loss threshold, given as a negative number.
 
-{tone_section}
-
-Checks and headlines
+Checks
 - The latest-day checks field lists only the NAMES of the statistical checks firing on the latest day (percentiles of {check_window_str}). The past-breaches field lists events that are over; mention one only with its date, as past. Their thresholds are in the LEVELS list; do not invent other numbers.
-- The headline field is raw scraped text, truncated and unverified.
 
 MARKET DATA AS OF {date_str}
 - Last value: {last_value_str or 'a close (settlement or exchange close).'}
@@ -1754,11 +1358,9 @@ MARKET DATA AS OF {date_str}
 - 30-day rolling volatility: {vol_line}
 - VaR 95%, 1-day (historical, last 250 trading days): {var_95_v:.2f}%
 - {garch_line}
-{tone_now_line}
 - Checks firing on the latest day: {anomaly_line}
 - Past breaches in the last 252 trading days up to the data date (with dates): {past_line}
 - Daily-loss check and contract rolls: {tail_line}
-- Unverified headlines: {headline_line}
 
 LEVELS AND WHERE EACH CURRENT VALUE IS (already computed; do not recompute or contradict)
 {levels_str}
@@ -1772,14 +1374,11 @@ Write EXACTLY 3 sentences. Keep the whole comment under 100 words. No headers, n
 HARD RULES
 - Never write "watch whether X pushes above", "pushes through", "breaks", "crosses" or "rises above" a level that X is already ABOVE, and never write "falls below" or "drops below" a level that X is already BELOW. Check the LEVELS list before naming any level.
 - Compare a value only with a level listed for that value.
-- If the headline field says feeds were unreachable, treat BOTH tone readings as meaningless: do not mention tone or news anywhere in your answer, and build all three sentences from the volatility, VaR, GARCH and check data alone.{news_rule}
-- Never infer complacency, fear or a price direction from headline tone.
 - GARCH is a model fitted on past daily returns. Never call it implied, options-implied or option-based, and never say it is or is not a "model artifact".
 - A check that last fired on an earlier date is a past event: name its date if you mention it, and never present it as a current signal.
 - Give no trading, hedging or position-sizing advice.
-- If a field reads N/A, None or None retrieved, pass over it in silence. Do not comment on its absence.
+- If a field reads N/A or None, pass over it in silence. Do not comment on its absence.
 - Never attribute a claim, forecast or warning to a named bank, agency, institution or analyst.
-- Never present a headline as established fact.
 - Do not assert a causal chain the data above cannot support. If a link is speculative, mark it as speculative.
 - Your only raw input is a series of daily prices: closes, except that the last value may not be a close when the "Last value" line says so; then never call the latest day's move a close or a settlement. You have no term structure, no futures curve, no inventories, no storage, no positioning, no flows and no fundamentals. Never write about contango, backwardation, spreads, curve shape, stockpiles, supply, demand or hedging costs, and do not discuss roll risk in general. One exception: if the "Daily-loss check and contract rolls" field states that a day was a contract roll day and was excluded, or may be partly a roll, you may state that fact as given; never use an excluded roll day as evidence of tail risk.
 - Do not introduce seasonal, geopolitical or fundamental drivers that are not present in the inputs above.
@@ -1817,11 +1416,6 @@ past_breaches_for_llm = "; ".join(a['past'] for a in anomalies if a.get('past'))
 # The same vol_summary as the volatility line in the checks section (past_end, roll check included), in the
 # wording it gives for the AI input: no event after the data date (common.vol_summary).
 vol_summary_for_llm = _vs['ai']
-if not is_live:
-    top_neg_for_llm = "none (news feeds unreachable, no tone computed)"
-else:
-    top_neg_for_llm = "; ".join(r['Headline'][:80] for _, r in
-                                sent_df[sent_df['Score'] < -0.05].nsmallest(3, 'Score').iterrows())
 
 today_date_str = df_analysis.index[-1].strftime('%Y-%m-%d')
 
@@ -1862,21 +1456,15 @@ narrative, error = generate_risk_narrative(
     garch_10d=garch_forecast_10d,
     garch_ref_v=float(garch_ref) if garch is not None else None,
     garch_ref_label=garch_ref_name,
-    avg_score_v=None if _past_end else avg_score,
-    score_model=nlp_model_name,
-    avg_30d_v=None if _past_end else avg_30d,
     anomaly_types_str=anomaly_types_for_llm,
     past_breaches_str=past_breaches_for_llm,
-    top_neg_str="" if _past_end else top_neg_for_llm,
     date_str=today_date_str,
     levels_str=levels_for_llm,
     tail_fact_str=tail_roll_fact,
     garch_fit_str=garch_fit_note,
     prewar_ref=_vs['prewar_ai'],
-    trend_label=trend_label,
     check_window_str=ref_name,
     ref_short_str=ref_short,
-    news_later=_past_end,
     last_value_str=common.last_value_note(commodity['ticker'], end_date, _asof).strip(),
 )
 
@@ -1884,8 +1472,8 @@ narrative_dropped = []
 if narrative:
     narrative, narrative_dropped = drop_crossed_watch_sentences(narrative, level_list)
 
-_ai_scope = ("It only summarises the statistics on this page (volatility, VaR, GARCH, headline tone "
-             "and the checks above); it does not see fundamentals such as storage, flows, positioning or "
+_ai_scope = ("It only summarises the statistics on this page (volatility, VaR, GARCH "
+             "and the checks above; not the headlines); it does not see fundamentals such as storage, flows, positioning or "
              "the forward curve.")
 _dropped_note = (f" An automatic check removed {len(narrative_dropped)} sentence(s) that asked the reader to "
                  "watch for a level the data had already passed." if narrative_dropped else "")
@@ -1925,11 +1513,13 @@ st.download_button(
     mime="text/csv"
 )
 
-if is_live:
+if news_rows:
     st.download_button(
-        label="Download Headline Tone Data (CSV)",
-        data=sent_df.to_csv(index=False),
-        file_name="headline_tone.csv",
+        label="Download Recent Headlines (CSV)",
+        data=pd.DataFrame([{'Headline': a['title'], 'Site': a['domain'], 'Source country (GDELT)': a['country'],
+                            'Seen by GDELT (UTC)': f"{a['seen']:%Y-%m-%d %H:%M}", 'Link': a['url']}
+                           for a in news_rows]).to_csv(index=False),
+        file_name="recent_headlines.csv",
         mime="text/csv"
     )
 

@@ -3,11 +3,8 @@ yfinance
 pandas
 numpy
 matplotlib
-nltk
-feedparser
 arch
 requests
-finvader
 scipy
 openpyxl
 holidays==0.107

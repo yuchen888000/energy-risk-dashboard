@@ -62,6 +62,17 @@ STOCK_TIP_CASES = [
     ("Germany's 5 largest gas stocks sites near 80% full", False),
     ("Top 5 gas stocks to buy as Europe heads into winter", True),
     ("Top 10 gas stocks: storage injections slow as sites near full", False),
+    # equity-market stories that mention oil in passing (GDELT, 2026-10-24)
+    ("Sharp drops for AI stocks overwhelm markets worldwide as oil prices jump", True),
+    ("Wall Street loses ground under pressure from rising oil prices, more swings for Big Tech stocks", True),
+    ("Oil prices jump as Hormuz traffic slows", False),
+    ("Sensex, Nifty extend losses as crude surges to USD 114, all sectors close in red", True),
+    ("Bullion extends losing streak to third day as crude tops $115 per barrel", True),
+    ("Defiance Oil Enhanced Options Income ETF (USOY) To Go Ex-Dividend on October 22nd", True),
+    ("Indian markets snap 1-week rally following surge in crude, FII outflows", True),
+    ("Global Market: European stocks edge lower as Kering slumps, oil prices rise", True),
+    ("European gas stocks fall to a five-year low for the time of year", False),
+    ("Gas storage stocks close the week 2% lower", False),
 ]
 
 

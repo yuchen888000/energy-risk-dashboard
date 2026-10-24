@@ -19,8 +19,9 @@ from arch.univariate import GARCH, StudentsT, ZeroMean
 from scipy.stats import chi2
 
 # ─── Carbon Benchmark Resolution ───
-# KEUA (KraneShares European Carbon Allowance ETF) was liquidated on 20 March 2026,
-# so the original EUA proxy no longer returns data. We probe a cascade of candidates
+# KEUA (KraneShares European Carbon Allowance ETF) stopped trading on NYSE Arca at the close of 13 March 2026 and
+# was liquidated on 20 March 2026 (OCC information memo #58438, 27 Feb 2026), so the original EUA proxy no longer
+# returns data. We probe a cascade of candidates
 # at runtime and label the dashboard from whichever one actually resolves, so the
 # stated benchmark can never drift from the series being plotted.
 CARBON_CANDIDATES = [
@@ -88,8 +89,10 @@ def build_commodities(carbon):
             "unit": "€/MWh",
             "color": "steelblue",
             "keywords": ['gas', 'TTF', 'LNG', 'pipeline', 'natural gas', 'methane'],
-            "rss_query": "natural+gas+Europe+price",
-            "news_term": "gas",   # one word for country and 30-day news queries
+            # GDELT search for the headline list: any of these phrases, which the page's own keyword filter then
+            # narrows (news_data.gdelt_query). Single words under three letters are rejected by GDELT.
+            "news_query": '("natural gas" OR LNG OR "gas price" OR "gas storage" OR TTF) (Europe OR European OR Dutch OR Germany OR Britain)',
+            "news_term": "gas",   # one word for the per-country search
         },
         "WTI Crude Oil": {
             "ticker": "CL=F",
@@ -98,24 +101,24 @@ def build_commodities(carbon):
             # "barrel" alone also matches stories such as "Tank barrel production returns to UK", so it counts
             # only as an oil-price unit ("a barrel", "per barrel", "barrels a day").
             "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'refinery'] + OIL_BARREL_TERMS,
-            "rss_query": "crude+oil+Europe+price",
-            "news_term": "oil",   # one word for country and 30-day news queries
+            "news_query": '("crude oil" OR "oil price" OR WTI OR "oil market" OR OPEC)',
+            "news_term": "oil",
         },
         "Brent Crude Oil": {
             "ticker": "BZ=F",
             "unit": "$/barrel",
             "color": "darkred",
             "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'North Sea'] + OIL_BARREL_TERMS,
-            "rss_query": "brent+oil+Europe+price",
-            "news_term": "oil",   # one word for country and 30-day news queries
+            "news_query": '(Brent OR "crude oil" OR "oil price" OR "oil market" OR OPEC)',
+            "news_term": "oil",
         },
         carbon["name"]: {
             "ticker": carbon["ticker"],
             "unit": carbon["unit"],
             "color": "seagreen",
             "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
-            "rss_query": "EU+carbon+ETS+emission+price",
-            "news_term": "carbon",   # one word for country and 30-day news queries
+            "news_query": '("EU ETS" OR "carbon price" OR "carbon market" OR "emissions trading" OR "carbon allowance")',
+            "news_term": "carbon",
         },
     }
 

@@ -64,7 +64,7 @@ with st.sidebar:
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"
-                   "Python · Streamlit · yfinance · arch (GARCH) · FinBERT · FinVADER · "
+                   "Python · Streamlit · yfinance · arch (GARCH) · GDELT · "
                    "Anthropic Claude API · ENTSO-E · Energy-Charts · EEX · Eurostat")
 
 pg.run()
