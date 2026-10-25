@@ -866,8 +866,8 @@ def roll_sentence(ticker, rc, window_returns, level_name="the pre-war level"):
             # The month's roll is identified and no other expiry by the exchange rule falls in these days:
             # state the fact rather than leave an open doubt.
             parts.append(f"For {_day_ranges(rc['unknown'], idx)} the roll check cannot compare the close with the "
-                         "expiring contract, which Yahoo Finance no longer lists; no other expiry by the exchange "
-                         "rule falls on those days.")
+                         "expiring contract, which Yahoo Finance no longer lists; by the exchange rule the only "
+                         "switch due in or just after those days is the roll identified above.")
         else:
             parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
                          "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
@@ -907,7 +907,7 @@ def roll_line(ticker, rc):
     by_exp = {}
     for d, (m, exp) in sorted(cand.items()):
         by_exp.setdefault(exp, []).append(d)
-    likely = ["; ".join(" or ".join(f"{d:%d %b %Y}" for d in ds) for ds in by_exp.values())] if by_exp else []
+    likely = [" or ".join(f"{d:%d %b %Y}" for d in ds) for ds in by_exp.values()]
     out = ""
     if bits:
         out = (("Contract roll days in the 30-day window: " if len(bits) > 1 else
@@ -916,9 +916,16 @@ def roll_line(ticker, rc):
             out += (f". With the new contract's own return on {'that day' if len(bits) == 1 else 'those days'}, the "
                     f"30-day volatility is {fmt_vol(rc['adjusted_vol'])}")
     if likely:
-        out += (("; " if out else "") + f"a roll on {likely[0]} is likely by the exchange rule but not identified"
-                + (", so the adjusted figure still contains it" if bits and rc.get('adjusted_vol') is not None
-                   else ", so it is not adjusted"))
+        # One likely roll: "a roll on 22 Sep or 23 Sep 2026 is likely ..."; two expiries in the window:
+        # "rolls on 20 Mar or 23 Mar 2020 and on 22 Apr 2020 are likely ...".
+        _one = len(likely) == 1
+        _adj = bits and rc.get('adjusted_vol') is not None
+        out += (("; " if out else "")
+                + (f"a roll on {likely[0]} is likely" if _one else
+                   "rolls on " + " and on ".join(likely) + " are likely")
+                + " by the exchange rule but not identified"
+                + ((", so the adjusted figure still contains " + ("it" if _one else "them")) if _adj
+                   else (", so it is not adjusted" if _one else ", so they are not adjusted")))
     return (out[0].upper() + out[1:] + ".") if out else ""
 
 
@@ -1003,10 +1010,12 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
                      if with_roll else ""),
                headline=f"{lead}: {vol_now * ANNUAL:.0f}% annualised ({vol_now:.2f}% daily)")
     if ctx is None:
-        out.update(headline2="", detail="", ai=out['headline'], prewar_ai="", level_name="the pre-war level")
+        out.update(headline2="", detail="", ai=out['headline'], prewar_ai="", level_name="the pre-war level",
+                   has_multiple=False)
         return out
     before_strikes = as_of < _STRIKES
     r = ctx['prewar_ratio']
+    out['has_multiple'] = r is not None
     # Before the strikes the page, like the AI input, names the quarter by its dates, not as "pre-war" (a reader of
     # a date in 2025 or earlier would otherwise read about an event that had not happened).
     level = level_ai = ("its Oct to Dec 2025 level" if before_strikes else "its pre-war level")
@@ -1059,7 +1068,7 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
     elif as_of >= pd.Timestamp("2021-01-01"):
         events.append(f"the 2021-22 crisis up to {as_of:%b %Y}")
     if as_of >= _WAR_START:
-        events.append("the 2026 war")
+        events.append("the 2026 Iran war")
     # Whose figure the percentile ranks: with a past end date the span already names the date; otherwise the
     # latest figure is today's only when it is of today's date.
     today = pd.Timestamp(berlin_today() if today is None else today).normalize()

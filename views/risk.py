@@ -85,7 +85,7 @@ with st.sidebar.expander("Methodology: Risk page"):
     """)
 
 st.title("Market Risk")
-st.markdown(f"Analyzing **{selected_commodity}** vs {compare_label}")
+st.markdown(f"Analysing **{selected_commodity}** vs {compare_label}")
 if ctx.is_carbon:
     st.caption(f"**{CARBON_LABEL}**: every return, volatility and VaR on this page is for this exchange-traded "
                f"product's USD price, not for EUA futures in €/tCO2. {CARBON_NOTE}")
@@ -157,9 +157,11 @@ _data_full = (f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
               # Thursday) may not yet be the settlement (common.futures_row_state, the same rule as the curve).
               + _last_note
               + _cmp_value_note
-              + (f" The volatility, percentile, multiple of {_vs.get('level_name', 'the pre-war level')}, VaR and "
-                 "the roll check" if commodity['ticker'] in common.CURVE_ROOTS else
-                 f" The volatility, percentile, multiple of {_vs.get('level_name', 'the pre-war level')} and VaR")
+              # Only the figures the page shows: no multiple when there is no reference quarter yet.
+              + (lambda _f: " The " + ", ".join(_f[:-1]) + " and " + _f[-1])(
+                  ["volatility", "percentile"]
+                  + ([f"multiple of {_vs.get('level_name', 'the pre-war level')}"] if _vs.get('has_multiple') else [])
+                  + ["VaR"] + (["the roll check"] if commodity['ticker'] in common.CURVE_ROOTS else []))
               + " all come from one download of the series, computed together.")
 # On the page: the dates, what kind of price the last one is (in a few words; the full sentence is in the details)
 # and a late TTF row, which changes what the latest figures cover. Definitions and the roll check are folded.
@@ -222,7 +224,7 @@ macro_events = {
     "2023-04-18": "EP adopts ETS reform incl. ETS 2",
     "2024-01-01": "EU ETS extended to shipping",
     "2026-01-01": "CBAM definitive period starts",
-    "2026-02-28": "US-Israel strikes on Iran",
+    "2026-02-28": "US-Israeli strikes on Iran",
     "2026-03-02": "Qatar halts LNG; IRGC official: Hormuz closed",
     "2028-01-01": "EU ETS 2 starts (postponed)",
 }
@@ -238,15 +240,19 @@ ax2 = ax.twinx()
 ax2.plot(_cmp_line.index, _cmp_line, color='gray',
          label=compare_label, linewidth=1.2, alpha=0.6)
 
-_prev_event, _flip = None, False
+_prev_event, _flip, _low = None, False, False
+_y0, _y1 = ax.get_ylim()
 for date_str, label in macro_events.items():
     event_date = pd.to_datetime(date_str)
     if df_analysis.index.min() <= event_date <= df_analysis.index.max():
-        # Two events a few days apart: put the labels on opposite sides of the lines.
-        _flip = (not _flip) if (_prev_event is not None and (event_date - _prev_event).days < 30) else False
+        # Events close together: alternate the labels between the top and the bottom of the chart (within six
+        # months) and between the two sides of the line (within a month), so the rotated texts do not overlap.
+        _near = _prev_event is not None and (event_date - _prev_event).days < 180
+        _low = (not _low) if _near else False
+        _flip = (not _flip) if (_near and (event_date - _prev_event).days < 30) else False
         ax.axvline(x=event_date, color='gray', linestyle='--', alpha=0.4)
-        ax.text(event_date, ax.get_ylim()[1] * 0.9, label, rotation=90, fontsize=7, color='gray',
-                va='top', ha='left' if _flip else 'right')
+        ax.text(event_date, _y0 + (_y1 - _y0) * (0.03 if _low else 0.97), label, rotation=90, fontsize=7,
+                color='gray', va='bottom' if _low else 'top', ha='left' if _flip else 'right')
         _prev_event = event_date
 
 ax.set_ylabel(f'{selected_commodity} ({commodity["unit"]})', color=commodity['color'])
@@ -438,7 +444,9 @@ else:
 
         with st.expander("Contracts used"):
             st.dataframe(curve.assign(Delivery=curve['Delivery'].map(lambda d: f"{d:%b %Y}"),
-                                      **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')}),
+                                      Price=curve['Price'].map(lambda v: f"{v:.2f}"),
+                                      **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')})
+                         .rename(columns={'Price': f'Price ({curve_unit})'}),
                          width="stretch", hide_index=True)
         if _past_end:
             st.caption(f"The curve is today's, not as of the end date ({end_date:%d %b %Y}).")
@@ -701,8 +709,8 @@ else:
 
 # ─── Section 4b: GARCH ───
 st.subheader("GARCH Volatility Forecast")
-st.write(f"Forward-looking volatility prediction for {selected_commodity} using GARCH(1,1) "
-         "with Student-t shocks (fat tails)")
+st.write(f"GARCH(1,1) volatility forecast for {selected_commodity}, with Student-t shocks (fat tails), fitted on "
+         "past daily returns.")
 
 garch = common.fit_garch(returns_clean, avg_vol)
 if garch is not None:
@@ -730,8 +738,14 @@ if garch is not None:
     # above a long-run level that is lower, and then the drift is not the whole story).
     if _lr is not None and abs(_d10 / current_cond_vol - 1) >= 0.05 and (_lr > current_cond_vol) == _up:
         _fit_from, _fit_to = returns_clean.index.min(), returns_clean.index.max()
-        _crisis = (", which includes the 2021-22 gas crisis" if _fit_from <= pd.Timestamp("2022-06-30")
-                   and _fit_to >= pd.Timestamp("2022-12-31") else "")
+        # The same event names as the volatility heading (common.vol_summary): the 2020 crash only for oil.
+        _ev = []
+        if commodity['ticker'] in common._OIL_TICKERS and _fit_from <= pd.Timestamp("2020-03-31") \
+                and _fit_to >= pd.Timestamp("2020-04-30"):
+            _ev.append("the 2020 crash")
+        if _fit_from <= pd.Timestamp("2022-06-30") and _fit_to >= pd.Timestamp("2022-12-31"):
+            _ev.append("the 2021-22 crisis")
+        _crisis = (", which includes " + " and ".join(_ev)) if _ev else ""
         st.caption(f"The forecast {'rises' if _up else 'falls'} from {common.fmt_vol(current_cond_vol)} to "
                    f"{common.fmt_vol(_d10)} by day 10 because a GARCH forecast moves towards the model's "
                    f"long-run level, which is {'above' if _up else 'below'} today's: it comes "
@@ -768,8 +782,11 @@ if garch is not None:
         st.write(f"**alpha (α):** {params['alpha[1]']:.4f} (reaction to recent shocks)")
         st.write(f"**beta (β):** {params['beta[1]']:.4f} (persistence of volatility)")
         persistence = params['alpha[1]'] + params['beta[1]']
+        # α + β that rounds to 1 is an integrated GARCH: shocks never fade and there is no long-run level.
+        _integrated = persistence >= 0.99995
         st.write(f"**α + β = {persistence:.4f}**, "
-                 f"{'high persistence (close to 1)' if persistence > 0.95 else 'moderate persistence'}")
+                 + ("1 to four decimals: shocks to volatility do not fade" if _integrated else
+                    "high persistence (close to 1)" if persistence > 0.95 else "moderate persistence"))
         if garch.get('nu') is not None:
             st.write(f"**Student-t degrees of freedom (ν):** {garch['nu']:.2f} (lower means fatter tails)")
         st.write(f"**Reference level: sample average 30-day volatility = {common.fmt_vol(avg_vol)}**, "
@@ -777,6 +794,10 @@ if garch is not None:
         if garch['garch_long_run_ok']:
             st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {common.fmt_vol(garch['garch_long_run'])}, "
                      "the level the forecast reverts to.")
+        elif _integrated:
+            st.write("The GARCH long-run volatility √(ω / (1 − α − β)) does not exist here: with α + β equal to 1 "
+                     "the model has no finite long-run level, so the forecasts above keep rising with the "
+                     "horizon instead of settling.")
         else:
             st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown as a number: with "
                      f"α + β = {garch['persistence']:.4f}, 1 − α − β is only {1 - garch['persistence']:.4f}, so "
@@ -875,8 +896,8 @@ else:
                    "EUR/USD is not included: returns are in each instrument's own currency.")
 
         # ── Stress period (after Basel MAR33.7) ──
-        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months) in which today's "
-                 "positions have the largest ES 97.5%**")
+        st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months, at most "
+                 f"{common.STRESS_MAX_SPAN} calendar days) in which today's positions have the largest ES 97.5%**")
         _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
         _sp = (common.stress_period(_stress_panel[list(positions)], positions)
                if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
@@ -1021,7 +1042,7 @@ SCENARIOS = [
     {"name": "August 2022 gas peak", "first": "2022-08-01", "last": "2022-08-26",
      "why": "from the first trading day of August 2022 to 26 Aug 2022, the record TTF front-month close (about "
             "€339/MWh) after Gazprom announced a three-day Nord Stream 1 shutdown"},
-    {"name": "2026 Iran war (Qatar LNG halt, Hormuz)", "first": "2026-03-02", "last": "2026-03-13",
+    {"name": "2026 Iran war", "first": "2026-03-02", "last": "2026-03-13",
      "why": "the first two trading weeks after the US-Israeli strikes on Iran (Sat 28 Feb 2026): QatarEnergy "
             "halted LNG output and an IRGC official said Hormuz was closed on 2 Mar"},
 ]
@@ -1096,14 +1117,14 @@ else:
             if pd.Timestamp(sc["last"]) > pd.Timestamp(end_date):
                 _after_end.append(sc["name"])
                 _summary.append({"Scenario": sc["name"], "Window": f"{pd.Timestamp(sc['first']):%d %b %Y} to "
-                                 f"{pd.Timestamp(sc['last']):%d %b %Y}", "Trading days": 0,
+                                 f"{pd.Timestamp(sc['last']):%d %b %Y}", "Trading days": None,
                                  "Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan,
                                  "Worst day": f"after the end date ({end_date:%d %b %Y})"})
                 continue
             res = replay_scenario(scen_panel, positions, sc["first"], sc["last"])
             if not res["days"] or res["base"] is None:
                 _summary.append({"Scenario": sc["name"], "Window": f"{sc['first']} to {sc['last']}",
-                                 "Trading days": 0, "Book P&L (€m)": np.nan,
+                                 "Trading days": None, "Book P&L (€m)": np.nan,
                                  "Worst book day (€m)": np.nan, "Worst day": "no data"})
                 continue
             _win = f"close {res['base']:%d %b %Y} to close {res['end']:%d %b %Y}"
@@ -1135,7 +1156,8 @@ else:
                                        if _wd is not None and pd.Timestamp(d).normalize() == _wd else "")
                     for d in _ttf_in))
 
-        st.dataframe(pd.DataFrame(_summary).set_index("Scenario"), width="stretch")
+        st.dataframe(pd.DataFrame(_summary).astype({"Trading days": "Int64"}).set_index("Scenario"),
+                     width="stretch")
         if _detail:
             with st.expander("Return and P&L by instrument"):
                 st.dataframe(pd.DataFrame(_detail).set_index(["Scenario", "Instrument"]), width="stretch")
