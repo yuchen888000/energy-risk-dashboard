@@ -256,6 +256,19 @@ ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize=8)
 ax.set_title(f'{selected_commodity} vs {compare_label}')
 plt.tight_layout()
 st.pyplot(fig)
+# When the continuous series has switched before the front contract stopped trading (Brent on 23 Oct 2026), its last
+# point is a later contract than the front month quoted in the market and on the curve below: say which.
+if not _past_end and commodity['ticker'] in common.CURVE_ROOTS and core['rolls'] and core['rolls']['rolls']:
+    _root = common.CURVE_ROOTS[commodity['ticker']][0]
+    _t_sw, _m_sw = core['rolls']['rolls'][-1][:2]
+    _dl_sw = common.contract_delivery(_m_sw, _root)
+    _crv0 = common.forward_curve(_root)
+    if len(_crv0) and _dl_sw > _crv0.iloc[0]['Delivery']:
+        _fd = _crv0.iloc[0]['Delivery']
+        st.caption(f"The last point is the {_dl_sw:%b %y} contract: `{commodity['ticker']}` switched to it on "
+                   f"{_t_sw:%d %b %Y}, while the {_fd:%b %y} contract trades until "
+                   f"{common.contract_expiry(_root, _fd):%d %b %Y}. The {_fd:%b %y} contract is the front month "
+                   "on the forward curve below.")
 
 # ─── Section 2b: Forward Curve ───
 st.subheader(f"Forward Curve: {selected_commodity}")
@@ -636,11 +649,12 @@ ax_hist.set_ylabel('Frequency')
 ax_hist.set_title(f'{selected_commodity} Daily Returns, last {var_days} trading days')
 ax_hist.legend(fontsize=8)
 
-rolling_var = common.break_gaps(returns_clean.rolling(60).quantile(0.05) * 100)
+# The same window as the headline VaR and the backtest, so the line ends at the headline figure.
+rolling_var = common.break_gaps(returns_clean.rolling(var_days).quantile(0.05) * 100)
 ax_ts.plot(rolling_var.index, rolling_var, color='red', linewidth=1, alpha=0.8)
 ax_ts.fill_between(rolling_var.index, rolling_var, 0, alpha=0.15, color='red')
 ax_ts.set_ylabel('VaR (95%, daily %)')
-ax_ts.set_title('60-Day Rolling VaR')
+ax_ts.set_title(f'VaR 95% over time, each point from the {var_days} trading days up to that day')
 ax_ts.axhline(y=0, color='black', linewidth=0.5)
 
 plt.tight_layout()
@@ -706,6 +720,22 @@ if garch is not None:
     gc4.metric("10-day holding-period vol", f"{cum_10d * np.sqrt(252 / 10):.0f}% ann. ({cum_10d:.2f}% over 10 days)",
                help="Volatility of the cumulative return over the next 10 trading days: square root of the sum "
                     "of the 10 daily forecast variances; annualised x √(252/10).")
+    # The forecast drifts towards the model's long-run level, which can be far from today's when the fit
+    # period holds a crisis; say so on the page, because it changes how the rising or falling path is read.
+    _lr = garch.get('garch_long_run')
+    _d10 = float(forecast_vol.iloc[9])
+    _up = _d10 > current_cond_vol
+    # Only when the path and the long-run level point the same way (a large last shock can lift day 1
+    # above a long-run level that is lower, and then the drift is not the whole story).
+    if _lr is not None and abs(_d10 / current_cond_vol - 1) >= 0.05 and (_lr > current_cond_vol) == _up:
+        _fit_from, _fit_to = returns_clean.index.min(), returns_clean.index.max()
+        _crisis = (", which includes the 2021-22 gas crisis" if _fit_from <= pd.Timestamp("2022-06-30")
+                   and _fit_to >= pd.Timestamp("2022-12-31") else "")
+        st.caption(f"The forecast {'rises' if _up else 'falls'} from {common.fmt_vol(current_cond_vol)} to "
+                   f"{common.fmt_vol(_d10)} by day 10 because a GARCH forecast moves towards the model's "
+                   f"long-run level, which is {'above' if _up else 'below'} today's: it comes "
+                   f"from the whole fit period ({_fit_from:%b %Y} to {_fit_to:%b %Y}{_crisis}). It is not a "
+                   "reading of news or of the market.")
 
     fig_garch, (ax_cv, ax_fc) = plt.subplots(1, 2, figsize=(14, 4))
 
@@ -747,8 +777,9 @@ if garch is not None:
             st.write(f"GARCH long-run volatility √(ω / (1 − α − β)) = {common.fmt_vol(garch['garch_long_run'])}, "
                      "the level the forecast reverts to.")
         else:
-            st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown: with "
-                     f"α + β = {garch['persistence']:.4f} the formula divides by almost zero and is unstable.")
+            st.write(f"The GARCH long-run volatility √(ω / (1 − α − β)) is not shown as a number: with "
+                     f"α + β = {garch['persistence']:.4f}, 1 − α − β is only {1 - garch['persistence']:.4f}, so "
+                     "a small change in α or β moves the result a lot. The forecasts above still move towards it.")
         st.write(f"**Log-Likelihood:** {garch['loglikelihood']:.2f}")
         st.caption("Shaded band: 500 paths simulated by resampling the standardised residuals through the GARCH "
                    "recursion with the fitted parameters held fixed; 5th to 95th percentile of the future "
@@ -1058,7 +1089,16 @@ else:
         _ttf_exp_days = (common.ttf_expiry_days(scen_panel['TTF Gas'].dropna().index)
                          if 'TTF Gas' in scen_panel and positions.get('TTF Gas', 0) else pd.DatetimeIndex([]))
         _ttf_notes = []
+        _after_end = []
         for sc in SCENARIOS:
+            # A window that ends after the end date would use prices the page otherwise leaves out.
+            if pd.Timestamp(sc["last"]) > pd.Timestamp(end_date):
+                _after_end.append(sc["name"])
+                _summary.append({"Scenario": sc["name"], "Window": f"{pd.Timestamp(sc['first']):%d %b %Y} to "
+                                 f"{pd.Timestamp(sc['last']):%d %b %Y}", "Trading days": 0,
+                                 "Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan,
+                                 "Worst day": f"after the end date ({end_date:%d %b %Y})"})
+                continue
             res = replay_scenario(scen_panel, positions, sc["first"], sc["last"])
             if not res["days"] or res["base"] is None:
                 _summary.append({"Scenario": sc["name"], "Window": f"{sc['first']} to {sc['last']}",
@@ -1087,14 +1127,17 @@ else:
             _ttf_in = [d for d in _ttf_exp_days if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
             if _ttf_in:
                 _wd = res.get('worst_day')
-                _ttf_notes.append(f"{sc['name']}: {', '.join(f'{d:%d %b %Y}' for d in _ttf_in)}"
-                                  + (" (the worst book day of that window)"
-                                     if _wd is not None and pd.Timestamp(_wd).normalize() in
-                                     [pd.Timestamp(d).normalize() for d in _ttf_in] else ""))
+                _wd = pd.Timestamp(_wd).normalize() if _wd is not None else None
+                # The tag sits right after the day it describes.
+                _ttf_notes.append(f"{sc['name']}: " + ", ".join(
+                    f"{d:%d %b %Y}" + (" (the worst book day of that window)"
+                                       if _wd is not None and pd.Timestamp(d).normalize() == _wd else "")
+                    for d in _ttf_in))
 
         st.dataframe(pd.DataFrame(_summary).set_index("Scenario"), width="stretch")
-        with st.expander("Return and P&L by instrument"):
-            st.dataframe(pd.DataFrame(_detail).set_index(["Scenario", "Instrument"]), width="stretch")
+        if _detail:
+            with st.expander("Return and P&L by instrument"):
+                st.dataframe(pd.DataFrame(_detail).set_index(["Scenario", "Instrument"]), width="stretch")
 
         _sum_df = pd.DataFrame(_summary).dropna(subset=["Book P&L (€m)"])
         if len(_sum_df):
@@ -1113,7 +1156,9 @@ else:
             plt.tight_layout()
             st.pyplot(fig_sc)
 
-        st.caption("This replays what happened; it is not a forecast or a probability.")
+        st.caption("This replays what happened; it is not a forecast or a probability."
+                   + (f" Not replayed because the window ends after the end date ({end_date:%d %b %Y}): "
+                      + ", ".join(_after_end) + "." if _after_end else ""))
         if _ttf_notes:
             st.caption("⚠️ TTF front-month expiry days, or the day after, inside the windows (part of that day's TTF move "
                        "may be the gap between two contracts; not verified): " + "; ".join(_ttf_notes) + ".")
@@ -1128,8 +1173,5 @@ else:
             + "; ".join(f"{sc['name']}, {sc['why']}" for sc in SCENARIOS) + ". "
             "Returns are the same daily returns as above: Yahoo Finance continuous front-month futures for "
             f"TTF (NYMEX), Brent and WTI, and for carbon {CARBON_LABEL}; {CARBON_FX_NOTE}. "
-            "Windows are fixed dates and do not depend on the sidebar range."
-            + (" Brent roll days inside the windows, when the continuous series switches contract and part "
-               "of that day's Brent move is the gap between contracts: "
-               + "; ".join(_notes) + "." if _notes else "")
+            "Windows are fixed dates: the start date does not change them, and a window that ends after the end date is not replayed."
         )

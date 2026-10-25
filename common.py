@@ -859,10 +859,17 @@ def roll_sentence(ticker, rc, window_returns):
                      "by the ICE Brent rule, but the series' close matches no single monthly contract on Yahoo "
                      "Finance, so no adjusted figure is given.")
     if rc['unknown']:
-        parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
-                     "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
-                     "roll on those days is neither ruled out nor adjusted.")
         cand = roll_candidates(root, rc)
+        if root in ("CL", "TTF") and rc['rolls'] and not cand:
+            # The month's roll is identified and no other expiry by the exchange rule falls in these days:
+            # state the fact rather than leave an open doubt.
+            parts.append(f"For {_day_ranges(rc['unknown'], idx)} the roll check cannot compare the close with the "
+                         "expiring contract, which Yahoo Finance no longer lists; no other expiry by the exchange "
+                         "rule falls on those days.")
+        else:
+            parts.append(f"Roll days not identified for {_day_ranges(rc['unknown'], idx)}: the series' close matches "
+                         "no single monthly contract on Yahoo Finance (expired contracts are no longer listed), so a "
+                         "roll on those days is neither ruled out nor adjusted.")
         if cand:
             parts.append(rule_roll_sentence(cand))
     if rc['rolls']:
