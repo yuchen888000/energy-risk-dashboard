@@ -376,7 +376,7 @@ k1, k2, k3 = st.columns(3)
 k1.metric("Power (DE-LU peak)", f"{latest['Power peak']:.2f} €/MWh",
           help=f"Average over this day's {power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00. "
                f"Baseload (24 h): {latest['Power base']:.2f} €/MWh.")
-k2.metric("Fuel cost at 50% (TTF / 0.5)", f"{latest['Fuel cost']:.2f} €/MWh")
+k2.metric("Fuel cost at 50% (TTF ÷ 0.5)", f"{latest['Fuel cost']:.2f} €/MWh")
 k3.metric(f"Carbon cost at 50% ({GAS_EF} ÷ 0.5 × EUA)", f"{latest['Carbon cost']:.2f} €/MWh")
 
 # ─── Chart 1: spread over time ───
@@ -408,7 +408,7 @@ st.subheader("What Drives the Spread")
 fig2, ax2 = plt.subplots(figsize=(14, 4))
 for _col, _kw in [("Power peak", dict(color="goldenrod", linewidth=1, label="Power price, peak")),
                   ("Power base", dict(color="goldenrod", linewidth=0.6, alpha=0.5, label="Power price, baseload")),
-                  ("Fuel cost", dict(color="steelblue", linewidth=1, label="Fuel cost at 50% (TTF / 0.5)")),
+                  ("Fuel cost", dict(color="steelblue", linewidth=1, label="Fuel cost at 50% (TTF ÷ 0.5)")),
                   ("Carbon cost", dict(color="seagreen", linewidth=1,
                                        label=f"Carbon cost at 50% ({GAS_EF} ÷ 0.5 × EUA)"))]:
     _s = common.break_gaps(df[_col])
@@ -494,7 +494,7 @@ else:
         _gm_txt = (f"German gas plants produced in every period of the last 90 days (lowest output "
                    f"{_gm.min():,.0f} MW), and more when prices were high. "
                    if len(_gm) and _gm.min() > 0 else "German gas plants produce more when prices are high. ")
-        st.caption("A reality check on the peak block: " + _gm_txt +
+        st.caption("A check on the peak block: " + _gm_txt +
                    "It is a day-ahead capture price, not what the plants sold at: output sold forward "
                    "earns the forward price instead. Generation: Energy-Charts (Fraunhofer ISE) public net generation, fossil gas; "
                    "power plants for the public supply only, industrial self-generation not included.")
@@ -605,10 +605,10 @@ if sp_css is not None:
                if css_fall95 > 0 else "")
     if sp_flex is not None:
         s2.metric(f"Stress period: 1-in-20 fall in the flexible plant's margin, {sp_flex['start']:%d %b %Y} to "
-                  f"{sp_flex['end']:%d %b %Y}", f"€{_sp_flex_fall:,.0f}",
+                  f"{sp_flex['end']:%d %b %Y}", f"€{_sp_flex_fall / 1e6:.2f}m",
                   help="Same measure as the figure above, on the stress period's changes instead of the last "
                        f"{len(flex_recent)}. The two stress periods are searched separately, so their dates can differ.")
-        s2.caption(f"{_sp_flex_fall / flex_fall95:.2f}x the last {len(flex_recent)} changes (€{flex_fall95:,.0f})"
+        s2.caption(f"{_sp_flex_fall / flex_fall95:.2f}x the last {len(flex_recent)} changes (€{flex_fall95 / 1e6:.2f}m)"
                    if flex_fall95 > 0 else "")
 
     def _stress_text(sp, name, fmt):
@@ -666,7 +666,7 @@ st.caption(
     f"These figures measure how much the margin moves from one delivery day to the next. They are not a "
     f"loss on a position: each day's margin is fixed once the day-ahead auction clears, and output and fuel "
     f"bought or sold forward are not exposed to it. The flexible plant cannot earn less than zero on a day (it stays "
-    f"off), so a 1-in-20 fall of €{flex_fall95:,.0f} means a good day followed by a much weaker one. The changes "
+    f"off), so a 1-in-20 fall of €{flex_fall95 / 1e6:.2f}m means a good day followed by a much weaker one. The changes "
     "include the days on which `TTF=F` switches to the next monthly contract: part of that day's change is the "
     "price gap between two contracts, and the fuel cost (TTF ÷ 0.5) doubles it."
 )
