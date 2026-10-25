@@ -235,7 +235,12 @@ _STORAGE_SIGNAL = re.compile(r"(?<![A-Za-z])(?:storage|inventory|inventories|inj
 _EQUITY_MARKET = re.compile(r"\b(?:Wall Street|Nasdaq|S&P 500|Dow Jones|Big Tech|stock markets?|equity markets?"
                             r"|Sensex|Nifty|FTSE|DAX|CAC 40|Hang Seng|Nikkei|bullion"
                             r"|ETFs?|ex-dividend|dividend yield|options income"
-                            r"|(?:AI|tech|bank|chip) stocks)\b", re.I)
+                            r"|(?:AI|tech|bank|chip) stocks"
+                            # Crypto, single-share technicals and equity flows ("With oil prices rising, Bitcoin ...",
+                            # "UKOG share price crosses above fifty day moving average", "FPIs withdraw Rs 48,056 cr
+                            # from equities", "Fed policy, Q2 earnings, crude oil prices among key market triggers").
+                            r"|bitcoin|crypto(?:currency|currencies)?|share price|moving average|equities"
+                            r"|FPIs?|foreign portfolio investors?|market triggers)\b", re.I)
 
 
 # Index and equity moves ("European stocks edge lower as oil prices rise", "Indian markets snap a 1-week rally"):
@@ -846,6 +851,19 @@ else:
     roll_note = ""
 # In the loss box "such a move" is the loss just described; the caption has no such loss before it.
 roll_note_box, roll_note = roll_note.format(move="such a move"), roll_note.format(move="a large daily move")
+# WTI: the box names the flagged days, so check them against the expiry rule instead of leaving a general doubt.
+if commodity['ticker'] == 'CL=F' and len(tail_days):
+    _near = common.rule_roll_days("CL", tail_days.index)
+    _far = [d for d in tail_days.index if pd.Timestamp(d).normalize() not in _near]
+    _bits = []
+    if _far:
+        _bits.append(", ".join(f"{d:%d %b %Y}" for d in _far)
+                     + (" is" if len(_far) == 1 else " are") + " not a WTI expiry day or the day after one by the "
+                     "exchange rule, the days the continuous series normally switches contract.")
+    for d, (m, exp) in sorted(_near.items()):
+        _bits.append(f"{d:%d %b %Y} is on or just after the last trading day of the {m:%b %y} contract "
+                     f"({exp:%d %b %Y}, exchange rule), so part of its move may be the gap between two contracts.")
+    roll_note_box = " " + " ".join(_bits)
 
 # One plain statement about roll days for the table caption and the AI prompt.
 if IS_BRENT and len(roll_excluded):
@@ -1014,7 +1032,9 @@ if len(tail_days):
                                f'{tail_days.index[-1]:%d %b %Y}')})
 
 check_tbl = pd.DataFrame(checks, columns=['Check', 'Fires when', 'Latest', 'Fires now',
-                                          f'Days fired (last {CHECK_DAYS} trading days)'])
+                                          f'Days fired (last {CHECK_DAYS} trading days'
+                                          + (', fewer where roll days are excluded' if IS_BRENT and n_roll_recent else '')
+                                          + ')'])
 check_tbl['Fires now'] = check_tbl['Fires now'].map(lambda v: 'n/a' if v is None else 'Yes' if v else 'No')
 st.dataframe(check_tbl, hide_index=True, width="stretch")
 if IS_BRENT and tail_roll_fact:

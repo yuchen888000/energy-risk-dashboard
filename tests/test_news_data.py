@@ -88,6 +88,16 @@ def test_rate_limit_retried_twice():
     ("The Hidden $40 - Per - Barrel Cost Driving Oil Prices Higher", "The Hidden $40-Per-Barrel Cost Driving Oil Prices Higher"),
     ("U . S . Crude Benchmark Advances 5.02% to Reach $102 Per Barrel", "U.S. Crude Benchmark Advances 5.02% to Reach $102 Per Barrel"),
     ("Trump invokes Cold War - era Defense Production Act for oil production", "Trump invokes Cold War-era Defense Production Act for oil production"),
+    ("U . S . naval blockade threatens to end Iran oil revenues by December",
+     "U.S. naval blockade threatens to end Iran oil revenues by December"),
+    ("FPIs withdraw Rs 48 , 056 cr from equities in Oct so far amid elevated crude oil prices",
+     "FPIs withdraw Rs 48,056 cr from equities in Oct so far amid elevated crude oil prices"),
+    ("Bitcoin Remains Stuck Below $85 , 000 . Here Why", "Bitcoin Remains Stuck Below $85,000. Here Why"),
+    ("UK Oil & Gas ( LON : UKOG ) Share Price Crosses Above Fifty Day Moving Average",
+     "UK Oil & Gas (LON: UKOG) Share Price Crosses Above Fifty Day Moving Average"),
+    ("Crude oil near $120 , to intensify headwinds", "Crude oil near $120, to intensify headwinds"),
+    ("Brent rises in 2025 , 300 traders say", "Brent rises in 2025, 300 traders say"),
+    ("Oil prices threaten to undermine fuel levy relief .", "Oil prices threaten to undermine fuel levy relief."),
 ])
 def test_clean_title(raw, clean):
     assert news_data._clean_title(raw) == clean

@@ -60,8 +60,14 @@ def _clean_title(t):
     t = re.sub(r"(\d) \. (\d)", r"\1.\2", t)                # 30 . 01 -> 30.01
     t = re.sub(r"\b([A-Z]) \. (?=[A-Z] \.|[A-Z]\b)", r"\1.", t)  # "U . S . Crude" -> "U.S. Crude"
     t = re.sub(r"\b([A-Z]) \. (?=[A-Z][a-z])", r"\1. ", t)
+    t = re.sub(r"\b([A-Z]\.[A-Z]) \.", r"\1.", t)              # "U.S . naval" (left by the rules above) -> "U.S. naval"
     t = re.sub(r"(\d) %", r"\1%", t)                         # 25 % -> 25%
     t = re.sub(r" ([,:;!?])", r"\1", t)                      # "Natgas , Henry" -> "Natgas, Henry"
+    t = re.sub(r"\b(\d{1,3}), (\d{3})(?!\d)", r"\1,\2", t)    # "Rs 48 , 056" -> "Rs 48,056" (thousands)
+    t = re.sub(r"(\w) \. (?=[A-Z])", r"\1. ", t)               # "$85,000 . Here" -> "$85,000. Here"
+    t = re.sub(r" \.$", ".", t)                              # a full stop at the end
+    t = re.sub(r"\( ", "(", t)                               # "( LON: UKOG )" -> "(LON: UKOG)"
+    t = re.sub(r" \)", ")", t)
     t = re.sub(r"(\d) / ([A-Za-z])", r"\1/\2", t)             # "USD 112 / tonne" -> "USD 112/tonne"
     # "year - end", "low - carbon", "war - driven" -> one hyphenated word. Only when one side is a part that
     # forms compounds, so a dash between two clauses ("prices rise - analysts warn") keeps its spaces.

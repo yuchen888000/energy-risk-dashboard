@@ -100,8 +100,9 @@ def build_commodities(carbon):
             "color": "saddlebrown",
             # "barrel" alone also matches stories such as "Tank barrel production returns to UK", so it counts
             # only as an oil-price unit ("a barrel", "per barrel", "barrels a day").
-            "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'refinery'] + OIL_BARREL_TERMS,
-            "news_query": '("crude oil" OR "oil price" OR WTI OR "oil market" OR OPEC)',
+            "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'refinery', 'Cushing', 'shale'] + OIL_BARREL_TERMS,
+            # US benchmark terms (Cushing, "US crude", shale) so the list is not the same as Brent's.
+            "news_query": '("crude oil" OR "oil price" OR WTI OR "oil market" OR OPEC OR Cushing OR "US crude" OR shale)',
             "news_term": "oil",
         },
         "Brent Crude Oil": {

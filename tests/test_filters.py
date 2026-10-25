@@ -73,6 +73,13 @@ STOCK_TIP_CASES = [
     ("Global Market: European stocks edge lower as Kering slumps, oil prices rise", True),
     ("European gas stocks fall to a five-year low for the time of year", False),
     ("Gas storage stocks close the week 2% lower", False),
+    # crypto, single-share technicals and equity flows (audit 2026-10-25, WTI and Brent lists)
+    ("With Oil Prices Rising, Bitcoin Remains Stuck Below $85,000. Here Why Im Still Buying Bitcoin Right Now.", True),
+    ("UK Oil & Gas (LON: UKOG) Share Price Crosses Above Fifty Day Moving Average", True),
+    ("FPIs withdraw Rs 48,056 cr from equities in Oct so far amid elevated crude oil prices", True),
+    ("Fed policy, Q2 earnings, crude oil prices among key market triggers next week", True),
+    ("Crude oil near $120, to intensify headwinds for economy", False),
+    ("U.S. naval blockade threatens to end Iran oil revenues by December", False),
 ]
 
 
