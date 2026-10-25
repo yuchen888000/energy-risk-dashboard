@@ -53,7 +53,7 @@ ANNUAL = common.ANNUAL
 # The carbon ETC tracks EUR-denominated EUA futures but is quoted in USD, so its returns
 # contain the EUR/USD move. Other fallbacks (KRBN, ICLN) are USD funds.
 if CARBON_TICKER == "CARB.L":
-    CARBON_FX_NOTE = ("the carbon ETC (CARB.L) is quoted in USD while the EUA futures it tracks are in euros, "
+    CARBON_FX_NOTE = ("EU Carbon ETC (CARB.L) is quoted in USD while the EUA futures it tracks are in euros, "
                       "so its returns include the EUR/USD move")
 else:
     CARBON_FX_NOTE = f"the carbon proxy ({CARBON_TICKER}) is a USD fund, not a euro EUA price"
@@ -72,7 +72,8 @@ with st.sidebar.expander("Methodology: Risk page"):
     - **GARCH(1,1) Forecast**: Student-t GARCH; daily volatility forecast for each of the next
       10 days, and the 10-day holding-period volatility.
     - **Volatility references**: two references that do not roll with the market: the multiple of
-      the Oct to Dec 2025 level (median 30-day volatility of that quarter, the last full one before the war) and the percentile among every
+      the pre-war level (median 30-day volatility of Oct to Dec 2025, the last full quarter before the war; for an end
+      date before the strikes the page names it by its months) and the percentile among every
       30-day volatility since the start of the data (2017; TTF from Oct 2017). No Normal / Elevated /
       Extreme label: there is no industry-standard cut-off for one.
     - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 (at most
@@ -156,9 +157,9 @@ _data_full = (f"Data up to {_last_px:%d %b %Y} for {selected_commodity}"
               # Thursday) may not yet be the settlement (common.futures_row_state, the same rule as the curve).
               + _last_note
               + _cmp_value_note
-              + (" The volatility, percentile, multiple of the Oct to Dec 2025 level, VaR and the roll check"
-                 if commodity['ticker'] in common.CURVE_ROOTS else
-                 " The volatility, percentile, multiple of the Oct to Dec 2025 level and VaR")
+              + (f" The volatility, percentile, multiple of {_vs.get('level_name', 'the pre-war level')}, VaR and "
+                 "the roll check" if commodity['ticker'] in common.CURVE_ROOTS else
+                 f" The volatility, percentile, multiple of {_vs.get('level_name', 'the pre-war level')} and VaR")
               + " all come from one download of the series, computed together.")
 # On the page: the dates, what kind of price the last one is (in a few words; the full sentence is in the details)
 # and a late TTF row, which changes what the latest figures cover. Definitions and the roll check are folded.
@@ -530,7 +531,7 @@ if corr_full is not None:
             st.caption(f"No recent matrix: only {len(_recent_df)} of the last {common.VOL_DAYS} trading days have a "
                        f"return in all four series, and at least {common.VOL_MIN} are needed (the same thresholds as the "
                        f"30-day correlation line: {common.VOL_DAYS} days, at least {common.VOL_MIN}), so the window does not reach back across a gap such as the "
-                       "carbon ETC's stale prices.")
+                       "EU Carbon ETC's stale prices.")
 
     st.caption("Blue = positive correlation (move together). Red = negative (move inversely); for a hedged book a "
                "negative correlation is not in itself bad.")
@@ -538,7 +539,7 @@ if corr_full is not None:
                "Only days on which all four series have a return are used; the recent matrix uses the last 30 "
                "trading days on which any of the four has a return, and needs at least 20 of them with all four. Compare full "
                "period with the last 30 days to see whether relationships have shifted. The series do not close at the same "
-               "time (TTF and the carbon ETC on European hours, Brent and WTI in the New York afternoon), so "
+               "time (TTF and EU Carbon ETC on European hours, Brent and WTI in the New York afternoon), so "
                "news after the European close reaches oil the same day and gas and carbon the next day, "
                "which lowers same-day correlations between the two groups.")
 else:
@@ -804,7 +805,7 @@ if book_panel is None:
     st.info("Not enough multi-commodity data to compute position risk.")
 else:
     st.write("**Positions** (€m notional; positive = long, negative = short):")
-    _defaults = {"TTF Gas": 10.0, "WTI Oil": 0.0, "Brent Oil": -5.0, CARBON_SHORT: 3.0}
+    _defaults = {"TTF Natural Gas": 10.0, "WTI Crude Oil": 0.0, "Brent Crude Oil": -5.0, CARBON_SHORT: 3.0}
     _pos_cols = st.columns(len(book_panel.columns) + 1)
     positions_m = {}
     for _col, _name in zip(_pos_cols, book_panel.columns):
@@ -957,7 +958,7 @@ else:
                 f"the {common.STRESS_WINDOW} days must fall within {common.STRESS_MAX_SPAN} calendar days (normally "
                 "they span 360 to 380). "
                 "As above, only days on which every instrument held has a return count"
-                + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out the carbon ETC's suspension (Jun 2020 to "
+                + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out EU Carbon ETC's suspension (Jun 2020 to "
                    "Aug 2021) and its sparse prices before 2018" if CARBON_SHORT in positions else "")
                 + f".{_tie_txt}{_es_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
@@ -1083,11 +1084,11 @@ else:
         st.info("Not enough multi-commodity data to replay the scenarios.")
     else:
         _summary, _detail, _notes = [], [], []
-        _brent_rolls = _brent_roll_days(scen_panel['Brent Oil'].dropna().index) \
-            if 'Brent Oil' in scen_panel else pd.DatetimeIndex([])
+        _brent_rolls = _brent_roll_days(scen_panel['Brent Crude Oil'].dropna().index) \
+            if 'Brent Crude Oil' in scen_panel else pd.DatetimeIndex([])
         # TTF=F front-month expiries (and the day after): a TTF move there can be partly the gap between contracts.
-        _ttf_exp_days = (common.ttf_expiry_days(scen_panel['TTF Gas'].dropna().index)
-                         if 'TTF Gas' in scen_panel and positions.get('TTF Gas', 0) else pd.DatetimeIndex([]))
+        _ttf_exp_days = (common.ttf_expiry_days(scen_panel['TTF Natural Gas'].dropna().index)
+                         if 'TTF Natural Gas' in scen_panel and positions.get('TTF Natural Gas', 0) else pd.DatetimeIndex([]))
         _ttf_notes = []
         _after_end = []
         for sc in SCENARIOS:

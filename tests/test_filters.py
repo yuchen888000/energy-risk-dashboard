@@ -23,7 +23,7 @@ exec(_block("# ─── Headline relevance ───", "# With an end date in t
 sys.path.insert(0, str(ROOT))
 import common  # noqa: E402  (no download at import)
 
-_COMS = common.build_commodities({"name": "EU Carbon (EUA ETC, USD)", "ticker": "CARB.L", "unit": "", "label": ""})
+_COMS = common.build_commodities({"name": "EU Carbon ETC (CARB.L, USD)", "ticker": "CARB.L", "unit": "", "label": ""})
 _KW = {k: _filt["_word_pattern"](v["keywords"]) for k, v in _COMS.items()}
 
 FILTER_CASES = [

@@ -28,8 +28,8 @@ CARBON_CANDIDATES = [
     {
         "ticker": "CARB.L",
         "label": "EU Carbon ETC (CARB.L, USD)",
-        "short": "EU Carbon",
-        "name": "EU Carbon (EUA ETC, USD)",
+        "short": "EU Carbon ETC",
+        "name": "EU Carbon ETC (CARB.L, USD)",
         "unit": "ETC price, USD (tracks EUA futures)",
         "pure_eu": True,
         "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
@@ -39,8 +39,8 @@ CARBON_CANDIDATES = [
     {
         "ticker": "KRBN",
         "label": "Global Carbon (KRBN, EUA-weighted)",
-        "short": "Carbon",
-        "name": "Carbon Allowances (Global)",
+        "short": "Global Carbon",
+        "name": "Global Carbon (KRBN, EUA-weighted)",
         "unit": "ETF price, USD",
         "pure_eu": False,
         "note": ("KraneShares Global Carbon Strategy ETF. EUA carries the dominant index weight, "
@@ -50,8 +50,8 @@ CARBON_CANDIDATES = [
     {
         "ticker": "ICLN",
         "label": "Clean Energy Proxy (ICLN)",
-        "short": "Clean Energy",
-        "name": "Clean Energy Proxy",
+        "short": "Clean Energy Proxy",
+        "name": "Clean Energy Proxy (ICLN)",
         "unit": "ETF price, USD",
         "pure_eu": False,
         "note": ("Clean-energy equity ETF. This is NOT a carbon allowance price; it is a "
@@ -834,9 +834,10 @@ def rule_roll_days(root, days):
     return out
 
 
-def roll_sentence(ticker, rc, window_returns):
+def roll_sentence(ticker, rc, window_returns, level_name="the pre-war level"):
     """The line under the volatility heading when the 30-day window contains contract roll days, or ''.
-    `rc` is compute_core's window_rolls result for `window_returns`."""
+    `rc` is compute_core's window_rolls result for `window_returns`. `level_name` is vol_summary's name for the
+    Oct to Dec 2025 reference, so the page uses one name for it."""
     if rc is None or not (rc['rolls'] or rc['unknown'] or rc['rule_only']):
         return ""
     root = CURVE_ROOTS[ticker][0]
@@ -873,7 +874,7 @@ def roll_sentence(ticker, rc, window_returns):
         if cand:
             parts.append(rule_roll_sentence(cand))
     if rc['rolls']:
-        parts.append("The heading, the percentile and the multiple of the Oct to Dec 2025 level use the unadjusted figure, because "
+        parts.append(f"The heading, the percentile and the multiple of {level_name} use the unadjusted figure, because "
                      "the history they are compared with contains roll days too.")
     return " ".join(parts)
 
@@ -996,7 +997,9 @@ def vol_summary(core, name=None, with_roll=False, past_end=False, today=None):
                     ai=f"{lead}: not available. {why}", prewar_ai="")
     vol_now = float(core['latest_vol'])
     out = dict(ctx=ctx, tile=fmt_vol(vol_now, 0),
-               roll=(roll_sentence(core['ticker'], rc, window_returns) if with_roll else ""),
+               roll=(roll_sentence(core['ticker'], rc, window_returns,
+                                   "the Oct to Dec 2025 level" if as_of < _STRIKES else "the pre-war level")
+                     if with_roll else ""),
                headline=f"{lead}: {vol_now * ANNUAL:.0f}% annualised ({vol_now:.2f}% daily)")
     if ctx is None:
         out.update(headline2="", detail="", ai=out['headline'], prewar_ai="", level_name="the pre-war level")
@@ -1226,7 +1229,7 @@ def london_session_row(day, now=None):
 # ─── Cross-commodity returns (correlation matrix, portfolio VaR, positions) ───
 def panel_tickers(carbon_short, carbon_ticker):
     """Column name -> Yahoo ticker of returns_panel, so a page can go back from a position to its prices."""
-    return {"TTF Gas": "TTF=F", "WTI Oil": "CL=F", "Brent Oil": "BZ=F", carbon_short: carbon_ticker}
+    return {"TTF Natural Gas": "TTF=F", "WTI Crude Oil": "CL=F", "Brent Crude Oil": "BZ=F", carbon_short: carbon_ticker}
 
 
 @st.cache_data(ttl=3600, show_spinner="Computing cross-commodity returns...")
