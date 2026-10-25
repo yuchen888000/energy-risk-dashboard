@@ -76,7 +76,10 @@ def _clean_title(t):
           "|wide|intensive|heavy|light|day|ahead|month|week|time|hour|front|side|cycle|carbon|energy|price"
           "|barrel|tonne|bbl|cooled|cooling|powered|fuelled|fueled|rich|poor|only|per|era|style|like|plus")
     t = re.sub(rf"(?<=[A-Za-z]) - (?=(?:{_c})\b)", "-", t, flags=re.I)
-    t = re.sub(rf"\b({_c}) - (?=[A-Za-z])", r"\1-", t, flags=re.I)
+    # Not before the word that names who said it ("... to Turkmen gas - expert", "... - analysts", "... - minister"):
+    # that dash separates the headline from its source, so it keeps its spaces.
+    _who = r"(?:experts?|analysts?|officials?|ministers?|minister|sources?|reports?|study|survey|poll|data|CEO|says?)\b"
+    t = re.sub(rf"\b({_c}) - (?=[A-Za-z])(?!{_who})", r"\1-", t, flags=re.I)
     # "4 - month high", "1 - week rally": a number, a period word, then a noun.
     t = re.sub(r"(\d) - (?=(?:month|week|year|day|hour|per|barrel|tonne)\b)", r"\1-", t, flags=re.I)
     t = re.sub(r"^[A-Za-z0-9-]+ \. [a-z]{2,6} - ", "", t)    # "Baystreet . ca - Japan ..." -> "Japan ..."

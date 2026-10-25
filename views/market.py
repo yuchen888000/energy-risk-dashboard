@@ -54,17 +54,20 @@ with st.sidebar.expander("Methodology: Market page"):
     - **Which headlines count**: a commodity keyword in the headline ("barrel" only as a price
       unit: "a barrel", "per barrel", "barrels a day"); for TTF an explicit natural-gas term
       (natural gas, LNG, TTF, gas storage, gas supply, Gazprom, Equinor and similar) or "gas"
-      with a European place name. Dropped: US retail fuel stories ("gas prices" at the pump),
+      with a European place name, and on the TTF list a European place or a European gas name
+      (TTF, NBP, Gazprom, Equinor, Nord Stream, Groningen) in the headline itself. Dropped: US retail fuel stories ("gas prices" at the pump),
       share tips ("stocks to watch", "investors should", shares rising or falling, and "stocks"
       with a signal such as "stocks for", "dividend", "to buy" or "top 5 ... stocks" unless a
       storage word such as storage, inventories, injection or full is there too), pages that
-      are not news (exchange product pages, bare report titles), and, except for WTI,
+      are not news (exchange product pages, bare report titles), stock-market, index, fund and
+      crypto stories (Wall Street, Sensex, ETFs, bitcoin, share-price technicals, foreign portfolio
+      flows), and, except for WTI,
       US-domestic stories with no link to Europe. WTI is a NYMEX contract, so US inventory
       and production stories are kept for it.
     - **Statistical checks**: volatility above the 95th or below the 5th percentile of the
       last 750 trading days up to the end date (3 years; longer where stale prices of a
       suspension are excluded, shorter where the data start later, and the page then gives
-      the dates), GARCH 10-day forecast 30%
+      the dates), GARCH day-10 daily volatility forecast 30%
       above or below the average 30-day volatility of that window (the GARCH model for this
       check is fitted on the returns of that window), 30-day correlation outside its 5th to
       95th percentile range over its last 750 values, and daily losses beyond 2x the window's
@@ -175,6 +178,16 @@ _EUROPE_GEO = _word_pattern([
     "Germany", "German", "France", "French", "Italy", "Italian", "Spain", "Spanish", "Netherlands",
     "Dutch", "Norway", "Norwegian", "Poland", "Polish", "Austria", "Austrian", "Belgium", "Belgian",
     "Ukraine", "Ukrainian", "Russia", "Russian", "Moscow", "Kremlin", "North Sea"])
+
+# The TTF list itself (not the per-country lists, which already need the country) also needs a European subject in
+# the headline: a European place, or a name that only belongs to the European gas market. GDELT's search matches
+# the European words anywhere in the article, so without this the list fills with LNG stories from Canada or Asia.
+_EUROPE_GAS = _word_pattern(["TTF", "NBP", "Gazprom", "Equinor", "Nord Stream", "Groningen"])
+
+
+def is_european_gas(headline):
+    return bool(_EUROPE_GEO.search(headline) or _EUROPE_GAS.search(headline))
+
 
 # US retail fuel stories: "gas prices" meaning petrol at the pump. Dropped for every commodity.
 _GAS_PRICES = _word_pattern(["gas price", "gasoline price"])
@@ -315,7 +328,12 @@ KEEP_US = commodity['ticker'] == 'CL=F'   # WTI: US-domestic stories are kept
 
 
 def dedup_key(text):
-    """Headline reduced to lower-case words, so the same story from two searches or sites counts once."""
+    """Headline reduced to lower-case words, so the same story from two searches or sites counts once. A label before
+    a colon is left out when at least five words follow it, so "B.C. Election Analysis: Questions raised about ..."
+    and "B.C. Election: Questions raised about ..." (one story, two sites) count once."""
+    head, sep, tail = text.rpartition(": ")
+    if sep and len(tail.split()) >= 5:
+        text = tail
     return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
 
 
@@ -404,7 +422,7 @@ else:
             f"**{eu[f'{fuel}_share']:.1f}%** of gross available energy, **{eu[f'dep_{fuel}']:.1f}%** of it "
             f"is imported (net), so net {fuel} imports are **{eu[f'{fuel}_exposure']:.1f}%** of all energy.")
         st.caption(
-            f"Gross available energy is all energy a country has available (production + imports - exports "
+            f"Gross available energy is all energy a country has available (production + imports − exports "
             f"+ stock changes), from Eurostat nrg_bal_c in ktoe; import dependency is Eurostat nrg_ind_id "
             f"(net imports ÷ gross available energy of that fuel; Eurostat's fuel label: \"{M['fuel']}\"). "
             f"The product of share and dependency tells how much of a country's total "
@@ -482,7 +500,8 @@ else:
                 _outside = [c for c in ("Turkey", "Switzerland", "United Kingdom") if c in set(cr_df['Country'])]
                 if _outside:
                     st.caption("The EU ETS covers the EU-27, Iceland, Liechtenstein and Norway; "
-                               + ", ".join(_outside) + (" is" if len(_outside) == 1 else " are")
+                               + (", ".join(_outside[:-1]) + " and " + _outside[-1] if len(_outside) > 1 else _outside[0])
+                               + (" is" if len(_outside) == 1 else " are")
                                + " not in it (Switzerland has its own ETS, linked to the EU ETS since 2020).")
 
         with cr_col2:
@@ -643,6 +662,8 @@ st.write(f"{selected_commodity}-related headlines from the last {NEWS_DAYS} days
 news_date_note()
 
 _filter_note = ("US stories are kept for WTI, and the filter does not require a European subject" if KEEP_US else
+                "for TTF the headline must name a European place or a European gas name such as TTF, Gazprom or "
+                "Equinor" if IS_GAS else
                 "the filter drops US domestic stories; it does not require a European subject")
 _arts, _news_err = gdelt_try(news_data.gdelt_query(commodity['news_query']), NEWS_DAYS)
 # Newest first from GDELT; the caps keep one site from filling the list.
@@ -653,6 +674,8 @@ for _a in _arts:
         continue
     # Same test as the country headlines: a commodity keyword in it, no US-domestic story (except WTI).
     if not is_relevant(_a['title'], commodity_kw_re, gas=IS_GAS, keep_us=KEEP_US):
+        continue
+    if IS_GAS and not is_european_gas(_a['title']):
         continue
     _seen.add(_k)
     _per_site[_a['domain']] = _per_site.get(_a['domain'], 0) + 1
@@ -886,7 +909,7 @@ else:
 # Closing times: TTF and the carbon ETC close in European hours, Brent and WTI in the New York afternoon.
 _EUROPEAN_CLOSE, _NEW_YORK_CLOSE = {'TTF=F', 'CARB.L'}, {'BZ=F', 'CL=F'}
 _pair = {commodity['ticker'], ctx.compare_ticker}
-corr_close_note = (" The two series close at different times (TTF and CARB.L in European hours, Brent and WTI in "
+corr_close_note = (" The two series close at different times (TTF and EU Carbon ETC in European hours, Brent and WTI in "
                    "the New York afternoon), so a move after the European close reaches the European series only "
                    "the next day, which pushes the same-day correlation down."
                    if _pair & _EUROPEAN_CLOSE and _pair & _NEW_YORK_CLOSE else "")
@@ -954,12 +977,12 @@ if garch is not None and garch_ref:
     checks.append(("GARCH forecast low", f"Day-10 daily vol forecast below {_g_lo_thr} "
                    f"({GARCH_LO:.1f}x {ref_short} mean)", _g_lo_now, g_ratio < GARCH_LO, f"{n_glo} of {len(g_path)}"))
     if g_ratio > GARCH_HI:
-        anomalies.append({'level': '🟡 WARNING', 'type': f'GARCH Forecast Above {ref_short.title()} Average',
+        anomalies.append({'level': '🟡 WARNING', 'type': f'GARCH Forecast More Than {(GARCH_HI - 1) * 100:.0f}% Above {ref_short.title()} Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(g_ratio - 1) * 100:.0f}% above the {garch_ref_name} '
                                      f'({common.fmt_vol(garch_ref)}). Fired on {n_ghi} {_g_of}.')})
     elif g_ratio < GARCH_LO:
-        anomalies.append({'level': 'ℹ️ NOTE', 'type': f'GARCH Forecast Below {ref_short.title()} Average',
+        anomalies.append({'level': 'ℹ️ NOTE', 'type': f'GARCH Forecast More Than {(1 - GARCH_LO) * 100:.0f}% Below {ref_short.title()} Average',
                           'detail': (f'GARCH forecast of daily volatility on the 10th trading day ahead is '
                                      f'{common.fmt_vol(garch_forecast_10d)}, {(1 - g_ratio) * 100:.0f}% below the {garch_ref_name} '
                                      f'({common.fmt_vol(garch_ref)}). Fired on {n_glo} {_g_of}. Low forecast '
@@ -1097,8 +1120,8 @@ with st.expander("How the checks are built"):
 
 
 # ─── Section 4: AI Risk Narrative (LLM) ───
-st.subheader("🤖 AI Risk Interpretation")
-st.write(f"A three-sentence plain-language summary of the statistics on this page for {selected_commodity}.")
+st.subheader("AI Summary of the Statistics")
+st.write(f"A three-sentence summary of the statistics on this page for {selected_commodity}.")
 
 
 def _side(cur, thr):
