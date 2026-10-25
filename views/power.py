@@ -548,10 +548,8 @@ st.download_button("Download daily spread data (CSV)", data=export.to_csv(index=
                    mime="text/csv",
                    help=f"Daily data behind the page ({len(export):,} delivery business days), including the dates "
                         "of the TTF price and EUA auction used for each day, so every figure can be recomputed. "
-                        "The TTF price type follows the row's date in New York: a price of today's New York date is "
-                        "the latest price, not the settlement; one of the day before, Monday to Thursday, may not yet "
-                        f"be the settlement ({common._UNSETTLED_WHY}); older ones, and Friday's from Saturday on, "
-                        "are closes.")
+                        "The column 'TTF price type' says whether each TTF price is a close, may not yet be the "
+                        "settlement, or is the latest price.")
 
 # ─── Risk: day-on-day changes ───
 st.subheader("Spread Risk")
@@ -675,8 +673,7 @@ st.caption(
 _folded("Caveats",
     "Power is the day-ahead price, while gas is the TTF front-month future, so the tenors "
     "don't match. S&P Global Platts calculates its German spark spreads using its own TTF assessments, which are "
-    "not freely available; a change to its day-ahead and weekend assessments in March 2026 affected 12 day-ahead "
-    "spread codes (S&P Global subscriber note, 31 Mar 2026). Platts prices "
+    "not freely available. Platts prices "
     "carbon with its EUA assessment of the nearest December contract; this page uses the EEX primary "
     "auction (spot) instead. Efficiencies are on a higher heating value basis "
     "(50% HHV is roughly 55% on a lower heating value basis). German plants buy gas at the THE hub, "
@@ -687,7 +684,7 @@ _folded("Caveats",
 )
 
 # ─── Gas purchase timing: buy next month's gas now or in a week (gas leg only) ───
-st.subheader("Buy Next Month's Gas Now, or in a Week? (gas leg only)")
+st.subheader("Buy a Month of Gas Now, or in a Week? (gas leg only)")
 _WAIT_DAYS = 5
 _MIN_FIT = 250   # daily returns a monthly contract needs in the fit window to have its own GARCH fit
 _MIN_CMP = 20    # daily returns on common days needed to compare TTF=F's and a contract's volatility
