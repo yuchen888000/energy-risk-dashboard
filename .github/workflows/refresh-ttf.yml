@@ -1,0 +1,36 @@
+name: Refresh saved TTF prices
+
+on:
+  schedule:
+    - cron: "23 22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: pip install --quiet pandas yfinance
+
+      - name: Download TTF prices
+        run: python .github/scripts/refresh_ttf.py
+
+      - name: Commit if the file changed
+        run: |
+          git diff --quiet -- data/ttf_saved.csv && { echo "No change."; exit 0; }
+          git config user.name "yuchen888000"
+          git config user.email "150667104+yuchen888000@users.noreply.github.com"
+          git add data/ttf_saved.csv
+          git commit -m "Saved TTF prices: daily update"
+          git push
