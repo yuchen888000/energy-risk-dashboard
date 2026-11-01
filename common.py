@@ -226,13 +226,16 @@ def _download_batch(ticker, first, today):
                 close[ticker] = alone.reindex(close.index)
         except Exception as e:
             print(f"[download] {ticker} alone failed: {e!r}", flush=True)
-    # Still too short: fill the gaps from the saved copy of the same series. Downloaded prices are kept where they exist.
+    # Still too short: use the saved copy of the same series, and the download only for days after the copy ends.
     saved_to = None
     if close[ticker].notna().sum() < _MIN_BATCH_ROWS and ticker in _SAVED_COPIES:
         saved = pd.read_csv(_SAVED_COPIES[ticker], index_col=0, parse_dates=True)
         saved = saved[(saved.index >= pd.Timestamp(first)) & (saved.index <= pd.Timestamp(today))]
         saved_to = saved[ticker].dropna().index.max()
-        close = close.combine_first(saved.reindex(columns=close.columns))
+        # Up to the copy's last day every column comes from the copy, so the series and the monthly contracts
+        # stay from one download (a contract price from another download would look like a roll).
+        later = close[close.index > saved_to]
+        close = pd.concat([saved.reindex(columns=close.columns), later]).sort_index()
         print(f"[download] {ticker} filled from saved copy: {_coverage(close[ticker])}", flush=True)
     # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
     # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
