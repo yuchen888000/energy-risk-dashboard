@@ -177,6 +177,15 @@ def _batch_contracts(ticker, today):
     return [f"{root}{MONTH_CODES[p.month - 1]}{p.year % 100:02d}.NYM" for p in months]
 
 
+_MIN_BATCH_ROWS = 250   # fewer rows than this for a series reaching back years means the download came back cut short
+
+
+def _coverage(series):
+    """Rows with a price and first and last date of a downloaded series, for the app log."""
+    s = series.dropna()
+    return f"{len(s)} rows, {s.index.min()} to {s.index.max()}" if len(s) else "0 rows"
+
+
 @st.cache_data(ttl=3600, show_spinner="Fetching market data...")
 def _download_batch(ticker, first, today):
     """Daily closes from `first` to `today` exactly as downloaded: one column for `ticker` and, for a continuous
@@ -201,6 +210,19 @@ def _download_batch(ticker, first, today):
         close = close.to_frame(ticker)
     if ticker not in close:
         return pd.DataFrame()
+    print(f"[download] {ticker} batch: {_coverage(close[ticker])}; all columns {close.notna().sum().to_dict()}", flush=True)
+    # A batch download can return far too few rows for the continuous series while the other columns look fine.
+    # Ask for it alone before giving up on the series.
+    if close[ticker].notna().sum() < _MIN_BATCH_ROWS and len(tickers) > 1:
+        try:
+            alone = yf.download(ticker, start=first, end=pd.Timestamp(today) + pd.Timedelta(days=1), progress=False)['Close']
+            alone = alone[ticker] if isinstance(alone, pd.DataFrame) else alone
+            print(f"[download] {ticker} alone: {_coverage(alone)}", flush=True)
+            if alone.notna().sum() > close[ticker].notna().sum():
+                close = close.reindex(close.index.union(alone.index))
+                close[ticker] = alone.reindex(close.index)
+        except Exception as e:
+            print(f"[download] {ticker} alone failed: {e!r}", flush=True)
     # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
     # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
     close = close[close.index.dayofweek < 5]
