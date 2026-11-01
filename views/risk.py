@@ -92,6 +92,8 @@ if ctx.is_carbon:
 else:
     st.caption(f"Carbon benchmark: **{CARBON_LABEL}**. {CARBON_NOTE}")
 
+if "TTF=F" in (commodity['ticker'], ctx.compare_ticker):
+    common.show_saved_copy_note(start_date)
 core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, end_date)
 if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")

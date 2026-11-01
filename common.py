@@ -6,6 +6,7 @@ place. The heavy calculations are wrapped in st.cache_data, so a page that needs
 number another page already computed gets it from the cache.
 """
 import datetime as dt
+import os
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -178,6 +179,8 @@ def _batch_contracts(ticker, today):
 
 
 _MIN_BATCH_ROWS = 250   # fewer rows than this for a series reaching back years means the download came back cut short
+# Saved copy of a series, used only when Yahoo returns too little of it (TTF=F from 1 Nov 2026 on the hosted app).
+_SAVED_COPIES = {"TTF=F": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ttf_saved.csv")}
 
 
 def _coverage(series):
@@ -223,10 +226,21 @@ def _download_batch(ticker, first, today):
                 close[ticker] = alone.reindex(close.index)
         except Exception as e:
             print(f"[download] {ticker} alone failed: {e!r}", flush=True)
+    # Still too short: fill the gaps from the saved copy of the same series. Downloaded prices are kept where they exist.
+    saved_to = None
+    if close[ticker].notna().sum() < _MIN_BATCH_ROWS and ticker in _SAVED_COPIES:
+        saved = pd.read_csv(_SAVED_COPIES[ticker], index_col=0, parse_dates=True)
+        saved = saved[(saved.index >= pd.Timestamp(first)) & (saved.index <= pd.Timestamp(today))]
+        saved_to = saved[ticker].dropna().index.max()
+        close = close.combine_first(saved.reindex(columns=close.columns))
+        print(f"[download] {ticker} filled from saved copy: {_coverage(close[ticker])}", flush=True)
     # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
     # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
     close = close[close.index.dayofweek < 5]
-    return close[close[ticker].notna()].astype(float)
+    out = close[close[ticker].notna()].astype(float)
+    if saved_to is not None:
+        out.attrs["saved_to"] = saved_to
+    return out
 
 
 def _download_close(ticker, first, today):
@@ -251,6 +265,14 @@ def shared_download(ticker, start):
     and, for TTF=F, CL=F and BZ=F, the monthly contracts of _batch_contracts. A page that needs a monthly
     contract next to the continuous series calls this, so both come from the same download."""
     return _download_batch(ticker, min(pd.Timestamp(start).date(), _DATA_START), _download_day())
+
+
+def show_saved_copy_note(start):
+    """Say so on the page when the TTF prices include the saved copy."""
+    saved_to = shared_download("TTF=F", start).attrs.get("saved_to")
+    if saved_to is not None:
+        st.caption(f"Yahoo Finance is returning only part of the TTF history (`TTF=F`) to this app. Prices up to "
+                   f"{saved_to:%d %b %Y} come from a saved copy of the same series; any later prices are live.")
 
 
 def _raw_close(ticker, start, end):

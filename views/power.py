@@ -111,6 +111,7 @@ ttf = common.load_close("TTF=F", start_date - pd.Timedelta(days=10), end_date).d
 if ttf.empty:
     st.warning("TTF gas prices are unavailable right now, so the spread cannot be computed.")
     st.stop()
+common.show_saved_copy_note(start_date - pd.Timedelta(days=10))
 
 with st.spinner("Fetching EUA auction prices (EEX)..."):
     eua_auctions, eua_errors = power_data.load_eua_auctions(start_date - pd.Timedelta(days=30), end_date)
