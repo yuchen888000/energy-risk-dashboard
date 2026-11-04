@@ -358,6 +358,9 @@ else:
                     _lt = curve.loc[curve['Season'] == key, 'Last trade']
                     if _lt.dt.normalize().nunique() > 1:
                         col_fc.caption(f"Prices from {_lt.min():%d %b} to {_lt.max():%d %b}")
+                    _flag_i = {i for i, _ in common.curve_flagged(curve)}
+                    if any(i in _flag_i for i in curve.index[curve['Season'] == key]):
+                        col_fc.caption("Includes hollow points on the chart: not all priced at the same time.")
                 else:
                     _months = ", ".join(f"{d:%b %y}" for d in curve.loc[curve['Season'] == key, 'Delivery'])
                     col_fc.metric(f"{key} average", "n/a",
@@ -763,8 +766,14 @@ if garch is not None:
         if _fit_from <= pd.Timestamp("2022-06-30") and _fit_to >= pd.Timestamp("2022-12-31"):
             _ev.append("the 2021-22 crisis")
         _crisis = (", which includes " + " and ".join(_ev)) if _ev else ""
-        st.caption(f"The forecast {'rises' if _up else 'falls'} from {common.fmt_vol(current_cond_vol)} to "
-                   f"{common.fmt_vol(_d10)} by day 10 because a GARCH forecast moves towards the model's "
+        # A large last return moves day 1 before any drift (TTF on 4 Nov 2026: 75% today, 82% on day 1, with -7.17%).
+        _d1 = float(forecast_vol.iloc[0])
+        _px = df_analysis['Price'].dropna()
+        _jump = (f"Day 1 is {common.fmt_vol(_d1)} because the model reacts to the latest return "
+                 f"({(_px.iloc[-1] / _px.iloc[-2] - 1) * 100:+.2f}% on {_px.index[-1]:%d %b}, the page's latest price). "
+                 if abs(_d1 / current_cond_vol - 1) >= 0.03 else "")
+        st.caption(f"{_jump}The forecast {'rises' if _up else 'falls'} from {common.fmt_vol(current_cond_vol)} to "
+                   f"{common.fmt_vol(_d10)} by day 10 also because a GARCH forecast moves towards the model's "
                    f"long-run level, which is {'above' if _up else 'below'} today's: it comes "
                    f"from the whole fit period ({_fit_from:%b %Y} to {_fit_to:%b %Y}{_crisis}). It is not a "
                    "reading of news or of the market.")

@@ -383,6 +383,9 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     note = last_value_note(ticker, end_date, last_day).strip()
     if note:
         bits.append(note)
+    _hour = _latest_hour(ticker)
+    if _hour is not None and _hour.date() == pd.Timestamp(last_day).date():
+        bits.append(f"Last traded in the hour from {_hour:%H:%M} Berlin time.")
     fetched = shared_download(ticker, start).attrs.get("fetched_at")
     if fetched is not None and pd.Timestamp(end_date).date() >= berlin_today():
         bits.append(f"Yahoo Finance prices fetched at {fetched:%H:%M} Berlin time on {fetched:%d %b}.")
@@ -1864,6 +1867,13 @@ def _last_hours(symbols):
     except Exception as e:
         print(f"[curve] hourly download failed: {e!r}", flush=True)
     return list(out)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _latest_hour(ticker):
+    """The start of the last hour `ticker` traded, Berlin time, or None."""
+    h = _last_hours([ticker])[0]
+    return None if pd.isna(h) else h
 
 
 def curve_flagged(curve):
