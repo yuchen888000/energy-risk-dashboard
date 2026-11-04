@@ -6,6 +6,7 @@ place. The heavy calculations are wrapped in st.cache_data, so a page that needs
 number another page already computed gets it from the cache.
 """
 import datetime as dt
+import io
 import os
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 import holidays
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 from arch import arch_model
@@ -183,6 +185,45 @@ _MIN_BATCH_ROWS = 250   # fewer rows than this for a series reaching back years 
 _SAVED_COPIES = {"TTF=F": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ttf_saved.csv")}
 
 
+# The same file on GitHub. The daily job (.github/workflows/refresh-ttf.yml) commits to the repository, but a
+# running app keeps the file it was deployed with until it is rebooted, so on 4 Nov 2026 the hosted app still read
+# a copy ending 30 Oct. The app therefore asks for the latest file first and falls back on its own.
+_SAVED_URLS = {"TTF=F": "https://raw.githubusercontent.com/yuchen888000/energy-risk-dashboard/main/data/ttf_saved.csv"}
+
+
+def _read_saved(ticker):
+    """The saved copy of `ticker`: the file on GitHub if it reaches at least as far as the deployed one, otherwise
+    the deployed one."""
+    local = pd.read_csv(_SAVED_COPIES[ticker], index_col=0, parse_dates=True)
+    try:
+        r = requests.get(_SAVED_URLS[ticker], timeout=15)
+        r.raise_for_status()
+        remote = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True)
+        if (remote[ticker].notna().sum() >= local[ticker].notna().sum()
+                and remote[ticker].dropna().index.max() >= local[ticker].dropna().index.max()):
+            print(f"[saved copy] {ticker} from GitHub: {_coverage(remote[ticker])}", flush=True)
+            return remote
+    except Exception as e:
+        print(f"[saved copy] {ticker} GitHub file not used: {e!r}", flush=True)
+    print(f"[saved copy] {ticker} deployed file: {_coverage(local[ticker])}", flush=True)
+    return local
+
+
+def _series_calendar(ticker):
+    """The business days of a series, for finding days Yahoo left out: NYMEX for the futures, London for an ETC on
+    the London Stock Exchange. None for anything else."""
+    return NYMEX_BDAYS if ticker.endswith("=F") else LONDON_BDAYS if ticker.endswith(".L") else None
+
+
+def _skipped_days(days, cal):
+    """Business days of `cal` strictly between consecutive dates of `days`, as a list of Timestamps."""
+    out = []
+    for a, b in zip(days[:-1], days[1:]):
+        rng = pd.date_range(pd.Timestamp(a) + pd.Timedelta(days=1), pd.Timestamp(b) - pd.Timedelta(days=1), freq="D")
+        out += [d for d in rng if np.is_busday(d.date(), busdaycal=cal)]
+    return out
+
+
 def _coverage(series):
     """Rows with a price and first and last date of a downloaded series, for the app log."""
     s = series.dropna()
@@ -229,12 +270,27 @@ def _download_batch(ticker, first, today):
     # Still too short: use the saved copy of the same series, and the download only for days after the copy ends.
     saved_to = None
     if close[ticker].notna().sum() < _MIN_BATCH_ROWS and ticker in _SAVED_COPIES:
-        saved = pd.read_csv(_SAVED_COPIES[ticker], index_col=0, parse_dates=True)
+        saved = _read_saved(ticker)
         saved = saved[(saved.index >= pd.Timestamp(first)) & (saved.index <= pd.Timestamp(today))]
         saved_to = saved[ticker].dropna().index.max()
         # Up to the copy's last day every column comes from the copy, so the series and the monthly contracts
         # stay from one download (a contract price from another download would look like a roll).
         later = close[close.index > saved_to]
+        # Live prices are used only if no business day is missing between the copy and them: joined across a gap,
+        # the first live price would read as a one-day return (-18.20% on 4 Nov 2026, three trading days of moves).
+        _live = later[ticker].dropna()
+        _live = _live[_live.index.dayofweek < 5]
+        cut = None
+        cal = _series_calendar(ticker)
+        if cal is not None and len(_live):
+            _days = [saved_to] + list(_live.index)
+            for _i, (_a, _b) in enumerate(zip(_days[:-1], _days[1:])):
+                _miss = _skipped_days([_a, _b], cal)
+                if _miss:
+                    cut = dict(skipped=_miss, dropped=len(_days) - 1 - _i, last_used=_a)
+                    later = later[later.index <= _a]
+                    print(f"[download] {ticker} live prices cut: no row for {_miss}", flush=True)
+                    break
         close = pd.concat([saved.reindex(columns=close.columns), later]).sort_index()
         print(f"[download] {ticker} filled from saved copy: {_coverage(close[ticker])}", flush=True)
     # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
@@ -243,6 +299,11 @@ def _download_batch(ticker, first, today):
     out = close[close[ticker].notna()].astype(float)
     if saved_to is not None:
         out.attrs["saved_to"] = saved_to
+        out.attrs["cut"] = cut
+    out.attrs["fetched_at"] = pd.Timestamp.now(tz="Europe/Berlin")
+    cal = _series_calendar(ticker)
+    if cal is not None and len(out):
+        out.attrs["skipped"] = _skipped_days(list(out.index[-11:]), cal)
     return out
 
 
@@ -272,10 +333,65 @@ def shared_download(ticker, start):
 
 def show_saved_copy_note(start):
     """Say so on the page when the TTF prices include the saved copy."""
-    saved_to = shared_download("TTF=F", start).attrs.get("saved_to")
+    attrs = shared_download("TTF=F", start).attrs
+    saved_to = attrs.get("saved_to")
     if saved_to is not None:
         st.caption(f"Yahoo Finance is returning only part of the TTF history (`TTF=F`) to this app. Prices up to "
                    f"{saved_to:%d %b %Y} come from a saved copy of the same series; any later prices are live.")
+    cut = attrs.get("cut")
+    if cut:
+        _no_row = ", ".join(f"{d:%d %b}" for d in cut["skipped"])
+        st.warning(f"TTF data stop at {cut['last_used']:%d %b %Y}: Yahoo Finance has no price for {_no_row}, and the "
+                   f"saved copy does not reach those days. The {cut['dropped']} later "
+                   f"price{'s are' if cut['dropped'] != 1 else ' is'} not used, because a return across the missing "
+                   "days would read as a one-day move.")
+
+
+def show_skipped_days_note(ticker, start):
+    """Say so when Yahoo left out a business day among the latest rows: the return on the next row then covers
+    more than one day."""
+    skipped = shared_download(ticker, start).attrs.get("skipped")
+    if skipped:
+        _no_row = ", ".join(f"{d:%d %b %Y}" for d in skipped)
+        st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}, so the return on the next row covers more "
+                   "than one day.")
+
+
+def show_price_header(core, ticker, name, unit, end_date, start):
+    """The latest price and its moves at the top of the Risk and Market pages. Without them a reader cannot see a
+    large move or a wrong price: the statistics below are percentiles and thresholds."""
+    price = core['df_analysis']['Price'].dropna()
+    if len(price) < 2:
+        return
+    last_day, last = price.index[-1], float(price.iloc[-1])
+    ret_1 = (last / float(price.iloc[-2]) - 1) * 100
+    _unit = unit if ticker in CURVE_ROOTS else "USD"
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Latest price ({last_day:%d %b})", f"{last:.2f} {_unit}")
+    c2.metric(f"1-day change (from {price.index[-2]:%d %b})", f"{ret_1:+.2f}%")
+    if len(price) >= 6:
+        c3.metric(f"5-day change (from {price.index[-6]:%d %b})", f"{(last / float(price.iloc[-6]) - 1) * 100:+.2f}%")
+    rc = core.get('rolls')
+    rolls = [pd.Timestamp(r[0]) for r in rc['rolls']] if rc and rc.get('rolls') else []
+    in_5 = [d for d in rolls if len(price) >= 6 and d > price.index[-6]]
+    bits = []
+    if last_day in rolls:
+        bits.append(f"{last_day:%d %b} is a contract roll day, so part of the 1-day change is the price gap between "
+                    "two contracts.")
+    elif in_5:
+        bits.append(f"The 5-day change includes the contract roll of {in_5[-1]:%d %b}.")
+    note = last_value_note(ticker, end_date, last_day).strip()
+    if note:
+        bits.append(note)
+    fetched = shared_download(ticker, start).attrs.get("fetched_at")
+    if fetched is not None and pd.Timestamp(end_date).date() >= berlin_today():
+        bits.append(f"Yahoo Finance prices fetched at {fetched:%H:%M} Berlin time on {fetched:%d %b}.")
+    if bits:
+        st.caption(" ".join(bits))
+    var_99 = core.get('var_99')
+    if var_99 is not None and ret_1 < var_99 and last_day not in rolls:
+        st.markdown(f"⚠️ **{name} fell {abs(ret_1):.2f}% on {last_day:%d %b}**, beyond its 1-day VaR 99% of "
+                    f"{var_99:.2f}% (last {core['var_days']} trading days).")
 
 
 def _raw_close(ticker, start, end):
@@ -1631,6 +1747,9 @@ MONTH_CODES = "FGHJKMNQUVXZ"
 # contracts on Yahoo Finance: EUA futures are annual December contracts on ICE Endex.
 CURVE_ROOTS = {"CL=F": ("CL", "$/barrel"), "BZ=F": ("BZ", "$/barrel"), "TTF=F": ("TTF", "€/MWh")}
 CURVE_FRESH_DAYS = 5     # a contract needs a close within this many trading days
+CURVE_ASYNC_HOURS = 2    # a contract last traded this many hours before the latest one is flagged on the curve
+CURVE_ONE_PRICE = "one price that day"
+CURVE_SAVED = "from the saved copy"
 
 
 @st.cache_data(ttl=3600, show_spinner="Fetching monthly futures contracts...")
@@ -1665,7 +1784,7 @@ def forward_curve(root, n=12, today=None):
         year, month = today.year + month_index // 12, month_index % 12 + 1
         symbols[f"{root}{MONTH_CODES[month - 1]}{year % 100:02d}.NYM"] = dt.date(year, month, 1)
 
-    empty = pd.DataFrame(columns=['Contract', 'Delivery', 'Price', 'Last trade'])
+    empty = pd.DataFrame(columns=['Contract', 'Delivery', 'Price', 'Last trade', 'Last hour', 'Note'])
     try:
         data = yf.download(list(symbols), start=today - dt.timedelta(days=21), progress=False)
     except Exception:
@@ -1679,12 +1798,32 @@ def forward_curve(root, n=12, today=None):
     # Sunday evening session, not a daily close.
     closes = closes[closes.index.dayofweek < 5]
 
+    highs = data['High'] if 'High' in data else None
+    lows = data['Low'] if 'Low' in data else None
     rows = []
     for sym in closes.columns:
         s = closes[sym].dropna()
         if not s.empty and sym in symbols:
-            rows.append({'Contract': sym, 'Delivery': symbols[sym],
-                         'Price': float(s.iloc[-1]), 'Last trade': s.index[-1]})
+            _one = (isinstance(highs, pd.DataFrame) and isinstance(lows, pd.DataFrame)
+                    and sym in highs and sym in lows and s.index[-1] in highs.index
+                    and highs.loc[s.index[-1], sym] == lows.loc[s.index[-1], sym])
+            rows.append({'Contract': sym, 'Delivery': symbols[sym], 'Price': float(s.iloc[-1]),
+                         'Last trade': s.index[-1], 'Note': CURVE_ONE_PRICE if _one else ""})
+    # Yahoo sometimes leaves a TTF contract out of the answer to the hosted app (Feb 27 on 4 Nov 2026 while another
+    # environment had it). The saved copy keeps the contract's last price, with its date and a note.
+    _saved_ticker = next((t for t, (r, _) in CURVE_ROOTS.items() if r == root and t in _SAVED_COPIES), None)
+    if _saved_ticker:
+        _have = {r['Contract'] for r in rows}
+        try:
+            _saved = _read_saved(_saved_ticker)
+            for sym in symbols:
+                if sym not in _have and sym in _saved:
+                    s = _saved[sym].dropna()
+                    if not s.empty:
+                        rows.append({'Contract': sym, 'Delivery': symbols[sym], 'Price': float(s.iloc[-1]),
+                                     'Last trade': s.index[-1], 'Note': CURVE_SAVED})
+        except Exception as e:
+            print(f"[curve] saved copy not used: {e!r}", flush=True)
     if not rows:
         return empty
     df = pd.DataFrame(rows)
@@ -1703,7 +1842,50 @@ def forward_curve(root, n=12, today=None):
                 and first_exp is not None
                 and 0 <= int(np.busday_count(last_day.date(), first_exp.date())) <= 1):
             df = df.iloc[1:]
-    return df.head(n).reset_index(drop=True)
+    df = df.head(n).reset_index(drop=True)
+    df['Last hour'] = _last_hours(list(df['Contract']))
+    return df
+
+
+def _last_hours(symbols):
+    """The start of the last hour each contract traded, Berlin time (NaT if Yahoo gives none). The daily rows have
+    only a date, and two contracts of one date can be hours apart (TTF Dec 26 at 18:09 UTC and Jan 27 at 10:26 UTC on
+    4 Nov 2026), which looks like a curve shape."""
+    out = pd.Series(pd.NaT, index=symbols, dtype="datetime64[ns, Europe/Berlin]")
+    try:
+        bars = yf.download(symbols, period="5d", interval="1h", progress=False)['Close']
+        if isinstance(bars, pd.Series):
+            bars = bars.to_frame(symbols[0])
+        for sym in symbols:
+            if sym in bars:
+                s = bars[sym].dropna()
+                if len(s):
+                    out[sym] = s.index[-1].tz_convert("Europe/Berlin")
+    except Exception as e:
+        print(f"[curve] hourly download failed: {e!r}", flush=True)
+    return list(out)
+
+
+def curve_flagged(curve):
+    """Contracts on the curve whose price is not comparable with the front month's: priced more than
+    CURVE_ASYNC_HOURS earlier, or a single price that day, or from the saved copy. A list of (position, reason)."""
+    out = []
+    if not len(curve):
+        return out
+    hours = curve['Last hour'] if 'Last hour' in curve else pd.Series([pd.NaT] * len(curve))
+    ref = hours.dropna().max() if hours.notna().any() else pd.NaT
+    for i, row in curve.reset_index(drop=True).iterrows():
+        why = []
+        if row.get('Note'):
+            why.append(row['Note'])
+        h = hours.iloc[i]
+        if pd.notna(h) and pd.notna(ref) and (ref - h) > pd.Timedelta(hours=CURVE_ASYNC_HOURS):
+            why.append(f"last traded {h:%d %b %H:%M} Berlin time")
+        elif pd.isna(h) and pd.notna(ref) and row['Last trade'].normalize() < ref.tz_localize(None).normalize():
+            why.append(f"last price of {row['Last trade']:%d %b}")
+        if why:
+            out.append((i, ", ".join(why)))
+    return out
 
 
 EXPIRY_RULES = {

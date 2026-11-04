@@ -27,12 +27,14 @@ CARBON_TICKER = ctx.carbon["ticker"]
 NEWS_DAYS = 7          # headlines older than this are not "current"
 PER_SITE_CAP = 3       # at most this many headlines from one site, so no single publisher dominates
 MAX_HEADLINES = 15     # the recent headlines list shows at most this many
+MIN_HEADLINES = 5      # with fewer than this, the page says the list can miss the main story
 CHECK_DAYS = 252       # base rates of the statistical checks: the last 252 trading days
 VOL_LO_PCT, VOL_HI_PCT = 5, 95       # volatility and correlation checks: percentiles of the last 3 years
 GARCH_HI, GARCH_LO = 1.30, 0.70      # GARCH forecast vs the 3-year average 30-day volatility
 TAIL_MULT = 2.0                      # tail check: loss beyond 2x the 3-year 99% VaR
 ROLLING_FUTURES = ('TTF=F', 'CL=F', 'BZ=F')
 AI_MODEL = "claude-sonnet-5-5"       # Anthropic model ID of the AI interpretation
+AI_MAX_TOKENS = 600                  # the summary is under 100 words
 with st.sidebar.expander("Methodology: Market page"):
     st.markdown("""
     - **Country exposure**: Eurostat data only (nrg_ind_id, nrg_bal_c, nrg_ind_ren,
@@ -47,7 +49,8 @@ with st.sidebar.expander("Methodology: Market page"):
       English-language sources (the commodity's own phrases: for gas "natural gas", LNG, TTF
       and similar with a European place, for carbon "EU ETS", "carbon price" and similar),
       then the headline filter below; at most 15 headlines and 3 per site, duplicates
-      removed. The page says how many of the headlines returned it kept. The time shown is when
+      removed. The page says how many of the headlines returned it kept, and warns when fewer than
+      five are left. The time shown is when
       GDELT first saw the article. Headlines are listed, not scored: a tone score of the
       wording is not a price direction ("gas prices surge" reads as negative). Google News
       and Bing News feeds are not used: their terms allow them only in a personal feed reader.
@@ -93,6 +96,10 @@ core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, 
 if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")
     st.stop()
+common.show_skipped_days_note(commodity['ticker'], start_date)
+common.show_price_header(core, commodity['ticker'], selected_commodity, commodity['unit'], end_date, start_date)
+if ctx.is_carbon:
+    st.caption(f"Carbon benchmark: **{ctx.carbon['name']}**. {ctx.carbon['note']}")
 
 df_analysis = core['df_analysis']
 latest_vol, avg_vol = core['latest_vol'], core['avg_vol']
@@ -151,7 +158,7 @@ _EUROPE_OR_GLOBAL = _word_pattern([
     "Germany", "German", "France", "French", "Italy", "Italian", "Spain", "Spanish", "Netherlands",
     "Dutch", "Norway", "Norwegian", "Poland", "Polish", "Austria", "Belgium", "Russia", "Russian",
     "Ukraine", "TTF", "ETS", "Nord Stream", "North Sea", "Brent", "OPEC", "Hormuz", "Suez",
-    "Red Sea", "global", "world"])
+    "Red Sea", "global", "world", "Iran", "Iranian", "Persian Gulf", "Middle East", "Saudi", "Qatar"])
 # US LNG exports are Europe's largest source of LNG, so they are kept even without "Europe".
 _LNG_EXPORT = (_word_pattern(["LNG"]),
                _word_pattern(["export", "exporter", "cargo", "cargoe", "shipment", "terminal"]))
@@ -685,16 +692,20 @@ for _a in _arts:
     if len(news_rows) >= MAX_HEADLINES:
         break
 
+if 0 < len(news_rows) < MIN_HEADLINES and not _past_end:
+    st.markdown(f"⚠️ **Only {len(news_rows)} headline{'s' if len(news_rows) != 1 else ''} this time**, so this list "
+                "can miss the main story of the week. Check another news source before reading anything into it.")
 if news_rows:
     st.markdown(headline_list_md(news_rows))
     st.caption(f"{len(news_rows)} of the {len(_arts)} headlines GDELT returned for this search, at most "
                f"{MAX_HEADLINES} and at most {PER_SITE_CAP} per site, duplicates removed ({_filter_note}). "
                + GDELT_NOTE)
 elif _news_err:
-    st.info(f"No headlines this time: {_news_err}. The page asks again on the next run.")
+    st.info(f"No headlines this time: {_news_err}. The page asks again on the next run. Check another news source "
+            "for this week's main story.")
 else:
     st.info(f"GDELT returned {len(_arts)} headlines for this search, none of which passed the filter "
-            f"({_filter_note}).")
+            f"({_filter_note}). Check another news source for this week's main story.")
 
 
 # ─── Section 3: Statistical checks ───
@@ -1318,6 +1329,10 @@ def drop_crossed_watch_sentences(text, levels):
 
 # No parameter starts with an underscore: st.cache_data skips such parameters when building the
 # cache key, and then a changed number could return an old narrative.
+class NarrativeError(RuntimeError):
+    """No AI summary this time. Raised, not returned, so st.cache_data keeps no failure for 30 minutes."""
+
+
 @st.cache_data(ttl=1800, show_spinner="Generating AI risk interpretation...")
 def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vol_v,
                             var_95_v, garch_now, garch_10d, garch_ref_v, garch_ref_label,
@@ -1337,7 +1352,7 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
     if not api_key:
         api_key = os.environ.get("ANTHROPIC_API_KEY", None)
     if not api_key:
-        return None, "no_key"
+        raise NarrativeError("no_key")
 
     if garch_10d and garch_now:
         _dir = ("higher than" if garch_10d > garch_now * 1.02 else
@@ -1442,18 +1457,24 @@ Output only the 3 sentences."""
             },
             json={
                 "model": AI_MODEL,
-                "max_tokens": 300,
+                "max_tokens": AI_MAX_TOKENS,
+                # This model can spend the whole token limit thinking and return no text (TTF, Brent and WTI on
+                # 4 Nov 2026: stop_reason max_tokens, one thinking block). "between_tools" is the API's way of
+                # turning that off for this model.
+                "thinking": {"type": "between_tools"},
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=30
         )
-        if response.status_code == 200:
-            narrative = response.json()['content'][0]['text'].strip()
-            return narrative, None
-        else:
-            return None, f"api_error_{response.status_code}"
     except Exception as e:
-        return None, str(e)
+        raise NarrativeError(f"request failed: {e!r}")
+    if response.status_code != 200:
+        raise NarrativeError(f"HTTP {response.status_code}: {response.text[:300]}")
+    body = response.json()
+    narrative = " ".join(b.get('text', '') for b in body.get('content', []) if b.get('type') == 'text').strip()
+    if not narrative:
+        raise NarrativeError(f"no text, stop_reason {body.get('stop_reason')}")
+    return narrative
 
 
 anomaly_types_for_llm = "; ".join(a['type'] for a in anomalies if not a.get('past'))
@@ -1491,7 +1512,9 @@ _worst_txt = (((f"Latest daily return ({recent_all.index[-1]:%d %b %Y}): {_last_
 _worst_txt = " ".join(_worst_txt.split())
 levels_for_llm = "\n".join(f"- {s}" for s in level_lines + [_worst_txt])
 
-narrative, error = generate_risk_narrative(
+narrative, error = None, None
+try:
+    narrative = generate_risk_narrative(
     commodity_name=selected_commodity,
     risk_level_str=vol_summary_for_llm,
     latest_vol_v=float(latest_vol) if latest_vol is not None else None,
@@ -1511,7 +1534,10 @@ narrative, error = generate_risk_narrative(
     check_window_str=ref_name,
     ref_short_str=ref_short,
     last_value_str=common.last_value_note(commodity['ticker'], end_date, _asof).strip(),
-)
+    )
+except NarrativeError as e:
+    error = str(e)
+    print(f"[AI summary] {selected_commodity}: {error}", flush=True)
 
 narrative_dropped = []
 if narrative:
@@ -1538,7 +1564,8 @@ elif narrative_dropped:
 elif error == "no_key":
     st.caption("AI summary not enabled in this deployment (no API key). " + _ai_scope)
 else:
-    st.caption("AI summary temporarily unavailable; the statistics above are unaffected.")
+    st.caption("AI summary temporarily unavailable; the statistics above are unaffected. The page asks again on the "
+               "next run.")
 
 
 # ─── Section 5: Data Export ───

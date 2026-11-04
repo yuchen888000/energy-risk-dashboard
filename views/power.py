@@ -232,6 +232,17 @@ st.write(f"On {day:%a %d %b} the peak block {'covered' if _covered else 'did not
          f"50% (HHV) gas plant ({latest['CSS peak']:+.2f} €/MWh); "
          + (f"the price covered it in {_hm(latest['Run hours'])} of the day." if latest["Run hours"] > 0
             else "the price covered it in no period of the day."))
+# The gas price of the auction day comes after the 12:00 auction, and on a day like 4 Nov 2026 (TTF 92.07 to 85.03)
+# it moves the headline by 14 €/MWh. The spread on the last gas price before the auction goes next to it.
+_gas_day = pd.Timestamp(latest["TTF date"]).normalize()
+_ttf_before = ttf[ttf.index.normalize() < _gas_day]
+if _gas_day == day.normalize() - pd.Timedelta(days=1) and len(_ttf_before):
+    _gas_prev = float(_ttf_before.iloc[-1])
+    _css_prev = latest["CSS peak"] + (latest["TTF"] - _gas_prev) / 0.5
+    st.write(f"The auction for {day:%a %d %b} ran at 12:00 on {_gas_day:%a %d %b}, so that day's gas price "
+             f"({latest['TTF']:.2f} €/MWh) came after it. On the last gas price before the auction "
+             f"({_gas_prev:.2f} €/MWh on {_ttf_before.index[-1]:%a %d %b}) the peak block spread is "
+             f"{_css_prev:+.2f} €/MWh.")
 h1, h2, h3 = st.columns(3)
 h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00), 50% efficiency (HHV)",
           f"{latest['CSS peak']:+.2f} €/MWh",

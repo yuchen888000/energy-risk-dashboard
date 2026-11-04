@@ -98,6 +98,8 @@ core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, 
 if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")
     st.stop()
+common.show_skipped_days_note(commodity['ticker'], start_date)
+common.show_price_header(core, commodity['ticker'], selected_commodity, commodity['unit'], end_date, start_date)
 if not ctx.is_carbon and not core['has_compare']:
     st.caption(f"{CARBON_LABEL} has limited coverage over the selected range, "
                "widen the date window for a fuller comparison.")
@@ -435,6 +437,12 @@ else:
                 "contract on a day near the front contract's expiry, before or after it, so its last price can "
                 "differ from the first contract on this curve. ")
 
+        _flagged = common.curve_flagged(curve)
+        if _flagged:
+            _fi = [i for i, _ in _flagged]
+            ax_fc.scatter([labels_fc[i] for i in _fi], curve['Price'].iloc[_fi], facecolors='white',
+                          edgecolors='black', s=44, zorder=3, label='Not priced with the front month')
+            ax_fc.legend(fontsize=8, loc='upper right')
         for x_fc, y_fc in zip(labels_fc, curve['Price']):
             ax_fc.annotate(f"{y_fc:.2f}", (x_fc, y_fc), textcoords='offset points', xytext=(0, 7),
                            ha='center', fontsize=7)
@@ -443,11 +451,18 @@ else:
         ax_fc.set_title(f"{selected_commodity} futures curve, {_curve_words['title']}: {curve_shape.lower()}")
         plt.tight_layout()
         st.pyplot(fig_fc)
+        if _flagged:
+            st.markdown("⚠️ Hollow points are not priced with the front month, so the gap to them can be timing and "
+                        "not curve shape. "
+                        + " ".join(f"{curve.iloc[i]['Delivery']:%b %y}: {w}." for i, w in _flagged))
 
         with st.expander("Contracts used"):
             st.dataframe(curve.assign(Delivery=curve['Delivery'].map(lambda d: f"{d:%b %Y}"),
                                       Price=curve['Price'].map(lambda v: f"{v:.2f}"),
-                                      **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d')})
+                                      **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d'),
+                                         'Last hour': curve['Last hour'].map(
+                                             lambda t: f"{t:%d %b %H:%M}" if pd.notna(t) else "n/a")})
+                         .rename(columns={'Last hour': 'Last hour traded (Berlin)'})
                          .rename(columns={'Price': f'Price ({curve_unit})'}),
                          width="stretch", hide_index=True)
         if _past_end:
