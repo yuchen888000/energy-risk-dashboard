@@ -16,8 +16,8 @@ MONTH_CODES = "FGHJKMNQUVXZ"
 
 
 def contracts(today):
-    """Monthly TTF contracts from two months back to five months ahead, as the app downloads them."""
-    months = pd.period_range(today.to_period("M") - 2, today.to_period("M") + 5, freq="M")
+    """Monthly TTF contracts from two months back to the app's forward curve's last month (15 months ahead)."""
+    months = pd.period_range(today.to_period("M") - 2, today.to_period("M") + 15, freq="M")
     return [f"TTF{MONTH_CODES[p.month - 1]}{p.year % 100:02d}.NYM" for p in months]
 
 
