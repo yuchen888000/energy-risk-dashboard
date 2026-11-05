@@ -252,7 +252,9 @@ if _gas_day == day.normalize() - pd.Timedelta(days=1) and len(_ttf_before):
     _lt_gas = common.last_trade_on("TTF=F", _gas_day)
     if _lt_gas is not None and abs(_lt_gas[1] - latest["TTF"]) >= 1:
         st.caption(f"The last TTF trade on Yahoo Finance that day was {_lt_gas[1]:.2f} €/MWh, in the hour from "
-                   f"{_lt_gas[0]:%H:%M} Berlin time, against {latest['TTF']:.2f} €/MWh in the day's row used here.")
+                   f"{_lt_gas[0]:%H:%M} Berlin time, against "
+                   + (f"the settlement of {latest['TTF']:.2f} €/MWh" if common.futures_row_state(_gas_day) == 'close'
+                      else f"{latest['TTF']:.2f} €/MWh in the day's row") + " used here.")
 h1, h2, h3 = st.columns(3)
 h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00), 50% efficiency (HHV)",
           f"{latest['CSS peak']:+.2f} €/MWh",
@@ -621,7 +623,9 @@ if len(_full) >= 2 * _LOOKBACK:
     _bt_flex, _bt_nf = _fall_backtest(_full["dFlex"].dropna())
     st.caption(f"Backtest: measured against the 1-in-20 fall of the {_LOOKBACK} changes before each day, the peak spread "
                f"fell further on {_bt_css} of the last {_bt_n} changes and the flexible plant's margin on {_bt_flex} of "
-               f"the last {_bt_nf}. About {0.05 * _bt_n:.0f} would be expected if the 1-in-20 held.")
+               f"the last {_bt_nf}. About {0.05 * _bt_n:.0f} would be expected if the 1-in-20 held"
+               + (", so these figures have recently been too small." if min(_bt_css, _bt_flex) > 0.05 * _bt_n * 1.2
+                  else "."))
 
 
 def _peak_mean(changes_index):

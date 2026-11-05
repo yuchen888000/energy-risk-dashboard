@@ -52,7 +52,12 @@ def test_curve_flags_one_price_and_old_quote():
         "Last hour": [pd.Timestamp("2026-11-04 19:00", tz="Europe/Berlin"),
                       pd.Timestamp("2026-11-04 11:00", tz="Europe/Berlin"), pd.NaT],
         "Note": ["", "", common.CURVE_SAVED]})
-    flagged = dict(common.curve_flagged(curve))
+    # 4 Nov 20:00 New York: the 4 Nov rows are live, so timing matters.
+    flagged = dict(common.curve_flagged(curve, now=pd.Timestamp("2026-11-04 20:00", tz="America/New_York")))
     assert 0 not in flagged
     assert "11:00" in flagged[1]
+    assert common.CURVE_SAVED in flagged[2]
+    # 5 Nov 09:00 New York: the 4 Nov rows are settlements, so only the older price is flagged.
+    flagged = dict(common.curve_flagged(curve, now=pd.Timestamp("2026-11-05 09:00", tz="America/New_York")))
+    assert 0 not in flagged and 1 not in flagged
     assert common.CURVE_SAVED in flagged[2] and "03 Nov" in flagged[2]

@@ -31,7 +31,7 @@ def ny(text):
 @pytest.mark.parametrize("now, row, state", [
     # 22 Oct 15:00 New York: after the 14:30 settlement; the 22 Oct row is today's.
     (ny("2026-10-22 15:00"), OCT22, 'live'),
-    (ny("2026-10-22 15:00"), OCT21, 'unsettled'),
+    (ny("2026-10-22 15:00"), OCT21, 'close'),   # the day before's row, from 05:00 New York
     # 22 Oct 20:00 New York (23 Oct 00:00 UTC): evening session, still written on the 22 Oct row.
     (ny("2026-10-22 20:00"), OCT22, 'live'),
     # The audit's moment: 03:17 UTC on 23 Oct is 23:17 on 22 Oct in New York; a naive time is read as UTC.
@@ -70,7 +70,7 @@ def ny(text):
     # of the day before; on Saturday Friday's row is a close.
     (ny("2026-11-26 03:00"), pd.Timestamp("2026-11-25"), 'unsettled'),
     (ny("2026-11-27 12:00"), pd.Timestamp("2026-11-25"), 'close'),
-    (ny("2026-11-27 12:00"), pd.Timestamp("2026-11-26"), 'unsettled'),
+    (ny("2026-11-27 12:00"), pd.Timestamp("2026-11-26"), 'close'),
     (ny("2026-11-28 12:00"), pd.Timestamp("2026-11-27"), 'close'),
     # A past end date.
     (ny("2026-10-23 03:00"), pd.Timestamp("2020-12-31"), 'close'),

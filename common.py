@@ -365,6 +365,16 @@ def show_saved_copy_note(start):
                    "days would read as a one-day move.")
 
 
+def roll_adjusted_garch(returns, rolls, ref):
+    """fit_garch with each identified roll day's return replaced by the new contract's own return. `rolls` is
+    window_rolls' list of (date, contract, series return, new contract return)."""
+    r = returns.copy()
+    for t, _m, _cr, nr in rolls:
+        if t in r.index:
+            r.loc[t] = nr
+    return fit_garch(r, ref)
+
+
 def show_skipped_days_note(ticker, start):
     """Say so when Yahoo left out a business day among the latest rows: the return on the next row then covers
     more than one day."""
@@ -419,7 +429,9 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     if _lt is not None:
         _gap = (_lt[1] / last - 1) * 100
         bits.append(f"Last trade on Yahoo Finance: {_lt[1]:.2f} in the hour from {_lt[0]:%H:%M} Berlin time"
-                    + (f", {_gap:+.1f}% from the price above, which is the day's row." if abs(_gap) >= 1 else "."))
+                    + (f", {_gap:+.1f}% from the price above, which is the day's "
+                       + ("settlement." if ticker.endswith("=F") and futures_row_state(last_day) == 'close' else "row.")
+                       if abs(_gap) >= 1 else "."))
     _zv = shared_download(ticker, start).attrs.get("zero_volume")
     if _zv and _zv[1] and _zv[0] / _zv[1] >= 0.1:
         bits.append(f"Yahoo Finance shows no trades on {_zv[0]} of the last {_zv[1]} days with a price, so a close on "
@@ -1333,7 +1345,13 @@ def futures_row_state(day, now=None):
     d = pd.Timestamp(day).normalize()
     if d >= new_york_today(now):
         return 'live'
-    return 'unsettled' if d >= futures_live_from(now) else 'close'
+    if d < futures_live_from(now):
+        return 'close'
+    # From 05:00 New York the day before's row is the settlement: Yahoo rewrites it after New York midnight (TTF on 5 Nov
+    # 2026: 88.08 by 04:55 New York, and CME's page implies a settlement of 88.082; WTI and Brent on 23 Oct 2026).
+    _ny = pd.Timestamp.now(tz=NEW_YORK) if now is None else pd.Timestamp(now)
+    _ny = (_ny.tz_localize("UTC") if _ny.tzinfo is None else _ny).tz_convert(NEW_YORK)
+    return 'close' if _ny.hour >= SETTLED_FROM_HOUR else 'unsettled'
 
 
 # The wording of the three states, written once (futures_row_state).
@@ -1788,6 +1806,7 @@ MONTH_CODES = "FGHJKMNQUVXZ"
 # contracts on Yahoo Finance: EUA futures are annual December contracts on ICE Endex.
 CURVE_ROOTS = {"CL=F": ("CL", "$/barrel"), "BZ=F": ("BZ", "$/barrel"), "TTF=F": ("TTF", "€/MWh")}
 CURVE_FRESH_DAYS = 5     # a contract needs a close within this many trading days
+SETTLED_FROM_HOUR = 5    # New York hour from which the day before's row is treated as the settlement
 CURVE_ASYNC_HOURS = 2    # a contract last traded this many hours before the latest one is flagged on the curve
 CURVE_ONE_PRICE = "one price that day"
 CURVE_SAVED = "from the saved copy"
@@ -1965,18 +1984,28 @@ def last_trade_before(ticker, when):
     return None
 
 
-def curve_flagged(curve):
+def curve_flagged(curve, now=None):
     """Contracts on the curve whose price is not comparable with the front month's: priced more than
     CURVE_ASYNC_HOURS earlier, or a single price that day, or from the saved copy. A list of (position, reason)."""
     out = []
     if not len(curve):
         return out
     hours = curve['Last hour'] if 'Last hour' in curve else pd.Series([pd.NaT] * len(curve))
+    hours = hours.reset_index(drop=True)
     ref = hours.dropna().max() if hours.notna().any() else pd.NaT
     for i, row in curve.reset_index(drop=True).iterrows():
         why = []
-        if row.get('Note'):
+        # A settled row is the exchange's price, not a last trade, so its last hour and a single trade do not matter
+        # (Brent Jul 27 on 5 Nov 2026: point 84.04, the settlement; last trade 90.42).
+        settled = futures_row_state(row['Last trade'], now) == 'close'
+        if row.get('Note') and not (settled and row['Note'] == CURVE_ONE_PRICE):
             why.append(row['Note'])
+        if settled:
+            if row['Last trade'].normalize() < curve['Last trade'].max().normalize():
+                why.append(f"last price of {row['Last trade']:%d %b}")
+            if why:
+                out.append((i, ", ".join(why)))
+            continue
         h = hours.iloc[i]
         if pd.notna(h) and pd.notna(ref) and (ref - h) > pd.Timedelta(hours=CURVE_ASYNC_HOURS):
             _moved = row.get('Front since')

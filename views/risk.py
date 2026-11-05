@@ -749,6 +749,13 @@ if garch is not None:
     gc4.metric("10-day holding-period vol", f"{cum_10d * np.sqrt(252 / 10):.0f}% ann. ({cum_10d:.2f}% over 10 days)",
                help="Volatility of the cumulative return over the next 10 trading days: square root of the sum "
                     "of the 10 daily forecast variances; annualised x √(252/10).")
+    _rc = core.get('rolls')
+    if _rc and _rc.get('rolls'):
+        _g_adj = common.roll_adjusted_garch(returns_clean, _rc['rolls'], float(avg_vol))
+        if _g_adj is not None:
+            st.caption(f"With the new contract's own return on the {len(_rc['rolls'])} roll "
+                       f"day{'s' if len(_rc['rolls']) != 1 else ''} of the last 30 days: current "
+                       f"{common.fmt_vol(_g_adj['current_cond_vol'])}, day 10 {common.fmt_vol(_g_adj['forecast_10d'])}.")
     # The forecast drifts towards the model's long-run level, which can be far from today's when the fit
     # period holds a crisis; say so on the page, because it changes how the rising or falling path is read.
     _lr = garch.get('garch_long_run')
