@@ -1787,7 +1787,7 @@ def forward_curve(root, n=12, today=None):
         year, month = today.year + month_index // 12, month_index % 12 + 1
         symbols[f"{root}{MONTH_CODES[month - 1]}{year % 100:02d}.NYM"] = dt.date(year, month, 1)
 
-    empty = pd.DataFrame(columns=['Contract', 'Delivery', 'Price', 'Last trade', 'Last hour', 'Note'])
+    empty = pd.DataFrame(columns=['Contract', 'Delivery', 'Price', 'Last trade', 'Last hour', 'Front since', 'Note'])
     try:
         data = yf.download(list(symbols), start=today - dt.timedelta(days=21), progress=False)
     except Exception:
@@ -1847,7 +1847,27 @@ def forward_curve(root, n=12, today=None):
             df = df.iloc[1:]
     df = df.head(n).reset_index(drop=True)
     df['Last hour'] = _last_hours(list(df['Contract']))
+    df['Front since'] = _front_move_since(df)
     return df
+
+
+def _front_move_since(df):
+    """For each contract, how far the front month has moved since that contract's last traded hour, in %: the size
+    of the timing gap on the curve (NaN when unknown)."""
+    out = [np.nan] * len(df)
+    if not len(df):
+        return out
+    try:
+        bars = yf.download(df['Contract'].iloc[0], period="5d", interval="1h", progress=False)['Close'].squeeze().dropna()
+        bars.index = bars.index.tz_convert("Europe/Berlin")
+        for i, h in enumerate(df['Last hour']):
+            if pd.notna(h) and len(bars):
+                then = bars[bars.index <= h]
+                if len(then):
+                    out[i] = (float(bars.iloc[-1]) / float(then.iloc[-1]) - 1) * 100
+    except Exception as e:
+        print(f"[curve] front month hours failed: {e!r}", flush=True)
+    return out
 
 
 def _last_hours(symbols):
@@ -1890,7 +1910,9 @@ def curve_flagged(curve):
             why.append(row['Note'])
         h = hours.iloc[i]
         if pd.notna(h) and pd.notna(ref) and (ref - h) > pd.Timedelta(hours=CURVE_ASYNC_HOURS):
-            why.append(f"last traded {h:%d %b %H:%M} Berlin time")
+            _moved = row.get('Front since')
+            why.append(f"last traded {h:%d %b %H:%M} Berlin time"
+                       + (f", the front month has moved {_moved:+.1f}% since" if pd.notna(_moved) else ""))
         elif pd.isna(h) and pd.notna(ref) and row['Last trade'].normalize() < ref.tz_localize(None).normalize():
             why.append(f"last price of {row['Last trade']:%d %b}")
         if why:

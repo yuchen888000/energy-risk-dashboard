@@ -465,7 +465,7 @@ else:
                                       **{'Last trade': curve['Last trade'].dt.strftime('%Y-%m-%d'),
                                          'Last hour': curve['Last hour'].map(
                                              lambda t: f"{t:%d %b %H:%M}" if pd.notna(t) else "n/a")})
-                         .rename(columns={'Last hour': 'Last hour traded (Berlin)'})
+                         .drop(columns=['Front since']).rename(columns={'Last hour': 'Last hour traded (Berlin)'})
                          .rename(columns={'Price': f'Price ({curve_unit})'}),
                          width="stretch", hide_index=True)
         if _past_end:
@@ -754,6 +754,15 @@ if garch is not None:
     _lr = garch.get('garch_long_run')
     _d10 = float(forecast_vol.iloc[9])
     _up = _d10 > current_cond_vol
+    # A large last return moves day 1 before any drift (TTF on 4 Nov 2026: 75% today, 82% on day 1, with -7.17%).
+    _d1 = float(forecast_vol.iloc[0])
+    _px = df_analysis['Price'].dropna()
+    _jump = (f"Day 1 is {common.fmt_vol(_d1)} because the model reacts to the latest return "
+             f"({(_px.iloc[-1] / _px.iloc[-2] - 1) * 100:+.2f}% on {_px.index[-1]:%d %b}, the page's latest price). "
+             if abs(_d1 / current_cond_vol - 1) >= 0.03 else "")
+    _drift_note = _lr is not None and abs(_d10 / current_cond_vol - 1) >= 0.05 and (_lr > current_cond_vol) == _up
+    if _jump and not _drift_note:
+        st.caption(_jump.strip())
     # Only when the path and the long-run level point the same way (a large last shock can lift day 1
     # above a long-run level that is lower, and then the drift is not the whole story).
     if _lr is not None and abs(_d10 / current_cond_vol - 1) >= 0.05 and (_lr > current_cond_vol) == _up:
@@ -766,12 +775,6 @@ if garch is not None:
         if _fit_from <= pd.Timestamp("2022-06-30") and _fit_to >= pd.Timestamp("2022-12-31"):
             _ev.append("the 2021-22 crisis")
         _crisis = (", which includes " + " and ".join(_ev)) if _ev else ""
-        # A large last return moves day 1 before any drift (TTF on 4 Nov 2026: 75% today, 82% on day 1, with -7.17%).
-        _d1 = float(forecast_vol.iloc[0])
-        _px = df_analysis['Price'].dropna()
-        _jump = (f"Day 1 is {common.fmt_vol(_d1)} because the model reacts to the latest return "
-                 f"({(_px.iloc[-1] / _px.iloc[-2] - 1) * 100:+.2f}% on {_px.index[-1]:%d %b}, the page's latest price). "
-                 if abs(_d1 / current_cond_vol - 1) >= 0.03 else "")
         st.caption(f"{_jump}The forecast {'rises' if _up else 'falls'} from {common.fmt_vol(current_cond_vol)} to "
                    f"{common.fmt_vol(_d10)} by day 10 also because a GARCH forecast moves towards the model's "
                    f"long-run level, which is {'above' if _up else 'below'} today's: it comes "
