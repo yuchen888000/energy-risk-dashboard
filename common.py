@@ -375,6 +375,9 @@ def show_skipped_days_note(ticker, start):
                    "covers more than one day.")
 
 
+_ZERO_VOLUME_NOTE = {"CARB.L"}   # thinly traded: say when the latest day has no trade
+
+
 def show_price_header(core, ticker, name, unit, end_date, start):
     """The latest price and its moves at the top of the Risk and Market pages. Without them a reader cannot see a
     large move or a wrong price: the statistics below are percentiles and thresholds."""
@@ -410,15 +413,17 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     note = last_value_note(ticker, end_date, last_day).strip()
     if note:
         bits.append(note)
-    _lt = latest_trade(ticker)
-    if _lt is not None and _lt[0].date() == pd.Timestamp(last_day).date():
+    _lt = last_trade_on(ticker, last_day)
+    if _lt is None and ticker in _ZERO_VOLUME_NOTE:
+        bits.append(f"Yahoo Finance shows no trade on {last_day:%d %b}, so this price is not a traded price.")
+    if _lt is not None:
         _gap = (_lt[1] / last - 1) * 100
         bits.append(f"Last trade on Yahoo Finance: {_lt[1]:.2f} in the hour from {_lt[0]:%H:%M} Berlin time"
                     + (f", {_gap:+.1f}% from the price above, which is the day's row." if abs(_gap) >= 1 else "."))
     _zv = shared_download(ticker, start).attrs.get("zero_volume")
     if _zv and _zv[1] and _zv[0] / _zv[1] >= 0.1:
         bits.append(f"Yahoo Finance shows no trades on {_zv[0]} of the last {_zv[1]} days with a price, so a close on "
-                    "those days is not a traded price.")
+                    "those days is not a traded price and the 30-day volatility can read low.")
     fetched = shared_download(ticker, start).attrs.get("fetched_at")
     if fetched is not None and pd.Timestamp(end_date).date() >= berlin_today():
         bits.append(f"Yahoo Finance prices fetched at {fetched:%H:%M} Berlin time on {fetched:%d %b}.")
@@ -1922,26 +1927,36 @@ def _last_hours(symbols):
     return list(out)
 
 
+def _bars_with_volume(ticker, interval):
+    """Closes of Yahoo's intraday bars with volume above zero, Berlin time. A zero-volume bar is a quote, not a trade
+    (CARB.L at 13:00 on 4 Nov 2026 and TTF=F at 11:55 on 5 Nov 2026)."""
+    data = yf.download(ticker, period="5d", interval=interval, progress=False)
+    close, vol = data['Close'].squeeze(), data['Volume'].squeeze()
+    out = close[vol > 0].dropna()
+    out.index = out.index.tz_convert("Europe/Berlin")
+    return out
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def latest_trade(ticker):
-    """(start of the last hour `ticker` traded in Berlin time, its last price in that hour), or None. Yahoo's daily row
-    can differ from it (TTF on 4 Nov 2026: row 88.08, last trade 85.03)."""
+def last_trade_on(ticker, day):
+    """(start of the last hour with a trade on `day`, its last price), Berlin time, or None. Yahoo's daily row can differ
+    from it (TTF on 4 Nov 2026: row 88.08, the settlement CME's page implies, and last trade 85.03)."""
     try:
-        bars = yf.download(ticker, period="5d", interval="1h", progress=False)['Close'].squeeze().dropna()
+        bars = _bars_with_volume(ticker, "1h")
+        bars = bars[bars.index.date == pd.Timestamp(day).date()]
         if len(bars):
-            return bars.index[-1].tz_convert("Europe/Berlin"), float(bars.iloc[-1])
+            return bars.index[-1], float(bars.iloc[-1])
     except Exception as e:
-        print(f"[latest trade] {ticker}: {e!r}", flush=True)
+        print(f"[last trade] {ticker}: {e!r}", flush=True)
     return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def last_trade_before(ticker, when):
-    """(time, price) of the last 5-minute bar of `ticker` before `when` (Berlin time, tz-aware), same day, or None.
+    """(time, price) of the last 5-minute bar with a trade before `when` (Berlin time, tz-aware), same day, or None.
     Yahoo keeps 5-minute bars for about 60 days."""
     try:
-        bars = yf.download(ticker, period="5d", interval="5m", progress=False)['Close'].squeeze().dropna()
-        bars.index = bars.index.tz_convert("Europe/Berlin")
+        bars = _bars_with_volume(ticker, "5m")
         bars = bars[(bars.index < when) & (bars.index.normalize() == when.normalize())]
         if len(bars):
             return bars.index[-1], float(bars.iloc[-1])

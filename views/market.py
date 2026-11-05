@@ -1437,6 +1437,8 @@ HARD RULES
 - GARCH is a model fitted on past daily returns. Never call it implied, options-implied or option-based, and never say it is or is not a "model artifact".
 - A check that last fired on an earlier date is a past event: name its date if you mention it, and never present it as a current signal.
 - Give no trading, hedging or position-sizing advice.
+- Do not say that a contract roll raises, lowers or inflates volatility, and do not say a figure understates or overstates the market.
+- When you quote a VaR, call it VaR 95%.
 - If a field reads N/A or None, pass over it in silence. Do not comment on its absence.
 - Never attribute a claim, forecast or warning to a named bank, agency, institution or analyst.
 - Do not assert a causal chain the data above cannot support. If a link is speculative, mark it as speculative.

@@ -249,8 +249,8 @@ if _gas_day == day.normalize() - pd.Timedelta(days=1) and len(_ttf_before):
     st.write(f"The auction for {day:%a %d %b} ran at 12:00 on {_gas_day:%a %d %b}, so that day's gas price "
              f"({latest['TTF']:.2f} €/MWh) came after it. On {_gas_prev:.2f} €/MWh, {_prev_words}, the peak block "
              f"spread is {_css_prev:+.2f} €/MWh.")
-    _lt_gas = common.latest_trade("TTF=F")
-    if _lt_gas is not None and _lt_gas[0].date() == _gas_day.date() and abs(_lt_gas[1] - latest["TTF"]) >= 1:
+    _lt_gas = common.last_trade_on("TTF=F", _gas_day)
+    if _lt_gas is not None and abs(_lt_gas[1] - latest["TTF"]) >= 1:
         st.caption(f"The last TTF trade on Yahoo Finance that day was {_lt_gas[1]:.2f} €/MWh, in the hour from "
                    f"{_lt_gas[0]:%H:%M} Berlin time, against {latest['TTF']:.2f} €/MWh in the day's row used here.")
 h1, h2, h3 = st.columns(3)
@@ -598,6 +598,14 @@ _full = _full[_full.index <= day] if len(_full) else _full
 sp_css = common.stress_period_fall(_full["dCSS"]) if len(_full) else None
 sp_flex = common.stress_period_fall(_full["dFlex"]) if len(_full) else None
 
+
+def _fall_backtest(changes, window=250, tail=250):
+    """Times the change fell beyond the 5th percentile of the `window` changes before it, over the last `tail` changes."""
+    thr = changes.rolling(window).quantile(0.05).shift(1)
+    both = pd.concat([changes, thr], axis=1).dropna().tail(tail)
+    return int((both.iloc[:, 0] < both.iloc[:, 1]).sum()), len(both)
+
+
 r1, r2, r3 = st.columns(3)
 r1.metric("30-day volatility of the day-on-day change in peak spread (last 30 changes)", f"{css_vol_now:.2f} €/MWh",
           help="Standard deviation of the last 30 day-on-day changes (consecutive delivery business days).")
@@ -608,6 +616,12 @@ r3.metric(f"1-in-20 day-on-day fall in the {PLANT_MW} MW flexible plant's daily 
           f"€{flex_fall95 / 1e6:.2f}m",
           help=f"5th percentile of the last {len(flex_recent)} day-on-day changes in the flexible plant's "
                f"daily gross margin ({PLANT_MW} MW × hours run × average spread when running).")
+if len(_full) >= 2 * _LOOKBACK:
+    _bt_css, _bt_n = _fall_backtest(_full["dCSS"].dropna())
+    _bt_flex, _bt_nf = _fall_backtest(_full["dFlex"].dropna())
+    st.caption(f"Backtest: measured against the 1-in-20 fall of the {_LOOKBACK} changes before each day, the peak spread "
+               f"fell further on {_bt_css} of the last {_bt_n} changes and the flexible plant's margin on {_bt_flex} of "
+               f"the last {_bt_nf}. About {0.05 * _bt_n:.0f} would be expected if the 1-in-20 held.")
 
 
 def _peak_mean(changes_index):

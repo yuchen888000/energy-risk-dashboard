@@ -74,9 +74,9 @@ with st.sidebar.expander("Methodology: Risk page"):
     - **Volatility references**: two references that do not roll with the market: the multiple of
       the pre-war level (median 30-day volatility of Oct to Dec 2025, the last full quarter before the war; for an end
       date before the strikes the page names it by its months) and the percentile among every
-      30-day volatility since the start of the data (2017; TTF from Oct 2017). No Normal / Elevated /
+      30-day volatility since the start of the data (2017; TTF from Oct 2017; EU Carbon ETC from Sep 2021). No Normal / Elevated /
       Extreme label: there is no industry-standard cut-off for one.
-    - **Stress-period VaR and ES**: today's positions on the 250 trading days since 2017 (at most
+    - **Stress-period VaR and ES**: today's positions on the 250 trading days since the start of the data (at most
       400 calendar days) in which they have the largest ES 97.5%, equally weighted, after the Basel
       method (BCBS MAR33.7), shown next to the last 250 days.
     - **Historical scenarios**: today's positions replayed through three past windows
@@ -1015,7 +1015,7 @@ else:
                 + f".{_tie_txt}{_es_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
                 "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "
-                "scaling; here the horizon is 1 day, as above. The search starts in 2017: TTF=F starts on 23 Oct "
+                "scaling; here the horizon is 1 day, as above. The search starts when every position in the book has prices: TTF=F starts on 23 Oct "
                 "2017, so a book with TTF cannot reach back to 2007 as Basel requires. Brent and WTI were checked "
                 "back to 2007 and 2000 (on 22 Oct 2026): no earlier 12 months was more volatile or had a larger "
                 "loss for one unit long or short.")
