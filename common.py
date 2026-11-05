@@ -367,7 +367,7 @@ def show_skipped_days_note(ticker, start):
     skipped = shared_download(ticker, start).attrs.get("skipped")
     if skipped:
         _no_row = ", ".join(f"{d:%d %b %Y}" for d in skipped)
-        st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}, A return on the row after a missing day "
+        st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}. A return on the row after a missing day "
                    "covers more than one day.")
 
 
