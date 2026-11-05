@@ -1011,8 +1011,7 @@ else:
                 f"the {common.STRESS_WINDOW} days must fall within {common.STRESS_MAX_SPAN} calendar days (normally "
                 "they span 360 to 380). "
                 "As above, only days on which every instrument held has a return count"
-                + (f"; the {common.STRESS_MAX_SPAN}-day limit leaves out EU Carbon ETC's suspension (Jun 2020 to "
-                   "Aug 2021) and its sparse prices before 2018" if CARBON_SHORT in positions else "")
+                + (f"; {CARBON_SHORT} starts on 1 Sep 2021" if CARBON_SHORT in positions else "")
                 + f".{_tie_txt}{_es_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
                 "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "

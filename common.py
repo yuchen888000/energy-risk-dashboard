@@ -37,9 +37,8 @@ CARBON_CANDIDATES = [
         "pure_eu": True,
         "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
                  "EUA futures, but the quote is an ETC share price in USD, not €/tCO2, so its "
-                 "returns also carry EUR/USD moves, roll yield and fees. The price jumps from 15.45 to about 24.60 "
-                 "across the Yahoo gap of Jun 2020 to Aug 2021, and prices before the gap may be another product (not "
-                 "verified), so figures reaching back before Sep 2021 can mix the two."),
+                 "returns also carry EUR/USD moves, roll yield and fees. This page starts on 1 Sep 2021: WisdomTree "
+                 "gives 24 Aug 2021 as the ETC's inception date, so Yahoo's earlier CARB.L prices are not this ETC."),
     },
     {
         "ticker": "KRBN",
@@ -182,6 +181,9 @@ def _batch_contracts(ticker, today):
     return [f"{root}{MONTH_CODES[p.month - 1]}{p.year % 100:02d}.NYM" for p in months]
 
 
+# Yahoo's CARB.L reaches back to 2017, but WisdomTree's product page gives the ETC's inception as 24 Aug 2021 (read
+# 5 Nov 2026), and Yahoo repeats 15.45 until 31 Aug 2021, then 24.59 on 1 Sep. Earlier rows are not this product.
+_SERIES_FIRST_DAY = {"CARB.L": pd.Timestamp("2021-09-01")}
 _MIN_BATCH_ROWS = 250   # fewer rows than this for a series reaching back years means the download came back cut short
 # Saved copy of a series, used only when Yahoo returns too little of it (TTF=F from 1 Nov 2026 on the hosted app).
 _SAVED_COPIES = {"TTF=F": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ttf_saved.csv")}
@@ -304,6 +306,8 @@ def _download_batch(ticker, first, today):
                     break
         close = pd.concat([saved.reindex(columns=close.columns), later]).sort_index()
         print(f"[download] {ticker} filled from saved copy: {_coverage(close[ticker])}", flush=True)
+    if ticker in _SERIES_FIRST_DAY:
+        close = close[close.index >= _SERIES_FIRST_DAY[ticker]]
     # Yahoo sometimes adds a Saturday or Sunday row with an intraday price from the Sunday
     # evening session (e.g. CL=F, BZ=F). It is not a settlement, so weekend rows are dropped.
     close = close[close.index.dayofweek < 5]
@@ -1500,7 +1504,7 @@ def stress_period(panel, positions, window=STRESS_WINDOW, max_span=STRESS_MAX_SP
     `positions` maps instrument to € notional. Only days on which every instrument held has a return count, as
     for the book VaR above. A candidate is `window` such consecutive days spanning at most `max_span` calendar
     days: 250 common days of instruments on different holiday calendars normally span 360 to 380 days, while a long gap
-    (the carbon ETC's suspension from June 2020 to August 2021, its sparse prices before 2018) makes the span far
+    (a suspension or sparse prices) makes the span far
     longer, so such a stretch cannot be passed off as 12 months. The stress period is the candidate with the
     largest ES 97.5% (same definition as hist_es). The ES of 250 days depends on its worst 7 days only, so
     neighbouring windows containing the same worst days share the largest ES exactly; the latest of them is
