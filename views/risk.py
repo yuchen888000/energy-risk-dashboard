@@ -888,6 +888,9 @@ else:
             usage_status, usage_color = "🟢 WITHIN LIMIT", "green"
 
         _n_tail_book = int((recent <= np.percentile(recent, 2.5)).sum())
+        _bk_end = book_returns.index[-1]
+        st.caption(f"Book data to {_bk_end:%d %b %Y}: the last day all positions in the book have a price. Moves after "
+                   "that day are not in these figures.")
         pl1, pl2, pl3, pl4 = st.columns(4)
         pl1.metric("Book VaR 95% (1-day)", f"€{book_var95 / 1e6:,.2f}m",
                    help="Daily book loss exceeded on 5% of the last 250 days.")

@@ -37,7 +37,9 @@ CARBON_CANDIDATES = [
         "pure_eu": True,
         "note": ("WisdomTree Carbon ETC, USD line on the LSE (the GBP line is CARP). It tracks ICE "
                  "EUA futures, but the quote is an ETC share price in USD, not €/tCO2, so its "
-                 "returns also carry EUR/USD moves, roll yield and fees."),
+                 "returns also carry EUR/USD moves, roll yield and fees. The price jumps from 15.45 to about 24.60 "
+                 "across the Yahoo gap of Jun 2020 to Aug 2021, and prices before the gap may be another product (not "
+                 "verified), so figures reaching back before Sep 2021 can mix the two."),
     },
     {
         "ticker": "KRBN",
@@ -254,6 +256,15 @@ def _download_batch(ticker, first, today):
         close = close.to_frame(ticker)
     if ticker not in close:
         return pd.DataFrame()
+    # Days Yahoo shows no trades among the last 30 rows with a price: a close on such a day is not a traded price.
+    zero_volume = None
+    try:
+        _vol = data['Volume']
+        _vol = _vol[ticker] if isinstance(_vol, pd.DataFrame) else _vol
+        _vol = _vol.reindex(close[ticker].dropna().index).tail(30)
+        zero_volume = (int((_vol == 0).sum()), len(_vol))
+    except Exception:
+        pass
     print(f"[download] {ticker} batch: {_coverage(close[ticker])}; all columns {close.notna().sum().to_dict()}", flush=True)
     # A batch download can return far too few rows for the continuous series while the other columns look fine.
     # Ask for it alone before giving up on the series.
@@ -303,7 +314,10 @@ def _download_batch(ticker, first, today):
     out.attrs["fetched_at"] = pd.Timestamp.now(tz="Europe/Berlin")
     cal = _series_calendar(ticker)
     if cal is not None and len(out):
-        out.attrs["skipped"] = _skipped_days(list(out.index[-11:]), cal)
+        # Also the business days between the last row and today: a price missing at the end moves no return, but the
+        # reader should know the latest price is older than it looks.
+        out.attrs["skipped"] = _skipped_days(list(out.index[-11:]) + [pd.Timestamp(today)], cal)
+    out.attrs["zero_volume"] = zero_volume
     return out
 
 
@@ -353,8 +367,8 @@ def show_skipped_days_note(ticker, start):
     skipped = shared_download(ticker, start).attrs.get("skipped")
     if skipped:
         _no_row = ", ".join(f"{d:%d %b %Y}" for d in skipped)
-        st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}, so the return on the next row covers more "
-                   "than one day.")
+        st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}, A return on the row after a missing day "
+                   "covers more than one day.")
 
 
 def show_price_header(core, ticker, name, unit, end_date, start):
@@ -386,6 +400,10 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     _hour = _latest_hour(ticker)
     if _hour is not None and _hour.date() == pd.Timestamp(last_day).date():
         bits.append(f"Last traded in the hour from {_hour:%H:%M} Berlin time.")
+    _zv = shared_download(ticker, start).attrs.get("zero_volume")
+    if _zv and _zv[1] and _zv[0] / _zv[1] >= 0.1:
+        bits.append(f"Yahoo Finance shows no trades on {_zv[0]} of the last {_zv[1]} days with a price, so a close on "
+                    "those days is not a traded price.")
     fetched = shared_download(ticker, start).attrs.get("fetched_at")
     if fetched is not None and pd.Timestamp(end_date).date() >= berlin_today():
         bits.append(f"Yahoo Finance prices fetched at {fetched:%H:%M} Berlin time on {fetched:%d %b}.")
@@ -1911,7 +1929,7 @@ def curve_flagged(curve):
         h = hours.iloc[i]
         if pd.notna(h) and pd.notna(ref) and (ref - h) > pd.Timedelta(hours=CURVE_ASYNC_HOURS):
             _moved = row.get('Front since')
-            why.append(f"last traded {h:%d %b %H:%M} Berlin time"
+            why.append(f"last traded in the hour from {h:%d %b %H:%M} Berlin time"
                        + (f", the front month has moved {_moved:+.1f}% since" if pd.notna(_moved) else ""))
         elif pd.isna(h) and pd.notna(ref) and row['Last trade'].normalize() < ref.tz_localize(None).normalize():
             why.append(f"last price of {row['Last trade']:%d %b}")
