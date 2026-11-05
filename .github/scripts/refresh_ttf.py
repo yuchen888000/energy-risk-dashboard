@@ -40,7 +40,8 @@ def main():
         return 1
     out = new.combine_first(saved).sort_index().dropna(axis=1, how="all")
     out = out[[TICKER] + sorted(c for c in out.columns if c != TICKER)]
-    out = out[out[TICKER].notna()]
+    # Today's row is still a live price, so it is never saved: the app takes it from Yahoo.
+    out = out[out[TICKER].notna() & (out.index < today)]
     out.index.name = "Date"
     out.to_csv(PATH)
     print(f"Saved {out.shape[0]} rows, columns {list(out.columns)}")
