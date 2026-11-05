@@ -237,12 +237,22 @@ st.write(f"On {day:%a %d %b} the peak block {'covered' if _covered else 'did not
 _gas_day = pd.Timestamp(latest["TTF date"]).normalize()
 _ttf_before = ttf[ttf.index.normalize() < _gas_day]
 if _gas_day == day.normalize() - pd.Timedelta(days=1) and len(_ttf_before):
-    _gas_prev = float(_ttf_before.iloc[-1])
+    _noon = _gas_day.tz_localize("Europe/Berlin") + pd.Timedelta(hours=12)
+    _before = common.last_trade_before("TTF=F", _noon)
+    if _before is not None:
+        _gas_prev, _prev_words = _before[1], f"the last TTF trade before the auction, at {_before[0]:%H:%M} Berlin time"
+    else:
+        _gas_prev = float(_ttf_before.iloc[-1])
+        _prev_words = (f"the previous close, of {_ttf_before.index[-1]:%a %d %b} (no TTF trade on Yahoo Finance before "
+                       "12:00 that day)")
     _css_prev = latest["CSS peak"] + (latest["TTF"] - _gas_prev) / 0.5
     st.write(f"The auction for {day:%a %d %b} ran at 12:00 on {_gas_day:%a %d %b}, so that day's gas price "
-             f"({latest['TTF']:.2f} €/MWh) came after it. On the last gas price before the auction "
-             f"({_gas_prev:.2f} €/MWh on {_ttf_before.index[-1]:%a %d %b}) the peak block spread is "
-             f"{_css_prev:+.2f} €/MWh.")
+             f"({latest['TTF']:.2f} €/MWh) came after it. On {_gas_prev:.2f} €/MWh, {_prev_words}, the peak block "
+             f"spread is {_css_prev:+.2f} €/MWh.")
+    _lt_gas = common.latest_trade("TTF=F")
+    if _lt_gas is not None and _lt_gas[0].date() == _gas_day.date() and abs(_lt_gas[1] - latest["TTF"]) >= 1:
+        st.caption(f"The last TTF trade on Yahoo Finance that day was {_lt_gas[1]:.2f} €/MWh, in the hour from "
+                   f"{_lt_gas[0]:%H:%M} Berlin time, against {latest['TTF']:.2f} €/MWh in the day's row used here.")
 h1, h2, h3 = st.columns(3)
 h1.metric(f"Peak block ({power_data.PEAK_START:02d}:00 to {power_data.PEAK_END:02d}:00), 50% efficiency (HHV)",
           f"{latest['CSS peak']:+.2f} €/MWh",

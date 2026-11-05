@@ -393,13 +393,24 @@ def show_price_header(core, ticker, name, unit, end_date, start):
         bits.append(f"{last_day:%d %b} is a contract roll day, so part of the 1-day change is the price gap between "
                     "two contracts.")
     elif in_5:
-        bits.append(f"The 5-day change includes the contract roll of {in_5[-1]:%d %b}.")
+        _own = ""
+        try:
+            _c = shared_download(ticker, start)[rc['rolls'][-1][1]].dropna()
+            _c = _c[_c.index <= last_day]
+            if price.index[-6] in _c.index:
+                _own = (f" The {contract_delivery(rc['rolls'][-1][1], CURVE_ROOTS[ticker][0]):%b %y} contract itself "
+                        f"moved {(float(_c.iloc[-1]) / float(_c.loc[price.index[-6]]) - 1) * 100:+.2f}%.")
+        except Exception:
+            pass
+        bits.append(f"The 5-day change includes the contract roll of {in_5[-1]:%d %b}.{_own}")
     note = last_value_note(ticker, end_date, last_day).strip()
     if note:
         bits.append(note)
-    _hour = _latest_hour(ticker)
-    if _hour is not None and _hour.date() == pd.Timestamp(last_day).date():
-        bits.append(f"Last traded in the hour from {_hour:%H:%M} Berlin time.")
+    _lt = latest_trade(ticker)
+    if _lt is not None and _lt[0].date() == pd.Timestamp(last_day).date():
+        _gap = (_lt[1] / last - 1) * 100
+        bits.append(f"Last trade on Yahoo Finance: {_lt[1]:.2f} in the hour from {_lt[0]:%H:%M} Berlin time"
+                    + (f", {_gap:+.1f}% from the price above, which is the day's row." if abs(_gap) >= 1 else "."))
     _zv = shared_download(ticker, start).attrs.get("zero_volume")
     if _zv and _zv[1] and _zv[0] / _zv[1] >= 0.1:
         bits.append(f"Yahoo Finance shows no trades on {_zv[0]} of the last {_zv[1]} days with a price, so a close on "
@@ -1908,10 +1919,31 @@ def _last_hours(symbols):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _latest_hour(ticker):
-    """The start of the last hour `ticker` traded, Berlin time, or None."""
-    h = _last_hours([ticker])[0]
-    return None if pd.isna(h) else h
+def latest_trade(ticker):
+    """(start of the last hour `ticker` traded in Berlin time, its last price in that hour), or None. Yahoo's daily row
+    can differ from it (TTF on 4 Nov 2026: row 88.08, last trade 85.03)."""
+    try:
+        bars = yf.download(ticker, period="5d", interval="1h", progress=False)['Close'].squeeze().dropna()
+        if len(bars):
+            return bars.index[-1].tz_convert("Europe/Berlin"), float(bars.iloc[-1])
+    except Exception as e:
+        print(f"[latest trade] {ticker}: {e!r}", flush=True)
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def last_trade_before(ticker, when):
+    """(time, price) of the last 5-minute bar of `ticker` before `when` (Berlin time, tz-aware), same day, or None.
+    Yahoo keeps 5-minute bars for about 60 days."""
+    try:
+        bars = yf.download(ticker, period="5d", interval="5m", progress=False)['Close'].squeeze().dropna()
+        bars.index = bars.index.tz_convert("Europe/Berlin")
+        bars = bars[(bars.index < when) & (bars.index.normalize() == when.normalize())]
+        if len(bars):
+            return bars.index[-1], float(bars.iloc[-1])
+    except Exception as e:
+        print(f"[last trade before] {ticker}: {e!r}", flush=True)
+    return None
 
 
 def curve_flagged(curve):
