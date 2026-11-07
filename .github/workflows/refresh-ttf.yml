@@ -2,14 +2,16 @@ name: Refresh saved TTF prices
 
 on:
   schedule:
-    # 06:23 UTC Tuesday to Saturday: after New York midnight, when Yahoo stops rewriting the day's row, so the
-    # last row saved is the settlement and not the evening session (92.07 against 91.60 for 3 Nov 2026).
-    # GitHub can delay or skip a scheduled run (the old 22:23 UTC run started up to 5 hours late), so it is asked three
-    # times. A run that finds nothing new changes nothing.
-    - cron: "23 6 * * 2-6"
-    - cron: "47 9 * * 2-6"
-    - cron: "17 13 * * 2-6"
+    # Every hour, Tuesday to Saturday. The script saves a day's row only from 05:00 New York the next day, when it is
+    # the settlement and not the evening session (92.07 against 91.60 for 3 Nov 2026), so the hour of a run does not
+    # matter. GitHub delays scheduled runs by hours (the 06:23 UTC run of 6 Nov started at 14:24), so it is asked
+    # every hour. A run that finds nothing new changes nothing.
+    - cron: "23 * * * 2-6"
   workflow_dispatch:
+
+concurrency:
+  group: refresh-ttf
+  cancel-in-progress: false
 
 permissions:
   contents: write
