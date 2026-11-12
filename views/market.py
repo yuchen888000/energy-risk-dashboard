@@ -1143,7 +1143,18 @@ st.subheader("AI Summary of the Statistics")
 st.write(f"A three-sentence summary of the statistics on this page for {selected_commodity}.")
 
 
-def _side(cur, thr):
+def _shown(subject, x):
+    """A value as the page writes it: volatility as fmt_vol, correlation to 2 decimals."""
+    return f"{x:.2f}" if subject == 'corr' else common.fmt_vol(x)
+
+
+def _side(cur, thr, subject='vol'):
+    """Side of the current value against a level. Equal when both are written the same on the page: TTF on
+    10 Nov 2026, 30-day volatility 3.436% daily against a 3-year average 3.443%, both "55% ann. (3.44% daily)";
+    the summary then said volatility was "below the 3-year average of 55% ann. (3.44% daily)", a figure that
+    reads as the current one."""
+    if _shown(subject, cur) == _shown(subject, thr):
+        return "EQUAL TO (the same at the precision shown)"
     return "ABOVE" if cur > thr else "BELOW" if cur < thr else "EQUAL TO"
 
 
@@ -1156,8 +1167,12 @@ def level_facts(vol_now, vol_spike, vol_calm, ref_mean, g_now, g_10d, garch_hi, 
     lines, levels = [], []
 
     def add(subject, label, cur, cur_txt, thr, thr_txt, extra=""):
-        lines.append(f"{label} {cur_txt} is {_side(cur, thr)} {thr_txt}{extra}.")
-        levels.append((subject, float(thr), float(cur)))
+        side = _side(cur, thr, subject)
+        equal = side.startswith("EQUAL")
+        lines.append(f"{label} {cur_txt} is {side} {thr_txt}{'' if equal else extra}.")
+        # Equal as shown: the current value is passed as the level itself, so the post-check drops neither a
+        # watch for a move above nor one for a move below.
+        levels.append((subject, float(thr), float(thr) if equal else float(cur)))
 
     # Without a latest 30-day volatility (vol_now None) there is no current value to place against the levels.
     v = f"{common.fmt_vol(vol_now)}" if vol_now is not None else ""
@@ -1370,9 +1385,13 @@ def generate_risk_narrative(commodity_name, risk_level_str, latest_vol_v, avg_vo
     else:
         garch_line = "GARCH forecast: unavailable"
     if garch_10d and garch_ref_v:
-        _pos = "above" if garch_10d > garch_ref_v else "below" if garch_10d < garch_ref_v else "equal to"
-        garch_line += (f"; the day-10 forecast is {abs(garch_10d / garch_ref_v - 1) * 100:.0f}% {_pos} the "
-                       f"{garch_ref_label} ({common.fmt_vol(garch_ref_v)}). {garch_fit_str}").rstrip()
+        if common.fmt_vol(garch_10d) == common.fmt_vol(garch_ref_v):
+            garch_line += (f"; the day-10 forecast is the same as the {garch_ref_label} at the precision shown "
+                           f"({common.fmt_vol(garch_ref_v)}). {garch_fit_str}").rstrip()
+        else:
+            _pos = "above" if garch_10d > garch_ref_v else "below"
+            garch_line += (f"; the day-10 forecast is {abs(garch_10d / garch_ref_v - 1) * 100:.0f}% {_pos} the "
+                           f"{garch_ref_label} ({common.fmt_vol(garch_ref_v)}). {garch_fit_str}").rstrip()
     anomaly_line = anomaly_types_str if anomaly_types_str else "None"
     past_line = past_breaches_str if past_breaches_str else "None"
 
@@ -1435,11 +1454,12 @@ TASK
 Write EXACTLY 3 sentences. Keep the whole comment under 100 words. No headers, no bullets, no line breaks. Write as of the data date above, not as of any later date.
 1. What this combination of readings means. Do not restate the figures - the reader is looking at them. Use at most one number, and only if it carries the argument.
 2. The sharpest tension or divergence in the data, and what it changes in how the other figures should be read.
-3. One concrete, checkable thing to watch over the following ten trading days. Name one level from the LEVELS list and the value it applies to, and describe a move consistent with the side that value is on NOW: for a value already ABOVE a level, watch whether it stays above or falls back below; for a value already BELOW a level, watch whether it rises above or stays below. Do not simply say to watch whether the forecast proves correct.
+3. One concrete, checkable thing to watch over the following ten trading days. Name one level from the LEVELS list and the value it applies to, and describe a move consistent with the side that value is on NOW: for a value already ABOVE a level, watch whether it stays above or falls back below; for a value already BELOW a level, watch whether it rises above or stays below. For a value EQUAL TO a level at the precision shown, never call it above or below that level, and never quote that level as a separate figure from the value; if you name it, watch whether the value moves clearly above or below it. Do not simply say to watch whether the forecast proves correct.
 
 HARD RULES
 - Never write "watch whether X pushes above", "pushes through", "breaks", "crosses" or "rises above" a level that X is already ABOVE, and never write "falls below" or "drops below" a level that X is already BELOW. Check the LEVELS list before naming any level.
 - Compare a value only with a level listed for that value.
+- A value and a level that the LEVELS list gives as EQUAL TO each other are the same figure on the page: do not say one is above or below the other.
 - GARCH is a model fitted on past daily returns. Never call it implied, options-implied or option-based, and never say it is or is not a "model artifact".
 - A check that last fired on an earlier date is a past event: name its date if you mention it, and never present it as a current signal.
 - Give no trading, hedging or position-sizing advice.
