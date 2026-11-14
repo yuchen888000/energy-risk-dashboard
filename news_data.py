@@ -8,17 +8,38 @@ copyright line that allows them only in a personal feed reader for personal, non
 terms (section 15) do not allow taking metadata out of its feeds, so none of them is used.
 
 GDELT allows one request every 5 seconds per address and answers HTTP 429 above that. A request waits for the
-gap, a 429 is retried once, and every failure raises NewsError with the reason, so the page can say why no
+gap, a 429 is retried twice, and every failure raises NewsError with the reason, so the page can say why no
 headline came back and a failed query is not cached.
+
+GDELT also answers HTTP 429 to shared cloud addresses that have not sent a request for some time (13 and 14 Nov
+2026: the hosted app, and a test from another cloud server after 30 seconds without a request). So a GitHub
+Actions job (.github/scripts/save_news.py) saves GDELT's answer to the four commodity searches in
+data/news_saved.json, and the page falls back on that saved copy, or on the last answer the app itself got,
+when GDELT refuses.
 """
 import html
 import json
+import os
 import re
 import threading
 import time
 
 import pandas as pd
 import requests
+
+# GDELT search for each commodity's headline list: any of these phrases, which the page's own keyword filter then
+# narrows (gdelt_query). Single words under three letters are rejected by GDELT. Kept here, not in common.py, so
+# the saving job can use them without Streamlit.
+NEWS_QUERIES = {
+    "gas": '("natural gas" OR LNG OR "gas price" OR "gas storage" OR TTF) (Europe OR European OR Dutch OR Germany OR Britain)',
+    # US benchmark terms (Cushing, "US crude", shale) so the list is not the same as Brent's.
+    "wti": '("crude oil" OR "oil price" OR WTI OR "oil market" OR OPEC OR Cushing OR "US crude" OR shale)',
+    "brent": '(Brent OR "crude oil" OR "oil price" OR "oil market" OR OPEC)',
+    "carbon": '("EU ETS" OR "carbon price" OR "carbon market" OR "emissions trading" OR "carbon allowance")',
+}
+NEWS_DAYS = 7              # the page's headlines cover the last 7 days; the saving job asks for the same
+SAVED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "news_saved.json")
+SAVED_MAX_AGE = pd.Timedelta(days=2)   # an older saved answer is not shown
 
 GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_CAP = 250            # the API returns at most this many articles per query (MAXRECORDS)
@@ -149,3 +170,56 @@ def fetch(query, days, get=requests.get, sleep=time.sleep, clock=time.monotonic)
         out.append({"title": title, "url": a.get("url", ""), "domain": a.get("domain", ""),
                     "country": a.get("sourcecountry", ""), "seen": seen})
     return out
+
+
+# ─── Saved copy: GDELT's last answer to each commodity search (data/news_saved.json) ───
+def articles_to_json(articles):
+    """Articles as fetch returns them, with `seen` as text, for the saved file."""
+    return [{**a, "seen": a["seen"].strftime("%Y-%m-%dT%H:%M:%SZ")} for a in articles]
+
+
+def articles_from_json(rows):
+    """The saved file's articles back as fetch returns them; a row without a readable time is left out."""
+    out = []
+    for a in rows or []:
+        try:
+            seen = pd.Timestamp(a["seen"])
+            seen = seen.tz_localize("UTC") if seen.tzinfo is None else seen.tz_convert("UTC")
+        except (KeyError, ValueError, TypeError):
+            continue
+        if a.get("title"):
+            out.append({"title": a["title"], "url": a.get("url", ""), "domain": a.get("domain", ""),
+                        "country": a.get("country", ""), "seen": seen})
+    return out
+
+
+def load_saved(path=SAVED_PATH):
+    """{query expression: (saved at, UTC Timestamp, articles)} from the saved file; {} if it is missing or broken."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for q, entry in (data.get("queries") or {}).items():
+        try:
+            at = pd.Timestamp(entry["saved_at"])
+            at = at.tz_localize("UTC") if at.tzinfo is None else at.tz_convert("UTC")
+        except (KeyError, ValueError, TypeError):
+            continue
+        out[q] = (at, articles_from_json(entry.get("articles")))
+    return out
+
+
+def fallback(query, days, sources, now):
+    """The newest earlier answer to `query` among `sources` (each {query: (time, articles)}) that is at most
+    SAVED_MAX_AGE old at `now`, with articles older than `days` days at `now` left out: (time, articles), or None."""
+    best = None
+    for src in sources:
+        hit = src.get(query)
+        if hit and now - hit[0] <= SAVED_MAX_AGE and (best is None or hit[0] > best[0]):
+            best = hit
+    if best is None:
+        return None
+    cut = now - pd.Timedelta(days=days)
+    return best[0], [a for a in best[1] if a["seen"] >= cut]

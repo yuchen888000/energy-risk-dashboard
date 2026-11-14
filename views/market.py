@@ -24,7 +24,7 @@ compare_label = ctx.compare_label
 start_date, end_date = ctx.start_date, ctx.end_date
 CARBON_TICKER = ctx.carbon["ticker"]
 
-NEWS_DAYS = 7          # headlines older than this are not "current"
+NEWS_DAYS = news_data.NEWS_DAYS   # headlines older than this are not "current"
 PER_SITE_CAP = 3       # at most this many headlines from one site, so no single publisher dominates
 MAX_HEADLINES = 15     # the recent headlines list shows at most this many
 MIN_HEADLINES = 5      # with fewer than this, the page says the list can miss the main story
@@ -357,12 +357,36 @@ def gdelt_articles(query, days):
     return news_data.fetch(query, days)
 
 
+@st.cache_resource
+def _last_good():
+    """{query: (time, articles)}: the last answer GDELT gave this app to each search, kept while the app runs."""
+    return {}
+
+
+@st.cache_data(ttl=600)
+def _saved_news():
+    """The saved copy of GDELT's answers (data/news_saved.json, written by the GitHub job save_news.py)."""
+    return news_data.load_saved()
+
+
 def gdelt_try(query, days):
-    """(articles, "") or ([], the reason in words) when GDELT gives nothing back this time."""
+    """(articles, "", None) from GDELT; when GDELT gives nothing back this time, (articles, the reason in words,
+    time of the answer) from the newer of the app's last answer and the saved copy, or ([], the reason, None)."""
     try:
-        return gdelt_articles(query, days), ""
+        arts = gdelt_articles(query, days)
+        _last_good()[query] = (pd.Timestamp.now(tz="UTC"), arts)
+        return arts, "", None
     except news_data.NewsError as e:
-        return [], str(e)
+        hit = news_data.fallback(query, days, [_last_good(), _saved_news()], pd.Timestamp.now(tz="UTC"))
+        if hit is None:
+            return [], str(e), None
+        return hit[1], str(e), hit[0]
+
+
+def fallback_note(err, at):
+    """Caption for a list that comes from an earlier GDELT answer."""
+    return (f"{err} this time, so this list is GDELT's answer of {at:%d %b %H:%M} UTC; headlines GDELT has seen "
+            "since then are missing. ")
 
 
 def headline_list_md(rows):
@@ -637,7 +661,7 @@ else:
         # Per-country headlines: the same source and filters as the recent headlines section below.
         st.write(f"**{selected_country}: recent energy headlines**")
         news_date_note()
-        _c_arts, _c_err = gdelt_try(news_data.build_query(selected_country, "energy", commodity['news_term']),
+        _c_arts, _c_err, _c_at = gdelt_try(news_data.build_query(selected_country, "energy", commodity['news_term']),
                                     NEWS_DAYS)
         _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
                                                             'fuel', 'electricity', 'pipeline', 'LNG',
@@ -657,8 +681,8 @@ else:
                 break
         if country_rows:
             st.markdown(headline_list_md(country_rows))
-            st.caption(GDELT_NOTE)
-        elif _c_err:
+            st.caption((fallback_note(_c_err, _c_at) if _c_at is not None else "") + GDELT_NOTE)
+        elif _c_err and _c_at is None:
             st.info(f"No headlines this time: {_c_err}. The page asks again on the next run.")
         else:
             st.info(f"No energy headline from the last {NEWS_DAYS} days mentions {selected_country} by name or adjective.")
@@ -674,7 +698,7 @@ _filter_note = ("US stories are kept for WTI, and the filter does not require a 
                 "for TTF the headline must name a European place or a European gas name such as TTF, Gazprom or "
                 "Equinor" if IS_GAS else
                 "the filter drops US domestic stories; it does not require a European subject")
-_arts, _news_err = gdelt_try(news_data.gdelt_query(commodity['news_query']), NEWS_DAYS)
+_arts, _news_err, _news_at = gdelt_try(news_data.gdelt_query(commodity['news_query']), NEWS_DAYS)
 # Newest first from GDELT; the caps keep one site from filling the list.
 news_rows, _seen, _per_site = [], set(), {}
 for _a in _arts:
@@ -699,13 +723,14 @@ if news_rows:
     st.markdown(headline_list_md(news_rows))
     st.caption(f"{len(news_rows)} of the {len(_arts)} headlines GDELT returned for this search, at most "
                f"{MAX_HEADLINES} and at most {PER_SITE_CAP} per site, duplicates removed ({_filter_note}). "
-               + GDELT_NOTE)
-elif _news_err:
+               + (fallback_note(_news_err, _news_at) if _news_at is not None else "") + GDELT_NOTE)
+elif _news_err and _news_at is None:
     st.info(f"No headlines this time: {_news_err}. The page asks again on the next run. Check another news source "
             "for this week's main story.")
 else:
     st.info(f"GDELT returned {len(_arts)} headlines for this search, none of which passed the filter "
-            f"({_filter_note}). Check another news source for this week's main story.")
+            f"({_filter_note}). Check another news source for this week's main story."
+            + (" " + fallback_note(_news_err, _news_at).strip() if _news_at is not None else ""))
 
 
 # ─── Section 3: Statistical checks ───

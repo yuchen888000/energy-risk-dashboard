@@ -21,6 +21,8 @@ from arch import arch_model
 from arch.univariate import GARCH, StudentsT, ZeroMean
 from scipy.stats import chi2
 
+import news_data
+
 # ─── Carbon Benchmark Resolution ───
 # KEUA (KraneShares European Carbon Allowance ETF) stopped trading on NYSE Arca at the close of 13 March 2026 and
 # was liquidated on 20 March 2026 (OCC information memo #58438, 27 Feb 2026), so the original EUA proxy no longer
@@ -93,9 +95,8 @@ def build_commodities(carbon):
             "unit": "€/MWh",
             "color": "steelblue",
             "keywords": ['gas', 'TTF', 'LNG', 'pipeline', 'natural gas', 'methane'],
-            # GDELT search for the headline list: any of these phrases, which the page's own keyword filter then
-            # narrows (news_data.gdelt_query). Single words under three letters are rejected by GDELT.
-            "news_query": '("natural gas" OR LNG OR "gas price" OR "gas storage" OR TTF) (Europe OR European OR Dutch OR Germany OR Britain)',
+            # GDELT search for the headline list (news_data.NEWS_QUERIES).
+            "news_query": news_data.NEWS_QUERIES["gas"],
             "news_term": "gas",   # one word for the per-country search
         },
         "WTI Crude Oil": {
@@ -105,8 +106,7 @@ def build_commodities(carbon):
             # "barrel" alone also matches stories such as "Tank barrel production returns to UK", so it counts
             # only as an oil-price unit ("a barrel", "per barrel", "barrels a day").
             "keywords": ['oil', 'crude', 'WTI', 'OPEC', 'petroleum', 'refinery', 'Cushing', 'shale'] + OIL_BARREL_TERMS,
-            # US benchmark terms (Cushing, "US crude", shale) so the list is not the same as Brent's.
-            "news_query": '("crude oil" OR "oil price" OR WTI OR "oil market" OR OPEC OR Cushing OR "US crude" OR shale)',
+            "news_query": news_data.NEWS_QUERIES["wti"],
             "news_term": "oil",
         },
         "Brent Crude Oil": {
@@ -114,7 +114,7 @@ def build_commodities(carbon):
             "unit": "$/barrel",
             "color": "darkred",
             "keywords": ['oil', 'crude', 'Brent', 'OPEC', 'petroleum', 'North Sea'] + OIL_BARREL_TERMS,
-            "news_query": '(Brent OR "crude oil" OR "oil price" OR "oil market" OR OPEC)',
+            "news_query": news_data.NEWS_QUERIES["brent"],
             "news_term": "oil",
         },
         carbon["name"]: {
@@ -122,7 +122,7 @@ def build_commodities(carbon):
             "unit": carbon["unit"],
             "color": "seagreen",
             "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
-            "news_query": '("EU ETS" OR "carbon price" OR "carbon market" OR "emissions trading" OR "carbon allowance")',
+            "news_query": news_data.NEWS_QUERIES["carbon"],
             "news_term": "carbon",
         },
     }
@@ -1788,16 +1788,34 @@ def front_month_contract(continuous, day):
     contracts downloaded, or a live price moved between rows), the delivery month comes from the exchange
     expiry rule (front_by_rule) instead, and `matched` is False so the page can say so.
 
-    Returns dict(delivery=dt.date, symbol=str, matched=bool).
+    On the download's last day the continuous row and the contract row can differ while Yahoo is still updating
+    them (13 Nov 2026, 07:51 UTC: TTF=F 93.70 for 12 Nov, settled later at 92.26), so no contract matches. If the trading
+    day before matched a contract and the expiry rule gives that same contract on `day`, that contract is taken
+    and `matched_on` is the earlier day, so the page can say so.
+
+    Returns dict(delivery=dt.date, symbol=str, matched=bool, matched_on=pd.Timestamp or None).
     """
     root = CURVE_ROOTS[continuous][0]
     d = pd.Timestamp(day).normalize()
     batch = shared_download(continuous, _DATA_START)
     sym = match_front_contract(batch, continuous, d) if len(batch) else None
     if sym is not None:
-        return dict(delivery=contract_delivery(sym, root), symbol=sym, matched=True)
+        return dict(delivery=contract_delivery(sym, root), symbol=sym, matched=True, matched_on=d)
+    return _front_fallback(batch, continuous, root, d)
+
+
+def _front_fallback(batch, continuous, root, d):
+    """front_month_contract when `d` matches no contract: the day before's contract if `d` is the download's last
+    day and the expiry rule agrees, else the expiry rule alone (matched False)."""
     delivery = front_by_rule(root, d)
-    return dict(delivery=delivery, symbol=contract_symbol(root, delivery), matched=False)
+    if len(batch) and continuous in batch and delivery is not None:
+        cont = batch[continuous].dropna()
+        if len(cont) >= 2 and cont.index[-1] == d:
+            prev = cont.index[-2]
+            sym = match_front_contract(batch, continuous, prev)
+            if sym is not None and contract_delivery(sym, root) == delivery:
+                return dict(delivery=delivery, symbol=sym, matched=True, matched_on=prev)
+    return dict(delivery=delivery, symbol=contract_symbol(root, delivery), matched=False, matched_on=None)
 
 
 # ─── Forward curves from individual monthly futures on Yahoo Finance ───

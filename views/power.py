@@ -858,8 +858,13 @@ if wait is not None:
     _w_state = _ttf_state(price_date)
     if _switch:
         _price_help = f"Yahoo Finance `{contract}`, the monthly contract itself, from the same download as `TTF=F`."
-    elif _front["matched"]:
+    elif _front["matched"] and _front["matched_on"] == pd.Timestamp(price_date).normalize():
         _price_help = f"Yahoo Finance `TTF=F`, matched to the monthly contract `{contract}` on this date."
+    elif _front["matched"]:
+        _price_help = (f"Yahoo Finance `TTF=F`, matched to the monthly contract `{contract}` on "
+                       f"{_front['matched_on']:%d %b %Y}, the trading day before; the exchange expiry rule gives the "
+                       "same contract for this date. On this date the two rows differ, which happens while Yahoo "
+                       "is still updating the day's rows.")
     else:
         _price_help = ("Yahoo Finance `TTF=F`. Its price could not be matched to a single monthly contract on Yahoo "
                        "Finance for this date, so the delivery month is the front month by the exchange expiry rule "

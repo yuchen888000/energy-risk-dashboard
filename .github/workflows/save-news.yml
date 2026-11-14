@@ -1,0 +1,43 @@
+name: Save GDELT headlines
+
+on:
+  schedule:
+    # Every 6 hours. GDELT answers the hosted app with HTTP 429 (13 and 14 Nov 2026); the Market page then shows this
+    # saved answer, up to 2 days old, with its time. Each commit redeploys the app, so it runs only 4 times a day.
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: save-news
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  save:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: pip install --quiet pandas requests
+
+      - name: Ask GDELT
+        run: python .github/scripts/save_news.py
+
+      - name: Commit if the file changed
+        run: |
+          git diff --quiet -- data/news_saved.json && [ -z "$(git ls-files --others -- data/news_saved.json)" ] && { echo "No change."; exit 0; }
+          git config user.name "yuchen888000"
+          git config user.email "150667104+yuchen888000@users.noreply.github.com"
+          git add data/news_saved.json
+          git commit -m "Saved GDELT headlines: update"
+          git pull --rebase origin main
+          git push
