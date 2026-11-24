@@ -29,7 +29,7 @@ def _es_below_var99(n_tail, n):
     """Why ES 97.5% can come out below VaR 99%: written once, for the single-commodity VaR and the stress period."""
     k = int((n - 1) * 0.01) + 1
     return (f"Here ES averages the worst {n_tail} days while VaR 99% lies between the {k}{_ord(k)} and "
-            f"{k + 1}{_ord(k + 1)} worst, so ES 97.5% can come out slightly below VaR 99%, as it does now. That is "
+            f"{k + 1}{_ord(k + 1)} worst, so ES 97.5% can come out slightly below VaR 99%, as it does now; that is "
             "not a calculation error.")
 
 
@@ -50,6 +50,14 @@ CARBON_LABEL = ctx.carbon["label"]
 CARBON_SHORT = ctx.carbon["short"]
 CARBON_NOTE = ctx.carbon["note"]
 ANNUAL = common.ANNUAL
+# The carbon ETC tracks EUR-denominated EUA futures but is quoted in USD, so its returns
+# contain the EUR/USD move. Other fallbacks (KRBN, ICLN) are USD funds.
+if CARBON_TICKER == "CARB.L":
+    CARBON_FX_NOTE = ("EU Carbon ETC (CARB.L) is quoted in USD while the EUA futures it tracks are in euros, "
+                      "so its returns include the EUR/USD move")
+else:
+    CARBON_FX_NOTE = f"the carbon proxy ({CARBON_TICKER}) is a USD fund, not a euro EUA price"
+
 with st.sidebar.expander("Methodology: Risk page"):
     st.markdown("""
     - **30-Day Rolling Volatility**: equal-weighted standard deviation of simple daily returns
@@ -68,19 +76,12 @@ with st.sidebar.expander("Methodology: Risk page"):
       date before the strikes the page names it by its months) and the percentile among every
       30-day volatility since the start of the data (2017; TTF from Oct 2017; EU Carbon ETC from Sep 2021). No Normal / Elevated /
       Extreme label: there is no industry-standard cut-off for one.
-    - **Positions & Limits**: a book of positions in euros. Brent and WTI P&L is converted at each day's
-      EUR/USD close. EU Carbon ETC is taken from its euro line (CARB.MI). A carbon proxy fund is converted
-      in full at EUR/USD.
-    - **Diversification check**: the book's parametric VaR with the last 30 days' correlations against the
-      last 250 days', with thresholds from the book's own last 750 trading days.
     - **Stress-period VaR and ES**: today's positions on the 250 trading days since the start of the data (at most
       400 calendar days) in which they have the largest ES 97.5%, equally weighted, after the Basel
       method (BCBS MAR33.7), shown next to the last 250 days.
-    - **Historical scenarios**: today's positions replayed with fixed quantities through five past windows
-      (the 2008 Lehman collapse, the 2020 Covid and oil price war, Russia's invasion of Ukraine, the August 2022
-      gas peak, the 2026 Iran war). It shows what happened, not a forecast.
-    - **Hypothetical scenarios and reverse stress test**: 10-day moves sized from each instrument's worst 10 days
-      in the data, and the most plausible 10-day move that loses the 10-day loss limit.
+    - **Historical scenarios**: today's positions replayed through three past windows
+      (Russia's invasion of Ukraine, the August 2022 gas peak, the 2026 Iran war). It shows
+      what happened, not a forecast.
     """)
 
 st.title("Market Risk")
@@ -848,82 +849,27 @@ else:
 
 
 # ─── Section 5a: Positions & Limits ───
-
-
-def _table(df):
-    """Show a Section 5 table with empty cells for missing values (common.show_table)."""
-    common.show_table(df)
-
-
-# Fixed past windows of the scenario replay (Section 5b). Each starts at the close before the first day listed and
-# ends at the close of the last day. Dates are checked against prices and news sources (project spec
-# dashboard_规格/5_事实与来源.md, section E). Window rule of the 2008 and 2020 windows (spec of 23 Nov 2026, 12.3): the
-# first day is the first trading day of the event, and the window ends at Brent's lowest close within its first 30
-# trading days (common.scenario_end, Brent's own rows); tests/test_stress.py checks the dates against that rule.
-SCENARIOS = [
-    {"name": "Lehman collapse (2008)", "first": "2008-09-15", "last": "2008-10-27",
-     "why": "from Lehman Brothers' bankruptcy filing on 15 Sep 2008 to 27 Oct 2008, Brent's lowest close in the "
-            "first 30 trading days of the window (61.41 dollars on the 30th day). Yahoo Finance has no Brent close for "
-            "16 Oct 2008, so the window has 31 trading days counting WTI's. Brent kept falling to 36.61 on "
-            "24 Dec 2008"},
-    {"name": "Covid and oil price war (2020)", "first": "2020-03-06", "last": "2020-03-31",
-     "why": "from 6 Mar 2020, when the OPEC+ talks in Vienna broke down, to 31 Mar 2020, Brent's lowest close in "
-            "the first 30 trading days of the window (22.74 dollars, the expiry day of the May Brent contract)"},
-    {"name": "Russia invades Ukraine", "first": "2022-02-24", "last": "2022-03-08",
-     "why": "from the invasion on 24 Feb 2022 to 8 Mar 2022, the day the US announced a ban on Russian oil "
-            "imports (Brent's highest close of the episode. TTF's was on 7 Mar)"},
-    {"name": "August 2022 gas peak", "first": "2022-08-01", "last": "2022-08-26",
-     "why": "from the first trading day of August 2022 to 26 Aug 2022, the record TTF front-month close (about "
-            "€339/MWh) after Gazprom announced a three-day Nord Stream 1 shutdown"},
-    {"name": "2026 Iran war", "first": "2026-03-02", "last": "2026-03-13",
-     "why": "the first two trading weeks after the US-Israeli strikes on Iran (Sat 28 Feb 2026): QatarEnergy "
-            "halted LNG output and an IRGC official said Hormuz was closed on 2 Mar"},
-]
-_LOSS_LIMIT_DEFAULT = 7.5   # €m, a placeholder (spec 5.4): five times the default VaR 95% limit
-_SHORT_HISTORY = ("TTF Natural Gas", CARBON_SHORT)   # no data for 2008 (TTF) or for 2008 and 2020 (carbon)
-CARBON_OK = CARBON_TICKER == "CARB.L"   # a proxy fund (KRBN, ICLN) is left out of the 10-day stress tests
-_CARBON_EUR_TXT = ("EU Carbon ETC is taken from its euro line on Borsa Italiana (CARB.MI, the same ETC as CARB.L, ISIN "
-                   "JE00BP2PWW32), so its returns need no conversion" if CARBON_OK else
-                   f"{CARBON_SHORT} ({CARBON_TICKER}) is a USD fund, converted in full: (1 + r_USD) x X(t-1) / X(t) - 1")
-_CARBON_PROXY_TXT = (f"{CARBON_SHORT} ({CARBON_TICKER}) is a proxy fund, not EU Carbon ETC, so it is left out of "
-                     "the 10-day stress tests and of the estimates for missing positions.")
-_CARBON_START_TXT = "EU Carbon ETC has none before 2 Sep 2021" if CARBON_OK else f"{CARBON_SHORT} is a proxy fund"
-_BOOK_TICKERS = common.book_panel_tickers(CARBON_SHORT, CARBON_TICKER)
-_KINDS = {k: common.quote_kind(t) for k, t in _BOOK_TICKERS.items()}
-
 st.subheader("Positions & Limits")
-st.write("Risk of a book of positions in euros: VaR, Expected Shortfall, limit usage, a VaR backtest and stress "
-         "tests (historical, hypothetical and reverse).")
+st.write("Risk of a book of positions in euros: VaR, Expected Shortfall, limit usage, a VaR backtest and "
+         "a replay of past market shocks.")
 
-book_panel = common.book_returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
+book_panel = common.returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
 _LOOKBACK = 250   # days of history behind each VaR estimate
 _TEST_DAYS = 250  # days in the backtest
 positions = {}
-loss_limit = _LOSS_LIMIT_DEFAULT * 1e6
-_placeholder = True
-var_limit_m = 1.5
-_sp = None
-_stress_panel = None
-_metrics_ok = False
 
 if book_panel is None:
     st.info("Not enough multi-commodity data to compute position risk.")
 else:
-    st.write("**Positions** (€m notional, positive = long, negative = short):")
+    st.write("**Positions** (€m notional; positive = long, negative = short):")
     _defaults = {"TTF Natural Gas": 10.0, "WTI Crude Oil": 0.0, "Brent Crude Oil": -5.0, CARBON_SHORT: 3.0}
-    _pos_cols = st.columns(len(book_panel.columns) + 2)
+    _pos_cols = st.columns(len(book_panel.columns) + 1)
     positions_m = {}
     for _col, _name in zip(_pos_cols, book_panel.columns):
         positions_m[_name] = _col.number_input(f"{_name} (€m)", value=_defaults.get(_name, 0.0),
                                                step=0.5, format="%.1f", key=f"pos_{_name}")
-    var_limit_m = _pos_cols[-2].number_input("VaR 95% limit (1-day) (€m)", min_value=0.1, value=1.5,
+    var_limit_m = _pos_cols[-1].number_input("VaR 95% limit (€m)", min_value=0.1, value=1.5,
                                              step=0.1, format="%.1f", key="var_limit")
-    loss_limit_m = _pos_cols[-1].number_input("10-day loss limit (€m)", min_value=0.1, value=_LOSS_LIMIT_DEFAULT,
-                                              step=0.5, format="%.1f", key="loss_limit")
-    loss_limit = loss_limit_m * 1e6
-    _placeholder = loss_limit_m == _LOSS_LIMIT_DEFAULT
-    if _placeholder:
-        _pos_cols[-1].caption("Placeholder: replace it with the desk's stop-loss or allocated capital.")
 
     positions = {k: v * 1e6 for k, v in positions_m.items() if v != 0}
     book_returns = book_panel[list(positions)].dropna() if positions else None
@@ -934,7 +880,6 @@ else:
         st.info(f"Position risk needs at least {_LOOKBACK + 50} days of overlapping history for "
                 "the instruments held: widen the date range.")
     else:
-        _metrics_ok = True
         pnl = common.book_pnl(book_returns, positions)
         recent = pnl.tail(_LOOKBACK)
         book_var95 = common.hist_var(recent, 0.95)
@@ -961,119 +906,40 @@ else:
         pl3.metric("Expected Shortfall 97.5%", f"€{book_es975 / 1e6:,.2f}m",
                    help=f"Average loss on the {_n_tail_book} days (of {len(recent)}) at or below the 2.5% quantile, "
                         "1-day horizon. 97.5% is the confidence level Basel FRTB uses. FRTB also scales the ES by "
-                        "liquidity horizon and calibrates it to a stress period. This figure is not scaled, and "
+                        "liquidity horizon and calibrates it to a stress period; this figure is not scaled, and "
                         "the stress-period figures are below. ES 97.5% can be slightly below VaR 99% (with 250 days "
-                        "it averages the worst 7 days, while VaR 99% lies between the 3rd and 4th worst). That is not an error.")
+                        "it averages the worst 7 days, while VaR 99% lies between the 3rd and 4th worst); that is not an error.")
         pl4.metric("Limit usage (VaR 95%)", f"{usage:.0%}",
-                   help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a VaR 95% limit (1-day) of €{var_limit_m:,.1f}m.")
+                   help=f"VaR 95% of €{book_var95 / 1e6:,.2f}m against a limit of €{var_limit_m:,.1f}m.")
         st.markdown(f"<span style='color:{usage_color}; font-weight:bold'>{usage_status}</span>, "
                     f"€{book_var95 / 1e6:,.2f}m of €{var_limit_m:,.1f}m used",
                     unsafe_allow_html=True)
         st.progress(min(usage, 1.0))
 
-        # The stress period is found first: the diversification check below and the hypothetical scenarios and
-        # the reverse stress test use its covariance.
-        _stress_panel = common.book_returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
-        _sp = (common.stress_period(_stress_panel[list(positions)], positions)
-               if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
-
-        # ── Diversification check (spec section 2) ──
-        _alert_box = st.container()
-        _summary_box = st.container()
-        _dc = (common.diversification_check(_stress_panel, positions, stress=_sp)
-               if _stress_panel is not None and len(positions) > 1 else None)
-        with _alert_box:
-            if len(positions) < 2:
-                st.caption("Diversification check not shown: the book has one position, so there is nothing to "
-                           "diversify.")
-            elif _dc is None:
-                st.caption(f"Diversification check not shown: fewer than {_LOOKBACK} days on which every "
-                           "position has a return since 2017.")
-            else:
-                _kind, _text = common.diversification_box(_dc, positions)
-                if _kind == "warning":
-                    st.warning(_text)
-                    st.toast("Diversification check: WARNING for this book (see the box under the VaR figures).", icon="⚠️")
-                elif _kind == "watch":
-                    st.info(_text)
-                elif not _dc["judged"]:
-                    st.caption(f"Diversification check: only {_dc['n_hist']} days of history, fewer than "
-                               f"{common._MIN_HISTORY}, so no judgement is made.")
-
         # Standalone VaR per position vs the book: the gap is the diversification benefit
         standalone = {k: common.hist_var(book_returns[k].tail(_LOOKBACK) * v, 0.95)
                       for k, v in positions.items()}
-        # Positions stay numbers, shown as entered, like the other Section 5 tables.
         contrib_df = pd.DataFrame({
             'Position (€m)': [positions[k] / 1e6 for k in positions],
-            'Standalone VaR 95% (€m)': [round(standalone[k] / 1e6, 2) for k in positions],
-        }, index=list(positions))
-        contrib_df.loc['Book (diversified)'] = [np.nan, round(book_var95 / 1e6, 2)]
-        _table(contrib_df)
+            'Standalone VaR 95% (€m)': [standalone[k] / 1e6 for k in positions],
+        }, index=list(positions)).round(2)
+        contrib_df['Position (€m)'] = contrib_df['Position (€m)'].map(lambda v: f"{v:+.1f}")
+        contrib_df.loc['Book (diversified)'] = ["", round(book_var95 / 1e6, 2)]
+        st.dataframe(contrib_df, width="stretch")
         _gross = sum(abs(v) for v in positions.values()) / 1e6
         _net = sum(positions.values()) / 1e6
-        _div_250 = sum(standalone.values()) - book_var95
-        _div_stress = ""
-        if _sp is not None and len(positions) > 1:
-            _sblk = _stress_panel[list(positions)].dropna().loc[_sp['start']:_sp['end']]
-            _ds, _, _ = common.hist_diversification(_sblk, positions)
-            _div_stress = (f", and €{_ds / 1e6:,.2f}m in the stress period ({_sp['start']:%d %b %Y} to "
-                           f"{_sp['end']:%d %b %Y})")
-        _div_txt = (f" Diversification benefit (historical, sum of standalone VaRs minus book VaR): "
-                    f"€{_div_250 / 1e6:,.2f}m over the last {_LOOKBACK} days{_div_stress}."
-                    if len(positions) > 1 else "")
         st.caption(f"Book size: gross €{_gross:,.1f}m (sum of absolute positions), net €{_net:+,.1f}m (longs "
-                   "minus shorts). Netting notionals across different commodities has no risk meaning: the "
-                   "book VaR above does the netting through the joint daily returns." + _div_txt
-                   + " P&L is in euros: Brent and WTI moves are converted at each day's EUR/USD close (Yahoo "
-                   "EURUSD=X), and " + ("EU Carbon ETC is taken from its euro line (CARB.MI)." if CARBON_OK else
-                                        f"{CARBON_SHORT} ({CARBON_TICKER}) is converted in full as a USD fund."))
-
-        if _dc is not None:
-            st.write("**Book VaR 95% under different correlations (same volatilities)**")
-            _rows = [("Last 250 days", _dc['v250']), ("Last 30 days", _dc['v30'])]
-            if _dc['vstress'] is not None:
-                _rows.append((f"Stress period ({_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y})", _dc['vstress']))
-            _rows.append((f"FRTB correlation scenarios (largest of high, 250-day and low: {_dc['frtb_which']})",
-                          _dc['frtb'][_dc['frtb_which']]))
-            _rows.append(("No diversification (every correlation at its adverse extreme)", _dc['vnodiv']))
-            _table(pd.DataFrame({
-                "Parametric VaR 95% (€m)": [round(v / 1e6, 2) for _, v in _rows],
-                "Diversification benefit (% of the no-diversification VaR)":
-                    [f"{1 - v / _dc['vnodiv']:.0%}" for _, v in _rows]}, index=[r for r, _ in _rows]))
-            st.caption(f"Every row uses the volatilities of the last {_LOOKBACK} days, so the rows differ only through "
-                       f"the correlations. The historical Book VaR 95% above (€{book_var95 / 1e6:,.2f}m) differs from "
-                       f"the 250-day row (€{_dc['v250'] / 1e6:,.2f}m) through the shape of the return distribution "
-                       f"and the mean of the {_LOOKBACK} days.")
-            _fav = common.favourable_pairs_sentence(_dc, positions)
-            _folded("How the diversification check works",
-                f"The check compares correlations with the volatilities held fixed. A 30-day historical VaR 95% would "
-                f"rest on one or two days, so the comparison uses the normal parametric VaR, z x sqrt(w'DCDw) with "
-                f"z = 1.645, the volatilities D of the last {_LOOKBACK} days and different correlation matrices C, "
-                f"all on the days on which every position has a return. WARNING: the 30-day correlations raise the "
-                f"parametric VaR by more than at the 95th percentile of the same ratio over the past "
-                f"{_dc['n_hist']} trading days ({_dc['hist_start']:%d %b %Y} to {_dc['hist_end']:%d %b %Y}, each "
-                f"day with its own 30-day and 250-day windows and today's positions). Today: {_dc['ratio']:+.1%} "
-                f"against a 95th percentile of {_dc['p95']:+.1%}. WATCH: no WARNING, but a pair's 30-day "
-                "correlation is outside its own 3-year range (5th to 95th percentile of the same days) on the side "
-                "that raises the book's VaR: above the range for two longs or two shorts, below it for a long and "
-                "a short. The same 3-year window as the Market page (750 values), with data from 2017 whatever "
-                "the start date.",
-                _fav,
-                "The FRTB rows borrow the three correlation scenarios of the Basel standardised approach (MAR21.6: "
-                "high = 1.25 x rho capped at 1, low = the larger of 2 x rho - 1 and 0.75 x rho. MAR21.7 takes the "
-                "largest charge of the three), applied here to the 250-day correlations of the book. "
-                + ("The high or low matrix had a negative eigenvalue and was replaced by its nearest correlation "
-                   "matrix (Higham 2002). " if _dc['frtb_repaired'] else
-                   "Neither matrix needed the nearest-correlation repair (Higham 2002) today. ")
-                + "The World Bank's Commodity Markets Outlook of October 2026 (pages 48 to 58) finds that about a "
-                "third of commodity price volatility comes from shocks in other commodity markets, and that this "
-                "connectedness averaged about 43 in four global stress periods against about 32 at other times, "
-                "with a different group of commodities leading each time.")
+                   "minus shorts). Netting notionals across different commodities has no risk meaning; the "
+                   "book VaR above does the netting through the joint daily returns. Diversification benefit: "
+                   f"€{(sum(standalone.values()) - book_var95) / 1e6:,.2f}m (sum of standalone VaRs minus book VaR). "
+                   "EUR/USD is not included: returns are in each instrument's own currency.")
 
         # ── Stress period (after Basel MAR33.7) ──
         st.write(f"**Stress period: the {common.STRESS_WINDOW} trading days (about 12 months, at most "
                  f"{common.STRESS_MAX_SPAN} calendar days) in which today's positions have the largest ES 97.5%**")
+        _stress_panel = common.returns_panel(common.STRESS_FROM, end_date, CARBON_SHORT, CARBON_TICKER)
+        _sp = (common.stress_period(_stress_panel[list(positions)], positions)
+               if _stress_panel is not None and all(k in _stress_panel for k in positions) else None)
         if _sp is None:
             st.caption(f"No stress period: since {common.STRESS_FROM:%b %Y} there is no run of {common.STRESS_WINDOW} "
                        "days on which every instrument held has a return within "
@@ -1089,7 +955,7 @@ else:
                 _c.caption(f"{_s / _now:.2f}x the last {len(recent)} days (€{_now / 1e6:,.2f}m)" if _now > 0 else "")
             _tie_txt = (f" The ES is the same in {_sp['ties']} windows ending {_sp['first_tie_end']:%d %b %Y} to "
                         f"{_sp['end']:%d %b %Y}, because ES 97.5% over 250 days depends only on the worst 7 days "
-                        "and these windows all contain them. The latest is shown." if _sp['ties'] > 1 else "")
+                        "and these windows all contain them; the latest is shown." if _sp['ties'] > 1 else "")
             # 3-1: VaR 95% depends on the 13th and 14th worst days, so it can differ across the tied windows.
             _v95_lo, _v95_hi = (f"€{_v / 1e6:,.2f}m" for _v in _sp['var95_ties'])
             if _sp['ties'] > 1 and _v95_lo != _v95_hi:
@@ -1100,12 +966,12 @@ else:
             # 1-1: a held instrument with a zero or negative close anywhere in the search range (WTI on 20 Apr
             # 2020): those days and the next have no percentage return, so they are not in the book P&L and the
             # search never sees them. Their P&L is given as the price change on a fixed quantity (the quantity
-            # bought at the last positive close, as in the scenario replay below), in euros, and compared with the
-            # stress ES. Found from the prices, nothing hard-coded; the returns themselves are not changed.
+            # bought at the last positive close, as in the scenario replay below) and compared with the stress
+            # ES. Found from the prices, nothing hard-coded; the returns themselves are not changed.
             _nonpos_txt = ""
-            _fx_stress = common.load_close(common.FX_TICKER, common.STRESS_FROM, end_date).dropna()
+            _tickers = common.panel_tickers(CARBON_SHORT, CARBON_TICKER)
             for _k, _v in positions.items():
-                _px = common.load_close(_BOOK_TICKERS[_k], common.STRESS_FROM, end_date).dropna()
+                _px = common.load_close(_tickers[_k], common.STRESS_FROM, end_date).dropna()
                 _vals = _px.values
                 _i = 1
                 while _i < len(_vals):
@@ -1121,21 +987,7 @@ else:
                         continue
                     _days = list(range(_i, min(_j + 1, len(_vals))))
                     _qty = _v / _vals[_i - 1]
-                    if _KINDS[_k] == "eur":
-                        _pnl = [(_px.index[d], _qty * (_vals[d] - _vals[d - 1])) for d in _days]
-                    else:
-                        # USD future: the quantity is set from the euro notional at the base day's EUR/USD, and
-                        # each day's USD price change is converted at that day's EUR/USD (the last close on or
-                        # before it).
-                        # A day without a EUR/USD close is not converted on its own: its price change goes into
-                        # the next day with one (as in common.replay_fixed), nothing is carried forward.
-                        _x = _fx_stress.reindex(_px.index)
-                        _pnl, _carry = [], 0.0
-                        for d in _days:
-                            _carry += _vals[d] - _vals[d - 1]
-                            if not pd.isna(_x.iloc[d]) and not pd.isna(_x.iloc[_i - 1]):
-                                _pnl.append((_px.index[d], _qty * _x.iloc[_i - 1] * _carry / _x.iloc[d]))
-                                _carry = 0.0
+                    _pnl = [(_px.index[d], _qty * (_vals[d] - _vals[d - 1])) for d in _days]
                     _n_run = _j - _i
                     _nonpos_txt += (f" {_k} settled at " + ", ".join(f"{_vals[d]:.2f} on {_px.index[d]:%d %b %Y}"
                                                                     for d in range(_i, _j))
@@ -1152,7 +1004,7 @@ else:
                                         + " and ".join(f"{_d:%d %b %Y}" for _d, _ in _worse)
                                         + (" is" if len(_worse) == 1 else " are each")
                                         + f" larger than the stress ES 97.5% shown (€{_sp['es975'] / 1e6:,.2f}m): "
-                                        "counted this way, a window containing these days can have a larger ES than the stress "
+                                        "counted this way, a window containing these days could have a larger ES than the stress "
                                         "period shown.")
                     _i = _j + 1
             st.caption(f"Stress period: **{_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}**"
@@ -1162,19 +1014,18 @@ else:
             _folded("How the stress period is chosen",
                 f"Stress period: {_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}, searched from "
                 f"{_sp['search_from']:%b %Y} to {_sp['search_to']:%d %b %Y}: the {common.STRESS_WINDOW} trading "
-                f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted. "
-                f"The {common.STRESS_WINDOW} days must fall within {common.STRESS_MAX_SPAN} calendar days (normally "
+                f"days in which today's positions would have had the largest ES 97.5%, all days equally weighted; "
+                f"the {common.STRESS_WINDOW} days must fall within {common.STRESS_MAX_SPAN} calendar days (normally "
                 "they span 360 to 380). "
                 "As above, only days on which every instrument held has a return count"
-                + (f" ({CARBON_SHORT} starts on 2 Sep 2021)" if CARBON_SHORT in positions else "")
+                + (f"; {CARBON_SHORT} starts on 1 Sep 2021" if CARBON_SHORT in positions else "")
                 + f".{_tie_txt}{_es_txt} The stress period changes when the "
                 "positions change. Stress-period VaR and ES borrow the Basel method (bank capital rules): Basel "
                 "picks the 12 months of largest loss for the current portfolio, with a 10-day horizon and liquidity "
-                "scaling. Here the horizon is 1 day, as above. The search starts when every position in the book has prices: TTF=F starts on 23 Oct "
+                "scaling; here the horizon is 1 day, as above. The search starts when every position in the book has prices: TTF=F starts on 23 Oct "
                 "2017, so a book with TTF cannot reach back to 2007 as Basel requires. Brent and WTI were checked "
                 "back to 2007 and 2000 (on 22 Oct 2026): no earlier 12 months was more volatile or had a larger "
-                "loss for one unit long or short. The historical scenarios below reach back to 2008, but TTF has "
-                f"no data before 23 Oct 2017 and {_CARBON_START_TXT}: see the scenario table.")
+                "loss for one unit long or short.")
 
         # ── VaR backtest ──
         bt = common.var_backtest(pnl, window=_LOOKBACK, test_days=_TEST_DAYS)
@@ -1191,14 +1042,14 @@ else:
                         f"({exc99} exceptions at 99% over {n_bt} days)</h4>", unsafe_allow_html=True)
         else:
             st.caption(f"Basel traffic light not shown: it is defined for 250 backtest days and only {n_bt} are "
-                       "available. Widen the date range.")
+                       "available; widen the date range.")
         st.dataframe(pd.DataFrame(rows).set_index('VaR level'), width="stretch")
 
         fig_bt, ax_bt = plt.subplots(figsize=(14, 4))
         bar_colors_bt = np.where(bt['Exc99'], 'red', np.where(bt['Exc95'], 'orange', 'lightgray'))
         ax_bt.bar(bt.index, bt['PnL'] / 1e6, color=bar_colors_bt, width=1.0)
-        ax_bt.plot(bt.index, -bt['VaR95'] / 1e6, color='orange', linewidth=1, linestyle='--', label='-VaR 95%')
-        ax_bt.plot(bt.index, -bt['VaR99'] / 1e6, color='red', linewidth=1.2, label='-VaR 99%')
+        ax_bt.plot(bt.index, -bt['VaR95'] / 1e6, color='orange', linewidth=1, linestyle='--', label='−VaR 95%')
+        ax_bt.plot(bt.index, -bt['VaR99'] / 1e6, color='red', linewidth=1.2, label='−VaR 99%')
         ax_bt.axhline(0, color='black', linewidth=0.5)
         ax_bt.set_ylabel('Daily P&L (€m)')
         ax_bt.set_title('Hypothetical daily P&L vs prior-day VaR (orange = beyond VaR 95%, red = beyond VaR 99%)')
@@ -1206,341 +1057,182 @@ else:
         plt.tight_layout()
         st.pyplot(fig_bt)
 
-        _usd_panel = common.returns_panel(start_date, end_date, CARBON_SHORT, CARBON_TICKER)
-        _usd_var = ""
-        if _usd_panel is not None and all(k in _usd_panel for k in positions):
-            _usd_pnl = common.book_pnl(_usd_panel[list(positions)].dropna(), positions).tail(_LOOKBACK)
-            _usd_var = (f" Before this conversion (each instrument's quote currency"
-                        + (", EU Carbon ETC from CARB.L in USD" if CARBON_OK else "")
-                        + f"), the book VaR 95% is €{common.hist_var(_usd_pnl, 0.95) / 1e6:,.2f}m.")
         _folded("How the book VaR and its backtest work",
             f"Historical simulation on the last {_LOOKBACK} trading days, 1-day horizon. Only days on which "
             "every instrument held has a return count: a move of one instrument on the other's holiday is "
             "left out, and the other's next return spans both days. "
             "Backtest is hypothetical: today's positions applied to past returns, each day's VaR "
-            f"estimated only from the {_LOOKBACK} days before it. Positions are held static. P&L is in euros. "
-            "Brent and WTI are futures: a day's euro P&L is the € notional x the day's USD return x the "
-            "EUR/USD close of the day before / that of the day (Yahoo EURUSD=X, read on each future's own trading "
-            "days). A day without a EUR/USD close gives no return for that position, and nothing is carried "
-            f"forward. {_CARBON_EUR_TXT}. TTF is quoted in euros." + _usd_var
-            + " Kupiec also rejects too few exceptions (an over-conservative model). Basel zones: green 0 to 4, "
-            "yellow 5 to 9, red 10 or more exceptions at 99% over 250 days."
+            f"estimated only from the {_LOOKBACK} days before it. Positions are held static. Returns are "
+            "taken in each instrument's quote currency and applied to the € notional, so EUR/USD is ignored "
+            f"for Brent and WTI; {CARBON_FX_NOTE}. Kupiec also rejects too few exceptions (an "
+            "over-conservative model). Basel zones: green 0 to 4, yellow 5 to 9, red 10 or more exceptions at 99% over "
+            "250 days."
         )
 
 
-# ─── Stress tests: computed here so the summary under the VaR figures can use them ───
-_replay, _hypo, _rev, _summ, _shocks, _capped = {}, [], None, {}, {}, []
-_closes, _fx_long, _daily_long = {}, None, None
-if positions:
-    _fx_long = common.load_close(common.FX_TICKER, common.LONG_FROM, end_date)
-    _closes = {k: common.long_close(t, end_date) for k, t in _BOOK_TICKERS.items()}
-    _closes = {k: v for k, v in _closes.items() if v.notna().sum() > 30}
-    _daily_long = pd.DataFrame({k: common.eur_returns(v, _KINDS[k], _fx_long) for k, v in _closes.items()})
-    for sc in SCENARIOS:
-        if pd.Timestamp(sc["last"]) > pd.Timestamp(end_date):
-            _replay[sc["name"]] = "after"
-            continue
-        _replay[sc["name"]] = common.replay_fixed(_closes, {k: _KINDS[k] for k in _closes}, _fx_long, positions,
-                                                  sc["first"], sc["last"])
-    _summ = {k: common.ten_day_summary(v, _KINDS[k], _fx_long) for k, v in _closes.items()
-             if CARBON_OK or k != CARBON_SHORT}
-    _summ = {k: v for k, v in _summ.items() if v is not None}
-    if "Brent Crude Oil" in _summ:
-        _shocks, _capped = common.severity_shocks(_summ, short=_SHORT_HISTORY)
-    _w_held = {k: v for k, v in positions.items() if CARBON_OK or k != CARBON_SHORT}
-    if _sp is not None and _shocks and _w_held:
-        _sblk_all = _stress_panel.loc[_sp['start']:_sp['end']]
-        _hypo = common.hypothetical_rows(_shocks, _sblk_all, _w_held, CARBON_SHORT, CARBON_OK)
-        _names_rev = list(_w_held)
-        _blk_rev = _sblk_all[_names_rev].dropna()
-        if len(_blk_rev) >= common.MIN_STRESS_ROWS:
-            _cov10 = _blk_rev.cov().values * common.TEN_DAYS
-            _rev = common.reverse_stress(_cov10, np.array([_w_held[k] for k in _names_rev]), loss_limit)
-            _joint = common.joint_ten_day(_stress_panel[_names_rev])
-            _dist = common.mahalanobis(_joint.values, _cov10)
-            _rev.update(names=_names_rev, dmax=float(_dist.max()), dmax_end=_joint.index[int(_dist.argmax())],
-                        d99=float(np.percentile(_dist, 99)), n_joint=len(_dist), joint_from=_joint.index[0])
-
-if _metrics_ok:
-    _cands = []
-    _left_out = 0
-    for sc in SCENARIOS:
-        _r = _replay.get(sc["name"])
-        if not isinstance(_r, dict) or not _r["days"]:
-            continue
-        if "book" in _r:
-            _cands.append(dict(name=sc["name"], type="historical", horizon=f"{_r['days']} trading days",
-                               pnl=_r["book"], days=_r["days"]))
-        elif _r.get("missing_held"):
-            _left_out += 1
-    for _h in _hypo:
-        if _h["pnl"] is not None:
-            _cands.append(dict(name=_h["name"], type=_h["type"], horizon="10 days", pnl=_h["pnl"], days=10))
-    _worst = min(_cands, key=lambda c: c["pnl"]) if _cands else None
-    _lines = common.summary_lines(_worst, _left_out, loss_limit, _placeholder, var_limit_m * 1e6, _rev,
-                                  _rev["names"] if _rev else [], _rev["dmax"] if _rev else 0,
-                                  _rev["dmax_end"] if _rev else None)
-    if _lines:
-        with _summary_box:
-            st.write("**Stress tests in brief** (details in the sections below)")
-            for _l in _lines:
-                st.write(_l)
-
-
 # ─── Section 5b: Historical scenario replay (uses the positions above) ───
+# Fixed past windows. Each starts at the close before the first day listed and ends at the
+# close of the last day. Dates are checked against prices and news sources (project spec dashboard_规格/5_事实与来源.md, section E).
+SCENARIOS = [
+    {"name": "Russia invades Ukraine", "first": "2022-02-24", "last": "2022-03-08",
+     "why": "from the invasion on 24 Feb 2022 to 8 Mar 2022, the day the US announced a ban on Russian oil "
+            "imports (Brent's highest close of the episode; TTF's was on 7 Mar)"},
+    {"name": "August 2022 gas peak", "first": "2022-08-01", "last": "2022-08-26",
+     "why": "from the first trading day of August 2022 to 26 Aug 2022, the record TTF front-month close (about "
+            "€339/MWh) after Gazprom announced a three-day Nord Stream 1 shutdown"},
+    {"name": "2026 Iran war", "first": "2026-03-02", "last": "2026-03-13",
+     "why": "the first two trading weeks after the US-Israeli strikes on Iran (Sat 28 Feb 2026): QatarEnergy "
+            "halted LNG output and an IRGC official said Hormuz was closed on 2 Mar"},
+]
+_SCEN_FROM = dt.date(2022, 1, 1)
+_SCEN_TO = dt.date(2026, 3, 31)
+
+
+def replay_scenario(panel, positions, first, last):
+    """Replay static positions through one past window.
+
+    Each position is entered at the close before `first` and held unchanged (same quantity)
+    to the close of `last`. Returns a dict with per-instrument cumulative return and € P&L,
+    the book P&L, and the book's worst day; an instrument with no or too few returns in the
+    window is reported as missing.
+    """
+    window = panel.loc[pd.Timestamp(first):pd.Timestamp(last)]
+    window = window.dropna(how='all')
+    base = panel.index[panel.index < pd.Timestamp(first)]
+    out = {"days": len(window), "base": base[-1] if len(base) else None,
+           "end": window.index.max() if len(window) else None, "inst": {}}
+    if not len(window):
+        return out
+    value_paths = []
+    for name in panel.columns:
+        r = window[name]
+        n_ret = int(r.notna().sum())
+        # Fewer returns than 70% of the window's trading days: a gap (stale quote, missing data),
+        # so the cumulative return would be incomplete. A single holiday is fine: returns are
+        # computed on each series' own trading days, so the next return covers it.
+        if n_ret == 0 or n_ret < 0.7 * len(window):
+            out["inst"][name] = None
+            continue
+        growth = (1 + r.fillna(0)).cumprod()
+        cum = float(growth.iloc[-1] - 1)
+        pos = positions.get(name, 0.0)
+        out["inst"][name] = {"ret": cum, "pnl": pos * cum, "pos": pos}
+        if pos:
+            # Value of the held position each day; its day-on-day change is that day's P&L.
+            value = pos * growth
+            value_paths.append(value.diff().fillna(value.iloc[0] - pos))
+    held = [k for k in positions if positions[k]]
+    missing_held = [k for k in held if out["inst"].get(k) is None]
+    out["missing_held"] = missing_held
+    if value_paths and not missing_held:
+        daily = pd.concat(value_paths, axis=1).sum(axis=1)
+        out["book"] = float(daily.sum())
+        out["worst_day"], out["worst_pnl"] = daily.idxmin(), float(daily.min())
+    return out
+
+
 st.subheader("Historical Scenario Replay")
-st.write(f"What would the positions above have made or lost if held through {len(SCENARIOS)} past shocks?")
+st.write("What would the positions above have made or lost if held through three past shocks?")
 if not positions:
     st.info("Enter at least one non-zero position above to replay historical scenarios.")
-elif not _closes or _fx_long is None or _fx_long.notna().sum() < 30:
-    st.info("Not enough data to replay the scenarios.")
 else:
-    _summary, _detail, _notes, _est_notes = [], [], [], []
-    _brent_rolls = (_brent_roll_days(_closes['Brent Crude Oil'].dropna().index)
-                    if 'Brent Crude Oil' in _closes else pd.DatetimeIndex([]))
-    # TTF=F front-month expiries (and the day after): a TTF move there can be partly the gap between contracts.
-    _ttf_exp_days = (common.ttf_expiry_days(_closes['TTF Natural Gas'].dropna().index)
-                     if 'TTF Natural Gas' in _closes and positions.get('TTF Natural Gas', 0) else pd.DatetimeIndex([]))
-    _ttf_notes = []
-    _after_end = []
-    _gross_all = sum(abs(v) for v in positions.values())
-    for sc in SCENARIOS:
-        res = _replay.get(sc["name"])
-        if res == "after":
-            _after_end.append(sc["name"])
-            _summary.append({"Scenario": sc["name"], "Window": f"{pd.Timestamp(sc['first']):%d %b %Y} to "
-                             f"{pd.Timestamp(sc['last']):%d %b %Y}", "Trading days": None,
-                             "Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan,
-                             "Worst day": f"after the end date ({end_date:%d %b %Y})"})
-            continue
-        if not res or not res["days"] or res["base"] is None:
-            _summary.append({"Scenario": sc["name"], "Window": f"{sc['first']} to {sc['last']}",
-                             "Trading days": None, "Book P&L (€m)": np.nan,
-                             "Worst book day (€m)": np.nan, "Worst day": "no data"})
-            continue
-        _win = f"close {res['base']:%d %b %Y} to close {res['end']:%d %b %Y}"
-        _row = {"Scenario": sc["name"], "Window": _win, "Trading days": res["days"]}
-        if "book" in res:
-            _row.update({"Book P&L (€m)": round(res["book"] / 1e6, 2),
-                         "Worst book day (€m)": round(res["worst_pnl"] / 1e6, 2),
-                         "Worst day": f"{res['worst_day']:%d %b %Y}"})
-        else:
-            _obs = [k for k in positions if res["inst"].get(k) is not None]
-            _row.update({"Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan, "Worst day": "",
-                         "Observed positions P&L (€m)": round(sum(res["inst"][k]["pnl"] for k in _obs) / 1e6, 2),
-                         "Notional covered": f"{sum(abs(positions[k]) for k in _obs) / _gross_all:.0%} of gross",
-                         "Positions without data": ", ".join(res["missing_held"])})
-            # Estimate of each missing position from the instruments that have data in the window (spec 3.5).
-            _observers = {k: v["ret"] for k, v in res["inst"].items()
-                          if v is not None and (CARBON_OK or k != CARBON_SHORT)}
-            _est_total, _est_bits, _not_est = 0.0, [], []
-            for _m in res["missing_held"]:
-                _e = (common.estimate_missing(_daily_long, _observers, _m)
-                      if _observers and (CARBON_OK or _m != CARBON_SHORT) else None)
-                if _e is None:
-                    _not_est.append(_m)
-                    continue
-                _est_total += positions[_m] * _e["ret"]
-                _est_bits.append(f"{_m} {_e['ret']:+.1%} (daily returns {_e['start']:%d %b %Y} to "
-                                 f"{_e['end']:%d %b %Y})")
-            _row["Estimated, positions without data (€m)"] = (round(_est_total / 1e6, 2)
-                                                              if _est_bits else np.nan)
-            if _est_bits:
-                _est_notes.append(f"{sc['name']}: " + ", ".join(_est_bits) + ", from the moves of "
-                                  + ", ".join(_observers) + " over the window"
-                                  + (" (" + ", ".join(_not_est) + " not estimated)" if _not_est else ""))
-            elif _not_est:
-                _est_notes.append(f"{sc['name']}: " + ", ".join(_not_est) + " not estimated")
-        _summary.append(_row)
-        for name in _closes:
-            inst = res["inst"].get(name)
-            _detail.append({"Scenario": sc["name"], "Instrument": name,
-                            "Position (€m)": positions.get(name, 0.0) / 1e6,
-                            "Return over window": f"{inst['ret']:+.1%}" if inst else "no data",
-                            "P&L (€m)": round(inst["pnl"] / 1e6, 2) + 0.0 if inst else np.nan})
-        _roll_in = [d for d in _brent_rolls if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
-        if _roll_in:
-            _notes.append(f"{sc['name']}: {', '.join(f'{d:%d %b %Y}' for d in _roll_in)}")
-        _ttf_in = [d for d in _ttf_exp_days if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
-        if _ttf_in:
-            _wd = res.get('worst_day')
-            _wd = pd.Timestamp(_wd).normalize() if _wd is not None else None
-            # The tag sits right after the day it describes.
-            _ttf_notes.append(f"{sc['name']}: " + ", ".join(
-                f"{d:%d %b %Y}" + (" (the worst book day of that window)"
-                                   if _wd is not None and pd.Timestamp(d).normalize() == _wd else "")
-                for d in _ttf_in))
+    _scen_start = min(start_date, _SCEN_FROM)
+    _scen_end = max(end_date, _SCEN_TO)
+    scen_panel = common.returns_panel(_scen_start, _scen_end, CARBON_SHORT, CARBON_TICKER)
+    if scen_panel is None:
+        st.info("Not enough multi-commodity data to replay the scenarios.")
+    else:
+        _summary, _detail, _notes = [], [], []
+        _brent_rolls = _brent_roll_days(scen_panel['Brent Crude Oil'].dropna().index) \
+            if 'Brent Crude Oil' in scen_panel else pd.DatetimeIndex([])
+        # TTF=F front-month expiries (and the day after): a TTF move there can be partly the gap between contracts.
+        _ttf_exp_days = (common.ttf_expiry_days(scen_panel['TTF Natural Gas'].dropna().index)
+                         if 'TTF Natural Gas' in scen_panel and positions.get('TTF Natural Gas', 0) else pd.DatetimeIndex([]))
+        _ttf_notes = []
+        _after_end = []
+        for sc in SCENARIOS:
+            # A window that ends after the end date would use prices the page otherwise leaves out.
+            if pd.Timestamp(sc["last"]) > pd.Timestamp(end_date):
+                _after_end.append(sc["name"])
+                _summary.append({"Scenario": sc["name"], "Window": f"{pd.Timestamp(sc['first']):%d %b %Y} to "
+                                 f"{pd.Timestamp(sc['last']):%d %b %Y}", "Trading days": None,
+                                 "Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan,
+                                 "Worst day": f"after the end date ({end_date:%d %b %Y})"})
+                continue
+            res = replay_scenario(scen_panel, positions, sc["first"], sc["last"])
+            if not res["days"] or res["base"] is None:
+                _summary.append({"Scenario": sc["name"], "Window": f"{sc['first']} to {sc['last']}",
+                                 "Trading days": None, "Book P&L (€m)": np.nan,
+                                 "Worst book day (€m)": np.nan, "Worst day": "no data"})
+                continue
+            _win = f"close {res['base']:%d %b %Y} to close {res['end']:%d %b %Y}"
+            if "book" in res:
+                _summary.append({"Scenario": sc["name"], "Window": _win, "Trading days": res["days"],
+                                 "Book P&L (€m)": round(res["book"] / 1e6, 2),
+                                 "Worst book day (€m)": round(res["worst_pnl"] / 1e6, 2),
+                                 "Worst day": f"{res['worst_day']:%d %b %Y}"})
+            else:
+                _summary.append({"Scenario": sc["name"], "Window": _win, "Trading days": res["days"],
+                                 "Book P&L (€m)": np.nan, "Worst book day (€m)": np.nan,
+                                 "Worst day": "no data for " + ", ".join(res["missing_held"])})
+            for name in scen_panel.columns:
+                inst = res["inst"].get(name)
+                _detail.append({"Scenario": sc["name"], "Instrument": name,
+                                "Position (€m)": positions.get(name, 0.0) / 1e6,
+                                "Return over window": f"{inst['ret']:+.1%}" if inst else "no data",
+                                "P&L (€m)": round(inst["pnl"] / 1e6, 2) + 0.0 if inst else np.nan})
+            _roll_in = [d for d in _brent_rolls if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
+            if _roll_in:
+                _notes.append(f"{sc['name']}: {', '.join(f'{d:%d %b %Y}' for d in _roll_in)}")
+            _ttf_in = [d for d in _ttf_exp_days if pd.Timestamp(sc["first"]) <= d <= pd.Timestamp(sc["last"])]
+            if _ttf_in:
+                _wd = res.get('worst_day')
+                _wd = pd.Timestamp(_wd).normalize() if _wd is not None else None
+                # The tag sits right after the day it describes.
+                _ttf_notes.append(f"{sc['name']}: " + ", ".join(
+                    f"{d:%d %b %Y}" + (" (the worst book day of that window)"
+                                       if _wd is not None and pd.Timestamp(d).normalize() == _wd else "")
+                    for d in _ttf_in))
 
-    _table(pd.DataFrame(_summary).astype({"Trading days": "Int64"}).set_index("Scenario"))
-    if _detail:
-        with st.expander("Return and P&L by instrument"):
-            _table(pd.DataFrame(_detail).set_index(["Scenario", "Instrument"]))
+        st.dataframe(pd.DataFrame(_summary).astype({"Trading days": "Int64"}).set_index("Scenario"),
+                     width="stretch")
+        if _detail:
+            with st.expander("Return and P&L by instrument"):
+                st.dataframe(pd.DataFrame(_detail).set_index(["Scenario", "Instrument"]), width="stretch")
 
-    _sum_df = pd.DataFrame(_summary).dropna(subset=["Book P&L (€m)"])
-    if len(_sum_df):
-        fig_sc, ax_sc = plt.subplots(figsize=(14, 2.2 + 0.4 * len(_sum_df)))
-        _vals = _sum_df["Book P&L (€m)"].values
-        ax_sc.barh(_sum_df["Scenario"], _vals, color=np.where(_vals < 0, 'firebrick', 'seagreen'), height=0.5)
-        for _y, _v in enumerate(_vals):
-            ax_sc.annotate(f"€{_v:+,.2f}m", (_v, _y), textcoords='offset points',
-                           xytext=(6 if _v >= 0 else -6, 0), ha='left' if _v >= 0 else 'right',
-                           va='center', fontsize=8)
-        ax_sc.axvline(0, color='black', linewidth=0.5)
-        ax_sc.invert_yaxis()
-        ax_sc.set_xlabel('Book P&L over the window (€m)')
-        ax_sc.set_title('Book P&L if today\'s positions had been held through each window')
-        ax_sc.margins(x=0.15)
-        plt.tight_layout()
-        st.pyplot(fig_sc)
+        _sum_df = pd.DataFrame(_summary).dropna(subset=["Book P&L (€m)"])
+        if len(_sum_df):
+            fig_sc, ax_sc = plt.subplots(figsize=(14, 2.2 + 0.4 * len(_sum_df)))
+            _vals = _sum_df["Book P&L (€m)"].values
+            ax_sc.barh(_sum_df["Scenario"], _vals, color=np.where(_vals < 0, 'firebrick', 'seagreen'), height=0.5)
+            for _y, _v in enumerate(_vals):
+                ax_sc.annotate(f"€{_v:+,.2f}m", (_v, _y), textcoords='offset points',
+                               xytext=(6 if _v >= 0 else -6, 0), ha='left' if _v >= 0 else 'right',
+                               va='center', fontsize=8)
+            ax_sc.axvline(0, color='black', linewidth=0.5)
+            ax_sc.invert_yaxis()
+            ax_sc.set_xlabel('Book P&L over the window (€m)')
+            ax_sc.set_title('Book P&L if today\'s positions had been held through each window')
+            ax_sc.margins(x=0.15)
+            plt.tight_layout()
+            st.pyplot(fig_sc)
 
-    st.caption("This replays what happened. It is not a forecast or a probability."
-               + (f" Not replayed because the window ends after the end date ({end_date:%d %b %Y}): "
-                  + ", ".join(_after_end) + "." if _after_end else ""))
-    if any("Positions without data" in r for r in _summary):
-        st.caption("Where a position has no data in a window, the book P&L is left blank. The observed positions' "
-                   "P&L and the estimate for the others are shown in separate columns and are not added together. "
-                   "The estimate is the conditional mean of each missing position's move given the moves of the "
-                   "instruments with data, with their daily covariance over the longest period in which all of them "
-                   "have returns. It is not an observed figure. " + (". ".join(_est_notes) + "." if _est_notes else "")
-                   + ("" if CARBON_OK else " " + _CARBON_PROXY_TXT))
-    if _ttf_notes:
-        st.caption("⚠️ TTF front-month expiry days, or the day after, inside the windows (part of that day's TTF move "
-                   "can be the gap between two contracts, not verified): " + ". ".join(_ttf_notes) + ".")
-    if _notes:
-        st.caption("⚠️ Brent roll days inside the windows (part of that day's Brent move is the gap between two "
-                   "contracts): " + ". ".join(_notes) + ".")
-    _folded("How the replay works",
-        "Today's positions are entered at the close before each window with a fixed quantity (the € notional "
-        "divided by that close) and held unchanged (no rebalancing, hedging or stop-loss): the P&L is the quantity "
-        "x the price change, in euros. For Brent and WTI each day's USD price change is converted at that day's "
-        "EUR/USD close, so a negative price (WTI on 20 Apr 2020) needs no special treatment. The worst day is "
-        "the largest one-day loss of the book inside the window. Windows: "
-        + " ".join(f"{sc['name']}: {sc['why']}." for sc in SCENARIOS) + " "
-        "The 2008 and 2020 windows follow one rule: the first day is the first trading day of the event, and the "
-        "window ends at Brent's lowest close within its first 30 trading days. Prices: Yahoo Finance continuous "
-        "front-month futures for TTF (NYMEX), Brent and WTI (Brent and WTI from Jul 2007 for these windows), and "
-        f"{'EU Carbon ETC on its euro line (CARB.MI)' if CARBON_OK else CARBON_LABEL}. TTF has no data before 23 "
-        f"Oct 2017 and {_CARBON_START_TXT}, so the 2008 window has neither and the 2020 window has no "
-        f"{CARBON_SHORT}. Windows are fixed dates: the start date does not change them, and a window that "
-        "ends after the end date is not replayed."
-    )
-
-
-# ─── Section 5c: Hypothetical scenarios (10-day horizon) ───
-st.subheader("Hypothetical Scenarios (10-day horizon)")
-st.write("How much would the positions above lose in 10 days if one instrument, or a group of them, moved as "
-         "much as in its worst 10 days in the data?")
-_proxy_only = bool(positions) and not CARBON_OK and set(positions) == {CARBON_SHORT}
-if not positions:
-    st.info("Enter at least one non-zero position above.")
-elif _proxy_only:
-    st.info(_CARBON_PROXY_TXT)
-elif _sp is None or not _hypo:
-    st.info("Hypothetical scenarios need the stress period of the book and the 10-day moves of the instruments "
-            "held, which are not available for these positions and dates.")
-else:
-    _cols_h = [k for k in _closes if any(k in h["moves"] for h in _hypo)]
-    _tbl = []
-    for h in _hypo:
-        _r = {"Scenario": h["name"], "Type": h["type"]}
-        for k in _cols_h:
-            _mv = h["moves"].get(k)
-            _r[k] = f"{_mv[0]:+.1%} [{_mv[1]}]" if _mv else ""
-        if h["pnl"] is None:
-            _r.update({"Book P&L (€m)": np.nan, "x VaR 95% limit (1-day)": "",
-                       "% of 10-day loss limit": "no data for " + ", ".join(h["missing"])})
-        else:
-            _r.update({"Book P&L (€m)": round(h["pnl"] / 1e6, 2),
-                       "x VaR 95% limit (1-day)": f"{max(-h['pnl'], 0) / (var_limit_m * 1e6):.1f}",
-                       "% of 10-day loss limit": f"{max(-h['pnl'], 0) / loss_limit:.0%}"})
-        _tbl.append(_r)
-    _table(pd.DataFrame(_tbl).set_index("Scenario"))
-    _src = []
-    for k in _cols_h:
-        if k not in _summ:
-            continue
-        _s1 = _summ[k]
-        _src.append(f"{k}: worst 10-day rise {_s1['up']:+.1%} ending {_s1['up_end']:%d %b %Y} and worst fall "
-                    f"{_s1['down']:+.1%} ending {_s1['down_end']:%d %b %Y}, since {_s1['first']:%d %b %Y}. 99th and 1st "
-                    f"percentiles of its 10-day moves {_s1['p99']:+.1%} and {_s1['p1']:+.1%}")
-    _ref = _summ.get("Brent Crude Oil")
-    _brent_last = _ref["last"] if _ref else end_date
-    st.caption("[W] worst 10-day move in the data. [B] severity borrowed from Brent: "
-               + (f"{_ref['k_up']:.1f} (rises) and {_ref['k_down']:.1f} (falls) standard deviations over 10 days, "
-                  "times the instrument's own 10-day volatility, used where it is larger than the instrument's own "
-                  "worst move. " if _ref else "")
-               + "[C] conditional mean given the scenario's core moves. "
-               + (" ".join(f"{k}: the borrowed fall would be 100% or more, which needs a price below zero, so its own "
-                           "worst fall is used." for k in _capped) + " " if _capped else "")
-               + "The x VaR 95% limit (1-day) column is only a sense of scale: the limit is for 1 day and the scenarios "
-               "for 10. " + ". ".join(_src) + ".")
-    _bre = _summ.get("Brent Crude Oil")
-    _car = _summ.get(CARBON_SHORT)
-    _wti = _summ.get("WTI Crude Oil")
-    _wti_txt = ""
-    if _wti and "WTI Crude Oil" in _closes:
-        _wc = _closes["WTI Crude Oil"].dropna()
-        _wi = _wc.index.get_loc(_wti["up_end"])
-        _wti_txt = (f" WTI uses its own worst moves. Its largest 10-day rise ({_wti['up']:+.1%}) starts from the "
-                    f"{_wc.index[_wi - 10]:%d %b %Y} close of {_wc.iloc[_wi - 10]:.2f} dollars.")
-    _ttf_same = ""
-    if _car and "TTF Natural Gas" in _closes:
-        _tm = common.ten_day_moves(_closes["TTF Natural Gas"], "eur")
-        if _car["down_end"] in _tm.index:
-            _ttf_same = f", and TTF moved {_tm.loc[_car['down_end']]:+.0%} over the same 10 days"
-    _folded("How the stress tests are built",
-        "Shock sizes come from the data. For each instrument, every run of 10 consecutive trading days of its "
-        "own calendar is a 10-day move (overlapping runs, as MAR33.4 allows), counted only when all 11 closes "
-        "are present and above zero and the run spans at most 16 calendar days. The moves are in euros per euro "
-        "of notional: Brent and WTI as futures, converted day by day at EUR/USD. The worst rise and the worst "
-        "fall are the [W] shocks. TTF has no data for 2008 and EU Carbon ETC none for 2008 or 2020, so their "
-        "worst moves include neither crisis. For them the shock is the larger of their own worst move and Brent's "
-        f"worst move in standard deviations (Brent from Jul 2007 to {_brent_last:%d %b %Y}) times their own 10-day "
-        "volatility [B]." + _wti_txt,
-        "Single-factor rows move one position and leave the others unchanged. The narrative rows move one or two "
-        "core instruments by their shocks and every other position by its conditional mean given them (Kupiec "
-        "1998, not checked against the original. Breuer, Jandačka, Rheinberger and Summer 2009 show that for "
-        "elliptical distributions this choice is the most plausible of the usual ones), with the daily "
-        f"covariance of the stress period ({_sp['start']:%d %b %Y} to {_sp['end']:%d %b %Y}) times 10 and a "
-        "mean of zero, an assumption. MAR33.4 asks for 10-day changes without scaling from a shorter horizon. "
-        "Here the covariance is scaled from daily returns, which leaves out autocorrelation.",
-        "Gulf supply disruption: Brent and TTF rise. The US EIA puts oil flows through the Strait of Hormuz at "
-        "about 20% of global petroleum liquids consumption and LNG flows at over 20% of global LNG trade in the "
-        "first half of 2025 (World Oil Transit Chokepoints, updated 3 Mar 2026)."
-        + (" The 2026 Iran war scenario above is a past case." if pd.Timestamp(end_date) >= pd.Timestamp("2026-03-13")
-           else "") + " Demand collapse: Brent falls"
-        + (f". Its worst 10-day fall in the data ended on {_bre['down_end']:%d %b %Y}" if _bre else "")
-        + ". Carbon market shock: EU Carbon ETC falls"
-        + (f". Its worst 10-day fall in the data ended on {_car['down_end']:%d %b %Y}{_ttf_same}"
-           if _car else "") + ".",
-        "Reverse stress test: among all 10-day moves of the positions held that lose the 10-day loss limit, the "
-        "one with the smallest Mahalanobis distance under the same covariance: r* = -L x Sw / (w'Sw), at "
-        "distance L / sqrt(w'Sw). This is the dual form of the worst-case search of Breuer et al. (2009). The "
-        "distance treats returns as jointly normal, while real returns have fat tails, so the largest joint "
-        "10-day move in the data (sums of 10 daily returns on common trading days) is shown next to it. Linear "
-        "positions only."
-        + ("" if CARBON_OK or CARBON_SHORT not in positions else " " + _CARBON_PROXY_TXT))
-
-
-# ─── Section 5d: Reverse stress test ───
-st.subheader("Reverse Stress Test")
-st.write("What is the most plausible 10-day move that makes the positions above lose the 10-day loss limit?")
-if not positions:
-    st.info("Enter at least one non-zero position above.")
-elif _proxy_only:
-    st.info(_CARBON_PROXY_TXT)
-elif _rev is None:
-    st.info("The reverse stress test needs the stress period of the book, which is not available for these "
-            "positions and dates.")
-else:
-    _table(pd.DataFrame({
-        "Move over 10 days": [f"{r:+.1%}" + (" (needs a price below zero)" if r <= -1 else "") for r in _rev["r"]],
-        "P&L (€m)": [round(p / 1e6, 2) for p in _rev["pnl"]]}, index=_rev["names"]))
-    st.caption(f"Loss: €{loss_limit / 1e6:,.1f}m, the 10-day loss limit" + (" (a placeholder)" if _placeholder else "")
-               + f". Mahalanobis distance of this move: {_rev['d']:.1f}. Largest joint 10-day move of the same "
-               f"positions in the data since {_rev['joint_from']:%b %Y}: {_rev['dmax']:.1f}, ending "
-               f"{_rev['dmax_end']:%d %b %Y} (99th percentile {_rev['d99']:.1f}, {_rev['n_joint']} moves). "
-               + ("A joint move no larger than ones already in the data reaches this loss."
-                  if _rev['d'] <= _rev['dmax'] else
-                  "Reaching this loss takes a joint move larger than any in the data.")
-               + " The distance grows in proportion to the loss limit.")
+        st.caption("This replays what happened; it is not a forecast or a probability."
+                   + (f" Not replayed because the window ends after the end date ({end_date:%d %b %Y}): "
+                      + ", ".join(_after_end) + "." if _after_end else ""))
+        if _ttf_notes:
+            st.caption("⚠️ TTF front-month expiry days, or the day after, inside the windows (part of that day's TTF move "
+                       "may be the gap between two contracts; not verified): " + "; ".join(_ttf_notes) + ".")
+        if _notes:
+            st.caption("⚠️ Brent roll days inside the windows (part of that day's Brent move is the gap between two "
+                       "contracts): " + "; ".join(_notes) + ".")
+        _folded("How the replay works",
+            "Today's positions are entered "
+            "at the close before each window and held unchanged (no rebalancing, hedging or stop-loss): P&L = "
+            "position × the instrument's cumulative return, and the worst day is the largest one-day loss of "
+            "the book inside the window. Windows: "
+            + "; ".join(f"{sc['name']}, {sc['why']}" for sc in SCENARIOS) + ". "
+            "Returns are the same daily returns as above: Yahoo Finance continuous front-month futures for "
+            f"TTF (NYMEX), Brent and WTI, and for carbon {CARBON_LABEL}; {CARBON_FX_NOTE}. "
+            "Windows are fixed dates: the start date does not change them, and a window that ends after the end date is not replayed."
+        )
