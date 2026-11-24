@@ -115,3 +115,12 @@ def test_gap_between_requests():
     news_data._last_call[0] = 0.0
     news_data.fetch("q", 7, get=_fake([_Resp(200, "{}")], calls), sleep=sleeps.append, clock=lambda: 2.0)
     assert sleeps and abs(sleeps[0] - (news_data.MIN_GAP_S - 2.0)) < 1e-9
+
+
+def test_blocked_domain_left_out():
+    arts = ('{"articles": [ {"url": "https://www.naturalnews.com/a", "title": "Divided EU struggles with gas exit", '
+            '"seendate": "20261124T071500Z", "domain": "naturalnews.com"}, '
+            '{"url": "https://r.com/b", "title": "Europe gas surges", "seendate": "20261123T223000Z", '
+            '"domain": "reuters.com"} ] }')
+    out, _, _ = _run([_Resp(200, arts)])
+    assert [a["domain"] for a in out] == ["reuters.com"]

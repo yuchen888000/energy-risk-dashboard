@@ -503,7 +503,9 @@ else:
                     cr_view = cr_view.format("{} (p)" if _c == 'Country' else "{:.1f} (p)",
                                              subset=pd.IndexSlice[_rows, [_c]], na_rep="n/a")
             # Tall enough to show every country without scrolling (35 px per row plus the header).
-            st.dataframe(cr_view, width="stretch", height=(len(cr_df) + 1) * 35 + 3, column_config=col_cfg)
+            # placeholder: Streamlit ignores the styler's na_rep for an empty number cell and writes "None".
+            st.dataframe(cr_view, width="stretch", height=(len(cr_df) + 1) * 35 + 3, column_config=col_cfg,
+                         placeholder="n/a")
             if ctx.is_carbon:
                 # Which countries EUAs cover (European Commission, About the EU ETS, read 2026-10-23).
                 _outside = [c for c in ("Turkey", "Switzerland", "United Kingdom") if c in set(cr_df['Country'])]

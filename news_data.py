@@ -90,6 +90,17 @@ def _clean_title(t):
     return t.strip()
 
 
+# Sites left out of every headline list: known for publishing false stories, so a risk reader stops trusting
+# the list when one appears (naturalnews.com was among the TTF headlines on 24 Nov 2026).
+BLOCKED_DOMAINS = ("naturalnews.com", "infowars.com", "beforeitsnews.com")
+
+
+def is_blocked_domain(domain):
+    """True for a domain in BLOCKED_DOMAINS or a subdomain of one."""
+    d = (domain or "").lower().strip().rstrip(".")
+    return any(d == b or d.endswith("." + b) for b in BLOCKED_DOMAINS)
+
+
 def _parse(text):
     """JSON of an artlist answer. GDELT sometimes leaves raw control characters inside titles, which strict
     JSON rejects: they are replaced by spaces and the text parsed again."""
@@ -144,7 +155,7 @@ def fetch(query, days, get=requests.get, sleep=time.sleep, clock=time.monotonic)
             seen = pd.to_datetime(a.get("seendate", ""), format="%Y%m%dT%H%M%SZ").tz_localize("UTC")
         except (ValueError, TypeError):
             continue
-        if not title:
+        if not title or is_blocked_domain(a.get("domain", "")):
             continue
         out.append({"title": title, "url": a.get("url", ""), "domain": a.get("domain", ""),
                     "country": a.get("sourcecountry", ""), "seen": seen})

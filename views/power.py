@@ -272,9 +272,15 @@ else:
     h3.metric("Flexible plant, 50% efficiency (HHV)", "Stays off",
               help="No period of the day covered the fuel and carbon cost.")
 _today = common.berlin_today()
+# The front month comes from the exchange expiry rule; Yahoo's TTF=F can move to the next contract a few days
+# before the front one stops trading (24 Nov 2026: TTF=F showed Jan 27 while Dec 26 traded until 27 Nov).
 _hl = common.front_month_contract("TTF=F", latest["TTF date"])
-_hl_contract = (f"TTF {_hl['delivery']:%b %y} future (front month)" if _hl["matched"] else
-                f"TTF {_hl['delivery']:%b %y} future (front month by the exchange expiry rule; "
+_hl_rule = common.front_by_rule("TTF", latest["TTF date"])
+_hl_contract = (f"TTF {_hl['delivery']:%b %y} future (front month)" if _hl["matched"] and _hl["delivery"] == _hl_rule
+                else f"TTF {_hl['delivery']:%b %y} future (Yahoo Finance's `TTF=F` had already moved to it; the front "
+                     f"month, TTF {_hl_rule:%b %y}, trades until "
+                     f"{common.contract_expiry('TTF', pd.Timestamp(_hl_rule)):%d %b})" if _hl["matched"] else
+                f"TTF {_hl_rule:%b %y} future (front month by the exchange expiry rule; "
                 "this price could not be matched to a single monthly contract on Yahoo Finance)")
 # The day-ahead auction for this delivery day runs the calendar day before; gas and carbon trade on weekdays,
 # so the last trading day before the auction is the last weekday before the delivery day.
@@ -743,7 +749,13 @@ _decide = max(pd.Timestamp(np.busday_offset(end_date, 0, roll="backward", busday
               ttf_last_date.normalize())
 # _decide can be a NYMEX holiday with a Yahoo row (4 Jul 2025); nymex_days_after counts from it.
 _wait_day = common.nymex_days_after(_decide, _WAIT_DAYS)
-_front = common.front_month_contract("TTF=F", ttf_last_date)
+# The front contract by the exchange expiry rule. `_off`: Yahoo's TTF=F already shows a later contract, so the
+# front contract's own price is used, not TTF=F's.
+_tracked = common.front_month_contract("TTF=F", ttf_last_date)
+_rule_d = common.front_by_rule("TTF", ttf_last_date)
+_front = dict(delivery=_rule_d, symbol=common.contract_symbol("TTF", _rule_d),
+              matched=_tracked["matched"] and _tracked["delivery"] == _rule_d)
+_off = _tracked["matched"] and _tracked["delivery"] != _rule_d
 _front_exp = common.contract_expiry("TTF", _front["delivery"])
 _ice_exp = common.ice_endex_ttf_expiry(_front["delivery"])
 # The front contract stops trading before the plant could buy in a week: switch to the next contract that
@@ -751,8 +763,8 @@ _ice_exp = common.ice_endex_ttf_expiry(_front["delivery"])
 _switch = _wait_day.normalize() > _front_exp.normalize()
 _batch = common.shared_download("TTF=F", _fit_from)
 _c = pd.Series(dtype=float)
-if _switch:
-    _next = pd.Timestamp(_front["delivery"]) + pd.DateOffset(months=1)
+if _switch or _off:
+    _next = pd.Timestamp(_front["delivery"]) + (pd.DateOffset(months=1) if _switch else pd.DateOffset(months=0))
     while common.contract_expired("TTF", _next, _wait_day):
         _next += pd.DateOffset(months=1)
     delivery_month = _next.date()
@@ -856,7 +868,7 @@ if wait is not None:
 
     w1, w2, w3 = st.columns(3)
     _w_state = _ttf_state(price_date)
-    if _switch:
+    if _switch or _off:
         _price_help = f"Yahoo Finance `{contract}`, the monthly contract itself, from the same download as `TTF=F`."
     elif _front["matched"]:
         _price_help = f"Yahoo Finance `TTF=F`, matched to the monthly contract `{contract}` on this date."
@@ -899,10 +911,10 @@ if wait is not None:
                    "1-in-20 threshold, not the average of the worst 5%.")
 
     fig_w, ax_w = plt.subplots(figsize=(14, 3.5))
-    hist = (_c if _switch else ttf).tail(40)
+    hist = (_c if (_switch or _off) else ttf).tail(40)
     days_ahead = common.nymex_path_days(price_date, _horizon)
     ax_w.plot(hist.index, hist.values, color="steelblue", linewidth=1.2,
-              label=f"TTF {delivery_month:%b %y} ({contract})" if _switch else "TTF front month (TTF=F)")
+              label=f"TTF {delivery_month:%b %y} ({contract})" if (_switch or _off) else "TTF front month (TTF=F)")
     ax_w.fill_between(days_ahead, np.r_[price_now, wait["lo"] * scale], np.r_[price_now, wait["hi"] * scale],
                       color="steelblue", alpha=0.2, label="90% range if you wait")
     ax_w.plot(days_ahead, np.r_[price_now, wait["median"] * scale], color="steelblue",
@@ -916,7 +928,7 @@ if wait is not None:
     # Volatility of TTF=F and of the contract on the same days of the fit window, from the same download (data,
     # not a rule): log returns on the days on which both have a price.
     _both = (np.log(pd.DataFrame({"TTF=F": _ttf_fit, contract: _c}).dropna()).diff().dropna()
-             if _switch and len(_c) else pd.DataFrame())
+             if (_switch or _off) and len(_c) else pd.DataFrame())
     _fit_note = (" The fit window does not shrink with a later start date: it starts 10 days before 1 Jan 2020, or "
                  "before the start date if that is earlier (as the page's TTF data does), and ends at the end date.")
     if _mode == "own":

@@ -388,25 +388,81 @@ def show_skipped_days_note(ticker, start):
 _ZERO_VOLUME_NOTE = {"CARB.L"}   # thinly traded: say when the latest day has no trade
 
 
+def header_contract(ticker, start, last_day):
+    """The front contract by the exchange expiry rule (front_by_rule) on `last_day`, for the price header.
+
+    Yahoo's continuous series can move to the next contract a few days before the front one stops trading (BZ=F
+    showed Brent Feb 27 on 24 Nov 2026, while Jan 27 traded until 30 Nov). Returns dict(symbol, delivery,
+    expiry, tracked, own), where `tracked` is the contract the continuous series shows on `last_day`
+    (match_front_contract, None if no single match) and `own` the front contract's own closes up to `last_day`
+    from the same download (empty if Yahoo has none). None for a ticker without monthly contracts."""
+    if ticker not in CURVE_ROOTS:
+        return None
+    root = CURVE_ROOTS[ticker][0]
+    d = pd.Timestamp(last_day).normalize()
+    delivery = front_by_rule(root, d)
+    if delivery is None:
+        return None
+    sym = contract_symbol(root, delivery)
+    batch = shared_download(ticker, start)
+    own = batch[sym].dropna() if sym in batch else pd.Series(dtype=float)
+    own = own[own.index <= d]
+    tracked = match_front_contract(batch, ticker, d) if len(batch) and d in batch.index else None
+    return dict(symbol=sym, delivery=delivery, expiry=contract_expiry(root, pd.Timestamp(delivery)),
+                tracked=tracked, own=own)
+
+
 def show_price_header(core, ticker, name, unit, end_date, start):
     """The latest price and its moves at the top of the Risk and Market pages. Without them a reader cannot see a
-    large move or a wrong price: the statistics below are percentiles and thresholds."""
+    large move or a wrong price: the statistics below are percentiles and thresholds.
+
+    For TTF, WTI and Brent the figures are those of the front contract by the exchange expiry rule
+    (header_contract). When Yahoo's continuous series has already moved to the next contract, the front
+    contract's own closes are used, so the 1-day and 5-day changes are moves of one contract and not the price
+    gap between two."""
     price = core['df_analysis']['Price'].dropna()
     if len(price) < 2:
         return
-    last_day, last = price.index[-1], float(price.iloc[-1])
-    ret_1 = (last / float(price.iloc[-2]) - 1) * 100
+    last_day = price.index[-1]
     _unit = unit if ticker in CURVE_ROOTS else "USD"
+    hc = header_contract(ticker, start, last_day)
+    root = CURVE_ROOTS[ticker][0] if ticker in CURVE_ROOTS else None
+    own_used, early_note = False, ""
+    if hc is not None and hc["tracked"] is not None and hc["tracked"] != hc["symbol"]:
+        _shown = contract_delivery(hc["tracked"], root)
+        if len(hc["own"]) >= 2 and hc["own"].index[-1] == last_day:
+            price, own_used = hc["own"], True
+            early_note = (f"Yahoo Finance's continuous series (`{ticker}`) already shows the {_shown:%b %y} contract "
+                          f"on {last_day:%d %b}, while the {hc['delivery']:%b %y} contract trades until "
+                          f"{hc['expiry']:%d %b}. The figures above are the {hc['delivery']:%b %y} contract's own "
+                          "prices.")
+        else:
+            _ol = (f" Its last price on Yahoo Finance is {float(hc['own'].iloc[-1]):.2f} on "
+                   f"{hc['own'].index[-1]:%d %b}." if len(hc["own"]) else "")
+            early_note = (f"The figures above are the {_shown:%b %y} contract: Yahoo Finance's continuous series "
+                          f"(`{ticker}`) moved to it on {last_day:%d %b}, while the front month, "
+                          f"{hc['delivery']:%b %y}, trades until {hc['expiry']:%d %b} and has no price on Yahoo "
+                          f"Finance for {last_day:%d %b}.{_ol}")
+    last = float(price.iloc[-1])
+    ret_1 = (last / float(price.iloc[-2]) - 1) * 100
+    if hc is not None and (own_used or not early_note):
+        _label = f"Latest price, {hc['delivery']:%b %y} contract ({last_day:%d %b})"
+    elif hc is not None:
+        _label = f"Latest price, {contract_delivery(hc['tracked'], root):%b %y} contract ({last_day:%d %b})"
+    else:
+        _label = f"Latest price ({last_day:%d %b})"
     c1, c2, c3 = st.columns(3)
-    c1.metric(f"Latest price ({last_day:%d %b})", f"{last:.2f} {_unit}")
+    c1.metric(_label, f"{last:.2f} {_unit}")
     c2.metric(f"1-day change (from {price.index[-2]:%d %b})", f"{ret_1:+.2f}%")
     if len(price) >= 6:
         c3.metric(f"5-day change (from {price.index[-6]:%d %b})", f"{(last / float(price.iloc[-6]) - 1) * 100:+.2f}%")
     rc = core.get('rolls')
     rolls = [pd.Timestamp(r[0]) for r in rc['rolls']] if rc and rc.get('rolls') else []
+    if own_used:
+        rolls = []   # one contract's own closes: no roll inside them
     in_5 = [d for d in rolls if len(price) >= 6 and d > price.index[-6]]
-    bits = []
-    if last_day in rolls:
+    bits = [early_note] if early_note else []
+    if last_day in rolls and not early_note:
         bits.append(f"{last_day:%d %b} is a contract roll day, so part of the 1-day change is the price gap between "
                     "two contracts.")
     elif in_5:
@@ -423,7 +479,8 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     note = last_value_note(ticker, end_date, last_day).strip()
     if note:
         bits.append(note)
-    _lt = last_trade_on(ticker, last_day)
+    # The hourly bars are those of the continuous series: compare them only with a price of the same contract.
+    _lt = None if own_used else last_trade_on(ticker, last_day)
     if _lt is None and ticker in _ZERO_VOLUME_NOTE:
         bits.append(f"Yahoo Finance shows no trade on {last_day:%d %b}, so this price is not a traded price.")
     if _lt is not None:
