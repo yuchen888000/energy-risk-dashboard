@@ -98,3 +98,11 @@ def test_stock_picks_dropped(name, headline, want):
     gas = _COMS[name]["ticker"] == "TTF=F"
     assert _filt["is_relevant"](headline, _KW[name], gas=gas, keep_us=keep_us) == want
     assert _filt["drop_reason"](headline, _KW[name], gas, keep_us) == "share tip or stock story"
+
+
+def test_sports_and_off_topic_headlines_left_out():
+    assert not _filt["is_relevant"]("Yankees sign LHP Brent Suter, re-sign LHP Tim Hill", _KW["Brent Crude Oil"])
+    carbon = next(k for k in _KW if k not in ("TTF Natural Gas", "WTI Crude Oil", "Brent Crude Oil"))
+    assert not _filt["is_relevant"]("Nutrien NextGen Leader award won by carbon innovator Carli Davis", _KW[carbon])
+    assert _filt["is_relevant"]("Ten EU countries support ETS2 discussions", _KW[carbon])
+    assert _filt["is_relevant"]("EU carbon price falls 6% as auction supply rises", _KW[carbon])

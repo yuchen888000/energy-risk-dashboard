@@ -121,7 +121,10 @@ def build_commodities(carbon):
             "ticker": carbon["ticker"],
             "unit": carbon["unit"],
             "color": "seagreen",
-            "keywords": ['carbon', 'ETS', 'emission', 'EU ETS', 'EUA', 'allowance', 'CBAM'],
+            # EU carbon market terms only: "carbon" or "emission" alone let in voluntary-credit stories from
+            # Indonesia or Uganda and an award for a "carbon innovator" (24 Nov 2026).
+            "keywords": ['ETS', 'EU ETS', 'EUA', 'CBAM', 'emissions trading', 'carbon price', 'carbon market',
+                         'carbon permit', 'carbon allowance', 'emission allowance', 'carbon border'],
             "news_query": '("EU ETS" OR "carbon price" OR "carbon market" OR "emissions trading" OR "carbon allowance")',
             "news_term": "carbon",
         },
@@ -259,11 +262,12 @@ def _download_batch(ticker, first, today):
     if ticker not in close:
         return pd.DataFrame()
     # Days Yahoo shows no trades among the last 30 rows with a price: a close on such a day is not a traded price.
-    zero_volume = None
+    zero_volume, volume = None, None
     try:
         _vol = data['Volume']
         _vol = _vol[ticker] if isinstance(_vol, pd.DataFrame) else _vol
-        _vol = _vol.reindex(close[ticker].dropna().index).tail(30)
+        volume = _vol.reindex(close[ticker].dropna().index)
+        _vol = volume.tail(30)
         zero_volume = (int((_vol == 0).sum()), len(_vol))
     except Exception:
         pass
@@ -322,6 +326,7 @@ def _download_batch(ticker, first, today):
         # reader should know the latest price is older than it looks.
         out.attrs["skipped"] = _skipped_days(list(out.index[-11:]) + [pd.Timestamp(today)], cal)
     out.attrs["zero_volume"] = zero_volume
+    out.attrs["volume"] = volume   # daily volume of the continuous series, so a past end date gets its own counts
     return out
 
 
@@ -375,10 +380,13 @@ def roll_adjusted_garch(returns, rolls, ref):
     return fit_garch(r, ref)
 
 
-def show_skipped_days_note(ticker, start):
+def show_skipped_days_note(ticker, start, end=None):
     """Say so when Yahoo left out a business day among the latest rows: the return on the next row then covers
-    more than one day."""
+    more than one day. Only days up to the page's end date: a page dated 30 Nov 2025 says nothing about a day
+    missing in Nov 2026."""
     skipped = shared_download(ticker, start).attrs.get("skipped")
+    if skipped and end is not None:
+        skipped = [d for d in skipped if pd.Timestamp(d) <= pd.Timestamp(end)]
     if skipped:
         _no_row = ", ".join(f"{d:%d %b %Y}" for d in skipped)
         st.warning(f"Yahoo Finance has no `{ticker}` price for {_no_row}. A return on the row after a missing day "
@@ -534,7 +542,14 @@ def show_price_header(core, ticker, name, unit, end_date, start):
                   if c != ticker and pd.notna(_b.at[last_day, c])}
             if _q and min(_q, key=lambda c: abs(_q[c] - _lt[1])) != shown_sym:
                 _lt = None
-    if _lt is None and ticker in _ZERO_VOLUME_NOTE:
+    # Volume up to the page's last day, not the latest download's last 30 rows: on 7 Mar 2022 CARB.L traded 15,130
+    # shares and no day of the 30 before had zero volume, while the latest 30 rows (Nov 2026) have 16.
+    _vol = shared_download(ticker, start).attrs.get("volume")
+    _vol = _vol[_vol.index <= last_day] if _vol is not None else None
+    _day_vol = (float(_vol.loc[last_day]) if _vol is not None and last_day in _vol.index
+                and pd.notna(_vol.loc[last_day]) else None)
+    if _lt is None and ticker in _ZERO_VOLUME_NOTE and (_day_vol == 0 if _day_vol is not None
+                                                        else last_day == shared_download(ticker, start).index.max()):
         bits.append(f"Yahoo Finance shows no trade on {last_day:%d %b}, so this price is not a traded price.")
     if _lt is not None:
         _gap = (_lt[1] / last - 1) * 100
@@ -542,7 +557,8 @@ def show_price_header(core, ticker, name, unit, end_date, start):
                     + (f", {_gap:+.1f}% from the price above, which is the day's "
                        + ("settlement." if ticker.endswith("=F") and futures_row_state(last_day) == 'close' else "row.")
                        if abs(_gap) >= 1 else "."))
-    _zv = shared_download(ticker, start).attrs.get("zero_volume")
+    _zv = ((int((_vol.tail(30) == 0).sum()), len(_vol.tail(30))) if _vol is not None and len(_vol)
+           else shared_download(ticker, start).attrs.get("zero_volume"))
     if _zv and _zv[1] and _zv[0] / _zv[1] >= 0.1:
         bits.append(f"Yahoo Finance shows no trades on {_zv[0]} of the last {_zv[1]} days with a price, so a close on "
                     "those days is not a traded price and the 30-day volatility can read low.")

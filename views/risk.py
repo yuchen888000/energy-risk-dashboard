@@ -98,7 +98,7 @@ core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, 
 if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")
     st.stop()
-common.show_skipped_days_note(commodity['ticker'], start_date)
+common.show_skipped_days_note(commodity['ticker'], start_date, end_date)
 common.show_price_header(core, commodity['ticker'], selected_commodity, commodity['unit'], end_date, start_date)
 if not ctx.is_carbon and not core['has_compare']:
     st.caption(f"{CARBON_LABEL} has limited coverage over the selected range, "

@@ -96,7 +96,7 @@ core = common.compute_core(commodity['ticker'], ctx.compare_ticker, start_date, 
 if core is None:
     st.warning("Please select a longer time range (at least 30 days of data required).")
     st.stop()
-common.show_skipped_days_note(commodity['ticker'], start_date)
+common.show_skipped_days_note(commodity['ticker'], start_date, end_date)
 common.show_price_header(core, commodity['ticker'], selected_commodity, commodity['unit'], end_date, start_date)
 if ctx.is_carbon:
     st.caption(f"Carbon benchmark: **{ctx.carbon['name']}**. {ctx.carbon['note']}")
@@ -219,6 +219,17 @@ def is_non_news(headline):
     return any(p.search(headline) for p in _NON_NEWS)
 
 
+# Sports stories that pass a keyword because a person or club shares its name ("Yankees sign LHP Brent Suter",
+# 24 Nov 2026, in the Brent list).
+_SPORTS = re.compile(r"(?<![A-Za-z])(?:LHP|RHP|pitcher|bullpen|Yankees|Red Sox|Dodgers|Mets|Cubs|NFL|NBA|NHL|MLB|"
+                     r"quarterback|touchdown|playoffs?|Premier League|Champions League|striker|midfielder|"
+                     r"goalkeeper|transfer window|free agent)(?![A-Za-z])", re.IGNORECASE)
+
+
+def is_sports(headline):
+    return bool(_SPORTS.search(headline))
+
+
 # Share tips and stock picks: the tone of "3 European Gas Stocks Investors Should Watch" is about equities,
 # not about the commodity. A headline about shares rising or falling is a company story too. "Gas stocks",
 # "crude stocks" and "oil stocks" also mean inventories ("European gas stocks are falling faster than expected"),
@@ -302,6 +313,8 @@ def drop_reason(headline, keyword_re, gas=False, keep_us=False):
     US-domestic stories: WTI is a NYMEX contract, so US inventory and production news bears on it."""
     if is_non_news(headline):
         return "not a news story (product or report-title page)"
+    if is_sports(headline):
+        return "sports story"
     if is_us_retail_fuel(headline):
         return "US retail fuel prices"
     if is_stock_tip(headline):
@@ -340,9 +353,10 @@ def dedup_key(text):
     """Headline reduced to lower-case words, so the same story from two searches or sites counts once. A label before
     a colon is left out when at least five words follow it, so "B.C. Election Analysis: Questions raised about ..."
     and "B.C. Election: Questions raised about ..." (one story, two sites) count once."""
-    head, sep, tail = text.rpartition(": ")
-    if sep and len(tail.split()) >= 5:
-        text = tail
+    for mark in (": ", " | "):   # "Arab News | Oil prices near ..." and "Oil prices near ..." are one story
+        head, sep, tail = text.rpartition(mark)
+        if sep and len(tail.split()) >= 5:
+            text = tail
     return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
 
 
@@ -643,16 +657,19 @@ else:
                                     NEWS_DAYS)
         _energy_re = _word_pattern(commodity['keywords'] + ['energy', 'oil', 'gas', 'carbon', 'power',
                                                             'fuel', 'electricity', 'pipeline', 'LNG',
-                                                            'emission', 'climate', 'price', 'supply',
+                                                            'emission', 'climate',
                                                             'tanker', 'refinery', 'fossil', 'renewable',
-                                                            'heating', 'Hormuz', 'sanction', 'ETS'])
+                                                            'heating', 'Hormuz', 'ETS'])
+        # "price", "supply" and "sanction" alone let in budget and fiscal stories ("Bulgaria Risks EU Sanctions
+        # After Failing to Rein In Spending", 24 Nov 2026): a country headline needs an energy word.
         country_rows, _seen_c = [], set()
         for _a in _c_arts:
             _h, _k = _a['title'], dedup_key(_a['title'])
             if not _k or _k in _seen_c:
                 continue
             if (_energy_re.search(_h) and mentions_country(_h, selected_country)
-                    and not is_non_news(_h) and not is_us_retail_fuel(_h) and not is_stock_tip(_h)):
+                    and not is_non_news(_h) and not is_us_retail_fuel(_h) and not is_stock_tip(_h)
+                    and not is_sports(_h)):
                 country_rows.append(_a)
                 _seen_c.add(_k)
             if len(country_rows) >= 5:
