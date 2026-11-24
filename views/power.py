@@ -937,8 +937,8 @@ if wait is not None:
                 f"{_recent['TTF=F'].std() * common.ANNUAL * 100:.0f}% annualised and `{contract}` "
                 f"{_recent[contract].std() * common.ANNUAL * 100:.0f}%." if len(_recent) >= _MIN_CMP else "")
         _method = (f"GARCH(1,1) with Student-t shocks fitted on the daily log returns of `{contract}` itself from "
-                   f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}, not on `TTF=F`, which still follows the "
-                   "expiring contract and jumps when it rolls." + _cmp + " In its earlier years the contract was "
+                   f"{fit_start:%d %b %Y} to {price_date:%d %b %Y}, not on `TTF=F`, which switches contracts "
+                   "and jumps when it rolls." + _cmp + " In its earlier years the contract was "
                    "further from delivery than it is now." + _fit_note)
     elif _mode == "approx":
         # Compared on the same days of the same fit window, so the direction is the one this sample shows.
@@ -955,7 +955,7 @@ if wait is not None:
                     "cannot say whether the range is too wide or too narrow.")
         _method = (f"Approximation: `{contract}` has {max(len(_c) - 1, 0)} daily returns in the fit window "
                    f"({_c.index[0]:%d %b %Y} to {_c.index[-1]:%d %b %Y}), fewer than the {_MIN_FIT} needed for its own "
-                   "fit, so the range is the one fitted on `TTF=F` (the expiring front month, roll jumps included, "
+                   "fit, so the range is the one fitted on `TTF=F` (Yahoo's continuous series, roll jumps included, "
                    f"{fit_start:%d %b %Y} to {wait['date']:%d %b %Y}) applied to this contract's price. It is not this "
                    "contract's own volatility." + _cmp + _fit_note)
     else:

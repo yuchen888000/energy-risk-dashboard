@@ -59,7 +59,7 @@ def test_header_uses_the_rule_and_the_contracts_own_prices():
     src = open(os.path.join(HERE, "..", "common.py"), encoding="utf-8").read()
     body = src[src.index("def show_price_header("):src.index("def _raw_close(")]
     assert "header_contract(ticker, start, last_day)" in body
-    assert 'price, own_used = hc["own"], True' in body
+    assert 'price, own_used, shown_sym = hc["own"], True, front' in body
     # The hourly bars are the continuous series': not compared with another contract's price.
     assert "None if own_used else last_trade_on(ticker, last_day)" in body
 
@@ -88,3 +88,74 @@ def test_streamlit_minimum_version():
     # st.dataframe(placeholder=...) needs 1.52 and app.py's st.Page(visibility=...) needs 1.55.
     req = open(os.path.join(HERE, "..", "requirements.txt"), encoding="utf-8").read()
     assert "streamlit>=1.55" in req
+
+
+# ─── Behaviour of the header itself (independent check of 24 Nov 2026 evening) ───
+
+class _Col:
+    def __init__(self, out):
+        self.out = out
+
+    def metric(self, label, value, *a, **k):
+        self.out.append((label, value))
+
+
+def _run_header(monkeypatch, batch, last_trade=None):
+    import streamlit as st
+    metrics, captions = [], []
+    monkeypatch.setattr(common, "shared_download", lambda t, s: batch)
+    monkeypatch.setattr(common, "last_trade_on", lambda t, d: last_trade)
+    monkeypatch.setattr(common, "last_value_note", lambda *a, **k: "")
+    monkeypatch.setattr(st, "columns", lambda n: [_Col(metrics) for _ in range(n)])
+    monkeypatch.setattr(st, "caption", lambda body, *a, **k: captions.append(body))
+    monkeypatch.setattr(st, "markdown", lambda *a, **k: None)
+    core = {"df_analysis": pd.DataFrame({"Price": batch["BZ=F"]}), "rolls": None, "var_99": None}
+    common.show_price_header(core, "BZ=F", "Brent Crude Oil", "$/barrel", batch.index[-1].date(), batch.index[0])
+    return metrics, " ".join(captions)
+
+
+def test_header_on_a_past_date_without_the_contracts(monkeypatch):
+    # A past end date: Yahoo no longer lists the contracts of that time. The page used to crash here.
+    days = pd.bdate_range("2025-11-20", "2025-11-28")
+    batch = pd.DataFrame({"BZ=F": np.linspace(62.0, 63.2, len(days))}, index=days)
+    monkeypatch.setattr(common, "shared_download", lambda t, s: batch)
+    hc = common.header_contract("BZ=F", days[0], days[-1])
+    assert hc["own"].empty and hc["tracked"] is None
+    metrics, _ = _run_header(monkeypatch, batch)
+    assert metrics[0] == ("Latest price (28 Nov)", "63.20 $/barrel")   # no contract named when none is known
+
+
+def test_header_uses_the_front_contract_when_yahoo_rolled_early(monkeypatch):
+    days = pd.bdate_range("2026-11-17", "2026-11-24")
+    jan = np.linspace(93.14, 91.03, len(days))
+    feb = jan - 2.6
+    cont = jan.copy()
+    cont[-1] = feb[-1]
+    batch = _batch(days, cont, {"BZF27.NYM": jan, "BZG27.NYM": feb})
+    metrics, cap = _run_header(monkeypatch, batch)
+    assert metrics[0] == ("Latest price, Jan 27 contract (24 Nov)", "91.03 $/barrel")
+    assert metrics[1][1] == f"{(jan[-1] / jan[-2] - 1) * 100:+.2f}%"
+    assert "shows the Feb 27 contract" in cap and "Jan 27 contract's own prices" in cap
+
+
+def test_header_no_match_uses_the_front_contract_not_a_wrong_label(monkeypatch):
+    # The continuous series' last value matches no contract (a live price between rows): the figures are the
+    # front contract's own, and no other contract's price is labelled with its name.
+    days = pd.bdate_range("2026-11-17", "2026-11-24")
+    jan = np.linspace(93.14, 91.03, len(days))
+    cont = jan.copy()
+    cont[-1] = 90.0
+    batch = _batch(days, cont, {"BZF27.NYM": jan, "BZG27.NYM": jan - 2.6})
+    metrics, cap = _run_header(monkeypatch, batch)
+    assert metrics[0] == ("Latest price, Jan 27 contract (24 Nov)", "91.03 $/barrel")
+
+
+def test_last_trade_of_another_contract_is_not_shown(monkeypatch):
+    # 23 Nov 2026: the hourly bars already show Feb 27 (86.72) while the daily close is Jan 27 (89.37).
+    days = pd.bdate_range("2026-11-16", "2026-11-23")
+    jan = np.linspace(93.14, 89.37, len(days))
+    batch = _batch(days, jan, {"BZF27.NYM": jan, "BZG27.NYM": jan - 2.69})
+    _, cap = _run_header(monkeypatch, batch, last_trade=(pd.Timestamp("2026-11-23 22:00"), 86.72))
+    assert "Last trade" not in cap
+    _, cap = _run_header(monkeypatch, batch, last_trade=(pd.Timestamp("2026-11-23 22:00"), 89.30))
+    assert "Last trade on Yahoo Finance: 89.30" in cap

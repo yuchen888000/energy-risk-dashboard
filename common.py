@@ -405,8 +405,8 @@ def header_contract(ticker, start, last_day):
         return None
     sym = contract_symbol(root, delivery)
     batch = shared_download(ticker, start)
-    own = batch[sym].dropna() if sym in batch else pd.Series(dtype=float)
-    own = own[own.index <= d]
+    own = batch[sym].dropna() if sym in batch else pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+    own = own[own.index <= d]   # an empty RangeIndex would not compare with a date (past end dates, 24 Nov 2026)
     tracked = match_front_contract(batch, ticker, d) if len(batch) and d in batch.index else None
     return dict(symbol=sym, delivery=delivery, expiry=contract_expiry(root, pd.Timestamp(delivery)),
                 tracked=tracked, own=own)
@@ -427,30 +427,36 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     _unit = unit if ticker in CURVE_ROOTS else "USD"
     hc = header_contract(ticker, start, last_day)
     root = CURVE_ROOTS[ticker][0] if ticker in CURVE_ROOTS else None
-    own_used, early_note = False, ""
-    if hc is not None and hc["tracked"] is not None and hc["tracked"] != hc["symbol"]:
-        _shown = contract_delivery(hc["tracked"], root)
-        if len(hc["own"]) >= 2 and hc["own"].index[-1] == last_day:
-            price, own_used = hc["own"], True
-            early_note = (f"Yahoo Finance's continuous series (`{ticker}`) already shows the {_shown:%b %y} contract "
-                          f"on {last_day:%d %b}, while the {hc['delivery']:%b %y} contract trades until "
-                          f"{hc['expiry']:%d %b}. The figures above are the {hc['delivery']:%b %y} contract's own "
-                          "prices.")
-        else:
+    # Which contract the figures are, and a note when that is not what Yahoo's continuous series shows:
+    #  - the series shows the rule's front contract: its prices, labelled with that contract;
+    #  - it shows another contract (or none can be matched) and the front contract has its own close on the last
+    #    day: the front contract's own closes;
+    #  - otherwise the series' prices, labelled with the contract it shows, or with no contract when none matches.
+    own_used, early_note, shown_sym = False, "", None
+    if hc is not None:
+        t, front = hc["tracked"], hc["symbol"]
+        _fm = f"{hc['delivery']:%b %y}"
+        own_ok = len(hc["own"]) >= 2 and hc["own"].index[-1] == last_day
+        if t == front:
+            shown_sym = front
+        elif own_ok:
+            price, own_used, shown_sym = hc["own"], True, front
+            early_note = (f"Yahoo Finance's continuous series (`{ticker}`) shows the "
+                          f"{contract_delivery(t, root):%b %y} contract on {last_day:%d %b}, while the front month by "
+                          f"the exchange expiry rule is {_fm}, trading until {hc['expiry']:%d %b}. "
+                          if t is not None else "") + f"The figures above are the {_fm} contract's own prices."
+        elif t is not None:
+            shown_sym = t
             _ol = (f" Its last price on Yahoo Finance is {float(hc['own'].iloc[-1]):.2f} on "
                    f"{hc['own'].index[-1]:%d %b}." if len(hc["own"]) else "")
-            early_note = (f"The figures above are the {_shown:%b %y} contract: Yahoo Finance's continuous series "
-                          f"(`{ticker}`) moved to it on {last_day:%d %b}, while the front month, "
-                          f"{hc['delivery']:%b %y}, trades until {hc['expiry']:%d %b} and has no price on Yahoo "
-                          f"Finance for {last_day:%d %b}.{_ol}")
+            early_note = (f"The figures above are the {contract_delivery(t, root):%b %y} contract, which Yahoo "
+                          f"Finance's continuous series (`{ticker}`) shows on {last_day:%d %b}. The front month by the "
+                          f"exchange expiry rule is {_fm}, trading until {hc['expiry']:%d %b}, and it has no price on "
+                          f"Yahoo Finance for {last_day:%d %b}.{_ol}")
     last = float(price.iloc[-1])
     ret_1 = (last / float(price.iloc[-2]) - 1) * 100
-    if hc is not None and (own_used or not early_note):
-        _label = f"Latest price, {hc['delivery']:%b %y} contract ({last_day:%d %b})"
-    elif hc is not None:
-        _label = f"Latest price, {contract_delivery(hc['tracked'], root):%b %y} contract ({last_day:%d %b})"
-    else:
-        _label = f"Latest price ({last_day:%d %b})"
+    _label = (f"Latest price, {contract_delivery(shown_sym, root):%b %y} contract ({last_day:%d %b})" if shown_sym
+              else f"Latest price ({last_day:%d %b})")
     c1, c2, c3 = st.columns(3)
     c1.metric(_label, f"{last:.2f} {_unit}")
     c2.metric(f"1-day change (from {price.index[-2]:%d %b})", f"{ret_1:+.2f}%")
@@ -479,8 +485,17 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     note = last_value_note(ticker, end_date, last_day).strip()
     if note:
         bits.append(note)
-    # The hourly bars are those of the continuous series: compare them only with a price of the same contract.
+    # The hourly bars are the continuous series', which can move to the next contract before its daily close does
+    # (BZ=F on 23 Nov 2026: hourly 86.72 for Feb 27, daily 89.37 for Jan 27). The last trade is shown only when its
+    # price is closest to the contract the figures above are.
     _lt = None if own_used else last_trade_on(ticker, last_day)
+    if _lt is not None and shown_sym is not None:
+        _b = shared_download(ticker, start)
+        if last_day in _b.index:
+            _q = {c: float(_b.at[last_day, c]) for c in _b.columns
+                  if c != ticker and pd.notna(_b.at[last_day, c])}
+            if _q and min(_q, key=lambda c: abs(_q[c] - _lt[1])) != shown_sym:
+                _lt = None
     if _lt is None and ticker in _ZERO_VOLUME_NOTE:
         bits.append(f"Yahoo Finance shows no trade on {last_day:%d %b}, so this price is not a traded price.")
     if _lt is not None:
