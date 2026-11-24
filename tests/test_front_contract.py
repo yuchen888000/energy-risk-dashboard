@@ -60,8 +60,8 @@ def test_header_uses_the_rule_and_the_contracts_own_prices():
     body = src[src.index("def show_price_header("):src.index("def _raw_close(")]
     assert "header_contract(ticker, start, last_day)" in body
     assert 'price, own_used, shown_sym = hc["own"], True, front' in body
-    # The hourly bars are the continuous series': not compared with another contract's price.
-    assert "None if own_used else last_trade_on(ticker, last_day)" in body
+    # The hourly bars are the continuous series': not used when it shows another contract.
+    assert 'None if (own_used and hc is not None and hc["tracked"] != shown_sym)' in body
 
 
 def test_power_front_month_from_the_rule():
@@ -159,3 +159,20 @@ def test_last_trade_of_another_contract_is_not_shown(monkeypatch):
     assert "Last trade" not in cap
     _, cap = _run_header(monkeypatch, batch, last_trade=(pd.Timestamp("2026-11-23 22:00"), 89.30))
     assert "Last trade on Yahoo Finance: 89.30" in cap
+
+
+def test_series_return_on_a_roll_day_is_not_called_the_header_move():
+    # TTF on 24 Nov 2026: TTF=F +0.75% (Dec 26 on 23 Nov, Jan 27 on 24 Nov); Jan 27 itself +0.96%.
+    px = pd.Series([89.736, 90.405], index=pd.DatetimeIndex(["2026-11-23", "2026-11-24"]))
+    rc = {"rolls": [(pd.Timestamp("2026-11-24"), "TTFF27.NYM", 0.0075, 0.0096)]}
+    s = common.series_return_phrase("TTF=F", "2020-01-01", rc, px)
+    assert s.startswith("+0.75% on 24 Nov in `TTF=F`, which switched to the Jan 27 contract that day")
+    assert s.endswith("that contract itself moved +0.96%")
+    risk = open(os.path.join(HERE, "..", "views", "risk.py"), encoding="utf-8").read()
+    assert "the page's latest price" not in risk and "common.series_return_phrase(" in risk
+
+
+def test_header_uses_own_closes_when_series_shows_the_front_contract():
+    src = open(os.path.join(HERE, "..", "common.py"), encoding="utf-8").read()
+    body = src[src.index("def show_price_header("):src.index("def _raw_close(")]
+    assert "if t == front and own_ok:" in body

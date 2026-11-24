@@ -242,9 +242,20 @@ if _gas_day == day.normalize() - pd.Timedelta(days=1) and len(_ttf_before):
     if _before is not None:
         _gas_prev, _prev_words = _before[1], f"the last TTF trade before the auction, at {_before[0]:%H:%M} Berlin time"
     else:
-        _gas_prev = float(_ttf_before.iloc[-1])
-        _prev_words = (f"the previous close, of {_ttf_before.index[-1]:%a %d %b} (no TTF trade on Yahoo Finance before "
-                       "12:00 that day)")
+        # The previous close of the same contract as the gas price above: on 24 Nov 2026 that is Jan 27 (89.55 on
+        # 23 Nov), not `TTF=F`'s 23 Nov close, which was still Dec 26 (89.74).
+        _gas_prev, _prev_day, _prev_c = float(_ttf_before.iloc[-1]), _ttf_before.index[-1], ""
+        _hl_prev = common.front_month_contract("TTF=F", _gas_day)
+        if _hl_prev["matched"]:
+            _pb = common.shared_download("TTF=F", common._DATA_START)
+            _own_prev = (_pb[_hl_prev["symbol"]].dropna() if _hl_prev["symbol"] in _pb
+                         else pd.Series(dtype=float, index=pd.DatetimeIndex([])))
+            _own_prev = _own_prev[_own_prev.index.normalize() < _gas_day]
+            if len(_own_prev):
+                _gas_prev, _prev_day = float(_own_prev.iloc[-1]), _own_prev.index[-1]
+                _prev_c = f"TTF {_hl_prev['delivery']:%b %y}'s "
+        _prev_words = (f"{_prev_c or 'the '}previous close, of {_prev_day:%a %d %b} (no TTF trade on Yahoo Finance "
+                       "before 12:00 that day)")
     _css_prev = latest["CSS peak"] + (latest["TTF"] - _gas_prev) / 0.5
     st.write(f"The auction for {day:%a %d %b} ran at 12:00 on {_gas_day:%a %d %b}, so that day's gas price "
              f"({latest['TTF']:.2f} €/MWh) came after it. On {_gas_prev:.2f} €/MWh, {_prev_words}, the peak block "
@@ -329,7 +340,7 @@ def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=Fal
                 "close comes later, so the gas price is not the one a bidder saw at 12:00.")
     if gas_ok:
         return (f"Gas is taken from the last weekday before this delivery day, {trade_day:%a %d %b}, and carbon "
-                f"from the last auction before it (no auction on {_days_txt(eua_day, trade_day)}). Monday's power is "
+                f"from the last auction before it (no auction price in EEX's report for {_days_txt(eua_day, trade_day)}). Monday's power is "
                 "auctioned on Sunday, so Friday's prices are used; for Tuesday to Friday the gas price is from the day "
                 "of the 12:00 power auction itself, and the TTF close comes after the auction, so it is not the price a "
                 "bidder saw at 12:00.")
@@ -342,7 +353,7 @@ def _timing_sentence(trade_day, ttf_day, eua_day, late_day=None, late_recent=Fal
         return (f"Carbon is taken from the last weekday before this delivery day, {trade_day:%a %d %b}, but gas is "
                 f"not: this page's data has {no_gas}, so an earlier gas price is used." + after)
     return (f"Neither is from the last weekday before this delivery day, {trade_day:%a %d %b}: this page's data has "
-            f"no EUA auction on {_days_txt(eua_day, trade_day)} and {no_gas}, so the last earlier ones are used."
+            f"no EUA auction price in EEX's report for {_days_txt(eua_day, trade_day)} and {no_gas}, so the last earlier ones are used."
             + after)
 # ─── End of timing sentence ───
 
@@ -496,7 +507,8 @@ _folded("How the margin is built", "By construction this margin cannot be negati
            "about what gas plants earn. Days with no EUA auction in the previous two weeks (around the year-end "
            "auction break) are left out, so first quarters have fewer days than the others."
            + (" From 2025Q4 prices are per 15 minutes instead of hourly; the finer periods alone raise the margin "
-              f"by {_res_lo:.0f} to {_res_hi:.0f}% (the same prices averaged to hours, 2025Q4 onwards), so quarters "
+              + (f"by {_res_lo:.0f}%" if f"{_res_lo:.0f}" == f"{_res_hi:.0f}" else f"by {_res_lo:.0f} to {_res_hi:.0f}%")
+              + " (the same prices averaged to hours, 2025Q4 onwards), so quarters "
               "before and after are not fully comparable." if pd.notna(_res_lo) else "")
            + " What it does show is that the average peak spread hides profitable hours. It ignores start-up "
            f"costs: the plant would start {_starts_day:.1f} times a day in the {period_label}"

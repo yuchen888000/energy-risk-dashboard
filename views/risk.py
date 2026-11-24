@@ -236,7 +236,11 @@ macro_events = {
 st.subheader("Price Trends with Key Policy and Market Events")
 fig, ax = plt.subplots(figsize=(14, 5))
 # Each series is drawn from its own prices, with gaps (stale periods) left blank.
-_px_line = common.break_gaps(df_analysis['Price'])
+# The chart keeps non-positive closes, which have no return and are left out of df_analysis (WTI's -37.63 on
+# 20 Apr 2020 is a day an oil reader looks for).
+_px_all = common.load_close(commodity['ticker'], start_date, end_date).dropna()
+_px_line = common.break_gaps(_px_all if len(_px_all) >= len(df_analysis['Price'].dropna())
+                             else df_analysis['Price'])
 _cmp_line = common.break_gaps(common.load_close(ctx.compare_ticker, start_date, end_date))
 ax.plot(_px_line.index, _px_line, color=commodity['color'],
         label=f'{selected_commodity} ({commodity["unit"]})', linewidth=1.5)
@@ -300,6 +304,13 @@ else:
         front, back = curve.iloc[0], curve.iloc[-1]
         n_curve = len(curve)
         first_trade, last_trade = curve['Last trade'].min(), curve['Last trade'].max()
+        # On a past end date the curve is still today's (Yahoo Finance no longer lists the contracts that traded
+        # then), so the tiles would put today's front month next to a header of another date: say it before them
+        # and date the tiles.
+        _asof_pfx = f"{last_trade:%d %b %Y}, " if _past_end else ""
+        if _past_end:
+            st.markdown(f"⚠️ This curve is today's ({last_trade:%d %b %Y}), not as of the end date "
+                        f"({end_date:%d %b %Y}): Yahoo Finance no longer lists the contracts that were trading then.")
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
         # A row of today's New York date is a latest price; one of the day before (Monday to Thursday) may not
@@ -352,7 +363,7 @@ else:
                 _season_ok[key] = n_season >= _MIN_SEASON
                 if _season_ok[key]:
                     _d = curve.loc[curve['Season'] == key, 'Delivery']
-                    col_fc.metric(f"{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of the {_open_months(key)} contracts still trading are on Yahoo Finance)",
+                    col_fc.metric(f"{_asof_pfx}{key}: {_d.min():%b %y} to {_d.max():%b %y} average ({n_season} of the {_open_months(key)} contracts still trading are on Yahoo Finance)",
                                   f"{seasons.loc[key, 'Price']:.2f} {curve_unit}")
                     # 4-6: say when the contracts averaged are not from the same day
                     _lt = curve.loc[curve['Season'] == key, 'Last trade']
@@ -363,7 +374,7 @@ else:
                         col_fc.caption("Includes hollow points on the chart: not all priced at the same time.")
                 else:
                     _months = ", ".join(f"{d:%b %y}" for d in curve.loc[curve['Season'] == key, 'Delivery'])
-                    col_fc.metric(f"{key} average", "n/a",
+                    col_fc.metric(f"{_asof_pfx}{key} average", "n/a",
                                   help=f"Only {n_season} of the {_open_months(key)} monthly contracts still trading {'is' if n_season == 1 else 'are'} on Yahoo "
                                        f"Finance ({_months}); an average needs at least {_MIN_SEASON}.")
                     col_fc.caption(f"Only {n_season} contract{'s' if n_season > 1 else ''} ({_months}): "
@@ -407,7 +418,7 @@ else:
                                                   _expiry + pd.Timedelta(days=1))
                      if _expiry is not None else None)
             _soon = _left is not None and _left < 3
-            fc2.metric(f"Front month ({front['Delivery']:%b %y}" + (f", expires {_expiry:%d %b}" if _soon else "") + ")",
+            fc2.metric(f"{_asof_pfx}Front month ({front['Delivery']:%b %y}" + (f", expires {_expiry:%d %b}" if _soon else "") + ")",
                        f"{front['Price']:.2f} {curve_unit}",
                        help=(f"Last trading day {_expiry:%d %b %Y} ({common.EXPIRY_RULES[curve_root]}; "
                              f"{common.expiry_cal_note(curve_root)})." if _expiry is not None else None))
@@ -469,8 +480,6 @@ else:
                          .drop(columns=['Front since']).rename(columns={'Last hour': 'Last hour traded (Berlin)'})
                          .rename(columns={'Price': f'Price ({curve_unit})'}),
                          width="stretch", hide_index=True)
-        if _past_end:
-            st.caption(f"The curve is today's, not as of the end date ({end_date:%d %b %Y}).")
         _folded("How the curve is built",
                 shape_note
                 + f"Monthly NYMEX contracts ({curve_root}<month code><year>.NYM) from Yahoo Finance, delayed. "
@@ -698,7 +707,7 @@ def _backtest_rows(bt, n):
         lr, p_val = common.kupiec_pof(n, x, 1 - conf)
         rows.append({'VaR level': f"{conf:.0%}", 'Exceptions': x,
                      'Expected': round(n * (1 - conf), 1), 'Kupiec LR': round(lr, 2),
-                     'p-value': round(p_val, 3),
+                     'p-value': "below 0.001" if p_val < 0.001 else f"{p_val:.3f}", '_p': p_val,
                      'Kupiec result': 'Reject (miscalibrated)' if p_val < 0.05 else 'Accept'})
     return rows
 
@@ -712,15 +721,16 @@ if len(_bt) >= 100:
     _zone_txt = (f"Basel traffic light **{_zone}** ({_rows[1]['Exceptions']} exceptions at 99%)." if _zone
                  else f"Basel traffic light not shown: it is defined for 250 backtest days and only {_n} are "
                       "available; widen the date range.")
-    _kup = "; ".join(f"Kupiec at {row['VaR level']}: {'rejected' if row['p-value'] < 0.05 else 'not rejected'} "
-                     f"({row['Exceptions']} exceptions vs {row['Expected']} expected, p = {row['p-value']:.3f})"
+    _kup = "; ".join(f"Kupiec at {row['VaR level']}: {'rejected' if row['_p'] < 0.05 else 'not rejected'} "
+                     f"({row['Exceptions']} exceptions vs {row['Expected']} expected, p "
+                     f"{'below 0.001' if row['_p'] < 0.001 else '= ' + row['p-value']})"
                      for row in _rows)
     st.write(f"**VaR Backtest ({selected_commodity}), last {_n} trading days "
              f"({_bt.index.min():%d %b %Y} to {_bt.index.max():%d %b %Y}):** " + _zone_txt + " " + _kup + "."
              + "".join(f" VaR {row['VaR level']} was exceeded {row['Exceptions'] / row['Expected']:.1f} times as often as "
                        "expected: it understates losses at that level." for row in _rows
-                       if row['p-value'] < 0.05 and row['Exceptions'] > row['Expected']))
-    st.dataframe(pd.DataFrame(_rows).set_index('VaR level'), width="stretch")
+                       if row['_p'] < 0.05 and row['Exceptions'] > row['Expected']))
+    st.dataframe(pd.DataFrame(_rows).drop(columns='_p').set_index('VaR level'), width="stretch")
     _folded("How the backtest works", f"Each day's VaR is estimated only from the {var_days} trading days before it (no look-ahead) "
                "and compared with that day's return. Kupiec also rejects too few exceptions. Basel zones: "
                "green 0 to 4, yellow 5 to 9, red 10 or more exceptions at 99% over 250 days.")
@@ -765,8 +775,8 @@ if garch is not None:
     # A large last return moves day 1 before any drift (TTF on 4 Nov 2026: 75% today, 82% on day 1, with -7.17%).
     _d1 = float(forecast_vol.iloc[0])
     _px = df_analysis['Price'].dropna()
-    _jump = (f"Day 1 is {common.fmt_vol(_d1)} because the model reacts to the latest return "
-             f"({(_px.iloc[-1] / _px.iloc[-2] - 1) * 100:+.2f}% on {_px.index[-1]:%d %b}, the page's latest price). "
+    _jump = (f"Day 1 is {common.fmt_vol(_d1)} because the model reacts to the latest return of the series it is "
+             f"fitted on ({common.series_return_phrase(commodity['ticker'], start_date, core.get('rolls'), _px)}). "
              if abs(_d1 / current_cond_vol - 1) >= 0.03 else "")
     _drift_note = _lr is not None and abs(_d10 / current_cond_vol - 1) >= 0.05 and (_lr > current_cond_vol) == _up
     if _jump and not _drift_note:
@@ -878,8 +888,16 @@ else:
     if not positions:
         st.info("Enter at least one non-zero position.")
     elif len(book_returns) < _LOOKBACK + 50:
-        st.info(f"Position risk needs at least {_LOOKBACK + 50} days of overlapping history for "
-                "the instruments held: widen the date range.")
+        # Name the position whose history is too short: widening the range cannot help when a position starts
+        # late (EU Carbon ETC from Sep 2021, so an end date of 7 Mar 2022 has too few days whatever the start).
+        _firsts = {k: book_panel[k].first_valid_index() for k in positions}
+        _short = max(_firsts, key=lambda k: _firsts[k] if _firsts[k] is not None else pd.Timestamp.max)
+        _f = _firsts[_short]
+        _late = _f is not None and _f > pd.Timestamp(start_date) + pd.Timedelta(days=31)
+        st.info(f"Position risk needs at least {_LOOKBACK + 50} days with a price for every position held; this "
+                f"book has {len(book_returns)}. "
+                + (f"{_short} has daily returns only from {_f:%d %b %Y}: remove that position or choose a later end date."
+                   if _late else "Choose an earlier start date or a later end date."))
     else:
         pnl = common.book_pnl(book_returns, positions)
         recent = pnl.tail(_LOOKBACK)
@@ -1044,7 +1062,7 @@ else:
         else:
             st.caption(f"Basel traffic light not shown: it is defined for 250 backtest days and only {n_bt} are "
                        "available; widen the date range.")
-        st.dataframe(pd.DataFrame(rows).set_index('VaR level'), width="stretch")
+        st.dataframe(pd.DataFrame(rows).drop(columns='_p').set_index('VaR level'), width="stretch")
 
         fig_bt, ax_bt = plt.subplots(figsize=(14, 4))
         bar_colors_bt = np.where(bt['Exc99'], 'red', np.where(bt['Exc95'], 'orange', 'lightgray'))

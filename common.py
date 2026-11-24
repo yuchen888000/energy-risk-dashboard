@@ -412,6 +412,31 @@ def header_contract(ticker, start, last_day):
                 tracked=tracked, own=own)
 
 
+def series_return_phrase(ticker, start, rc, px):
+    """The last daily return of the page series `px` (the continuous series behind the volatility, VaR and GARCH),
+    worded so it cannot be read as the header's 1-day change when the two differ: on a day the series switched
+    contract, or when the series shows another contract than the header. TTF on 24 Nov 2026: `TTF=F` +0.75% (Dec 26
+    on 23 Nov to Jan 27 on 24 Nov) while the header gives Dec 26's own +1.66%."""
+    px = px.dropna()
+    d = px.index[-1]
+    out = f"{(float(px.iloc[-1]) / float(px.iloc[-2]) - 1) * 100:+.2f}% on {d:%d %b}"
+    if ticker not in CURVE_ROOTS:
+        return out
+    root = CURVE_ROOTS[ticker][0]
+    for t, m, _, nr in (rc or {}).get('rolls') or []:
+        if pd.Timestamp(t).normalize() == pd.Timestamp(d).normalize():
+            return (out + f" in `{ticker}`, which switched to the {_contract_month(m, root)} contract that day, so it "
+                    f"includes the price gap between two contracts; that contract itself moved {nr * 100:+.2f}%")
+    try:
+        hc = header_contract(ticker, start, d)
+    except Exception:
+        hc = None
+    if hc is not None and hc["tracked"] is not None and hc["tracked"] != hc["symbol"]:
+        return (out + f" in `{ticker}`, which shows the {contract_delivery(hc['tracked'], root):%b %y} contract, "
+                f"not the {hc['delivery']:%b %y} front month in the price header")
+    return out
+
+
 def show_price_header(core, ticker, name, unit, end_date, start):
     """The latest price and its moves at the top of the Risk and Market pages. Without them a reader cannot see a
     large move or a wrong price: the statistics below are percentiles and thresholds.
@@ -437,7 +462,12 @@ def show_price_header(core, ticker, name, unit, end_date, start):
         t, front = hc["tracked"], hc["symbol"]
         _fm = f"{hc['delivery']:%b %y}"
         own_ok = len(hc["own"]) >= 2 and hc["own"].index[-1] == last_day
-        if t == front:
+        if t == front and own_ok:
+            # The series shows the front contract, but on a roll day (or with a roll in the last 5 days) its 1-day and
+            # 5-day changes would splice two contracts (Brent on 2 Nov 2026: -10.94% against Jan 27's own -7.63%).
+            # The contract's own closes give moves of the contract the label names.
+            price, own_used, shown_sym = hc["own"], True, front
+        elif t == front:
             shown_sym = front
         elif own_ok:
             price, own_used, shown_sym = hc["own"], True, front
@@ -465,7 +495,15 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     rc = core.get('rolls')
     rolls = [pd.Timestamp(r[0]) for r in rc['rolls']] if rc and rc.get('rolls') else []
     if own_used:
-        rolls = []   # one contract's own closes: no roll inside them
+        # One contract's own closes: no roll inside them. When the series switched to this contract within the
+        # 5 days, say that the changes are the contract's own and not those of the series.
+        _sw = [d for d in rolls if len(price) >= 6 and d > price.index[-6]] if not early_note else []
+        if _sw:
+            early_note = (f"Yahoo Finance's continuous series (`{ticker}`) switched to the "
+                          f"{contract_delivery(shown_sym, root):%b %y} contract on {_sw[-1]:%d %b}. The changes above "
+                          "are that contract's own, not the series', which includes the price gap between two "
+                          "contracts.")
+        rolls = []
     in_5 = [d for d in rolls if len(price) >= 6 and d > price.index[-6]]
     bits = [early_note] if early_note else []
     if last_day in rolls and not early_note:
@@ -488,7 +526,7 @@ def show_price_header(core, ticker, name, unit, end_date, start):
     # The hourly bars are the continuous series', which can move to the next contract before its daily close does
     # (BZ=F on 23 Nov 2026: hourly 86.72 for Feb 27, daily 89.37 for Jan 27). The last trade is shown only when its
     # price is closest to the contract the figures above are.
-    _lt = None if own_used else last_trade_on(ticker, last_day)
+    _lt = None if (own_used and hc is not None and hc["tracked"] != shown_sym) else last_trade_on(ticker, last_day)
     if _lt is not None and shown_sym is not None:
         _b = shared_download(ticker, start)
         if last_day in _b.index:

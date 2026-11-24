@@ -37,7 +37,7 @@ WHY = "Monday's power is auctioned on Sunday"
 def test_neither_when_gas_is_not_from_the_trade_day(trade, ttf, eua, eua_txt, ttf_txt):
     s = sentence(T(trade), T(ttf), T(eua))
     assert s.startswith(f"Neither is from the last weekday before this delivery day, {T(trade):%a %d %b}:")
-    assert f"no EUA auction on {eua_txt} and no TTF close on {ttf_txt}, so the last earlier ones are used." in s
+    assert f"no EUA auction price in EEX's report for {eua_txt} and no TTF close on {ttf_txt}, so the last earlier ones are used." in s
     assert "Gas is taken from" not in s and WHY not in s
 
 
@@ -49,7 +49,7 @@ def test_easter_monday_2024_brent_clause_merged():
     assert late == T("2024-04-01") and recent is False
     s = sentence(T("2024-04-01"), T("2024-03-28"), T("2024-03-28"), late, recent)
     assert s == ("Neither is from the last weekday before this delivery day, Mon 01 Apr: this page's data has no EUA "
-                 "auction on Fri 29 Mar or Mon 01 Apr and no TTF close on Fri 29 Mar or Mon 01 Apr, although NYMEX "
+                 "auction price in EEX's report for Fri 29 Mar or Mon 01 Apr and no TTF close on Fri 29 Mar or Mon 01 Apr, although NYMEX "
                  "Brent (`BZ=F`, normally the same trading days) has one for Mon 01 Apr, so the last earlier ones "
                  "are used.")
     assert "than that" not in s and "Yahoo Finance's `TTF=F` has no price" not in s
@@ -58,14 +58,14 @@ def test_easter_monday_2024_brent_clause_merged():
 def test_good_friday_2026_neither():
     s = sentence(T("2026-04-03"), T("2026-04-02"), T("2026-04-02"))
     assert s == ("Neither is from the last weekday before this delivery day, Fri 03 Apr: this page's data has no EUA "
-                 "auction on Fri 03 Apr and no TTF close on Fri 03 Apr, so the last earlier ones are used.")
+                 "auction price in EEX's report for Fri 03 Apr and no TTF close on Fri 03 Apr, so the last earlier ones are used.")
 
 
 def test_gas_from_trade_day_carbon_older_keeps_reason():
     # Delivery Thu 24 Sep 2026: gas Wed 23 Sep, carbon Tue 22 Sep.
     s = sentence(T("2026-09-23"), T("2026-09-23"), T("2026-09-22"))
     assert s.startswith("Gas is taken from the last weekday before this delivery day, Wed 23 Sep, and carbon from "
-                        "the last auction before it (no auction on Wed 23 Sep). " + WHY)
+                        "the last auction before it (no auction price in EEX's report for Wed 23 Sep). " + WHY)
 
 
 def test_both_from_trade_day_unchanged():

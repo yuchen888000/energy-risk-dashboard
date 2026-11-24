@@ -1045,10 +1045,17 @@ _roll_live = (IS_BRENT and _last_is_roll
 _roll_live_txt = ", read from the latest price, which can still change" if _roll_live else ""
 # How much of the latest move is the gap between the contracts: the series' return minus the new contract's own.
 _roll_gap = (_last_ret / 100 - _last_new_ret) if (_last_is_roll and _last_new_ret is not None) else None
+# A roll day the check does not skip (TTF, WTI, and Brent when Yahoo switches before the ICE rule) is checked like any other day, but its return is the series' and not one contract's:
+# say so, so it is not read against the price header's 1-day change (TTF on 24 Nov 2026: +0.75% here, +1.66% there).
+_other_roll = (None if _last_is_roll else
+               next(((m, nr) for t, m, _, nr in (core['rolls'] or {}).get('rolls', [])
+                     if pd.Timestamp(t) == recent_all.index[-1]), None))
 _tail_latest = (f"latest {_last_ret:+.2f}%"
                 + (f" (a roll day, not checked; the contract it switched to {_last_new_ret * 100:+.2f}%{_roll_live_txt})"
                    if _last_is_roll and _last_new_ret is not None else
-                   f" (a roll day, not checked{_roll_live_txt})" if _last_is_roll else "")
+                   f" (a roll day, not checked{_roll_live_txt})" if _last_is_roll else
+                   f" (a roll day: the series switched to the {common._contract_month(_other_roll[0], common.CURVE_ROOTS[commodity['ticker']][0])}"
+                   f" contract, which itself moved {_other_roll[1] * 100:+.2f}%)" if _other_roll else "")
                 + (f"; last breach {tail_days.index[-1]:%d %b %Y} ({tail_days.iloc[-1]:.2f}%)" if len(tail_days)
                    else f"; worst in window {recent_rets.min():.2f}%")
                 + (" (excl. roll days)" if IS_BRENT else ""))
