@@ -847,7 +847,7 @@ if _switch:
 st.write(f"The plant buys the gas for {month_label} on TTF {delivery_month:%b %y}"
          + (", the front month" if not _switch else "") + " (price from the NYMEX Dutch TTF contract)"
          + f". If it waits {_WAIT_DAYS} business days (NYMEX business days, the days `TTF=F` settles: US exchange "
-         "holidays such as Martin Luther King Jr. Day are skipped) instead of "
+         "holidays such as Thanksgiving are skipped) instead of "
          f"buying on {_decide:%a %d %b}"
          + (" (a US holiday on which NYMEX publishes no settlement)"
             if not np.is_busday(pd.Timestamp(_decide).date(), busdaycal=common.NYMEX_BDAYS) else "")

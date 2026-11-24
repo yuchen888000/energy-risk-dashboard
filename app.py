@@ -59,8 +59,8 @@ with st.sidebar:
                    "cannot be reached, the page says so and shows no spread rather than use an "
                    "approximate price.")
     else:
-        st.caption(f"Carbon benchmark: **{carbon['label']}**. Resolved at runtime from a cascade "
-                   "(`CARB.L` → `KRBN` → `ICLN`); KEUA, the original EUA proxy, was liquidated in March 2026.")
+        st.caption(f"Carbon benchmark: **{carbon['label']}**. The page uses `CARB.L` when Yahoo Finance has it, "
+                   "then `KRBN`, then `ICLN`. KEUA, the original EUA proxy, was liquidated in March 2026.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Built by Yuchen Xia · IHEID MSc International Economics  \n"

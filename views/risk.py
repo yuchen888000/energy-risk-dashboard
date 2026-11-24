@@ -893,10 +893,14 @@ else:
         _firsts = {k: book_panel[k].first_valid_index() for k in positions}
         _short = max(_firsts, key=lambda k: _firsts[k] if _firsts[k] is not None else pd.Timestamp.max)
         _f = _firsts[_short]
+        if _f is not None:
+            # The first return is the day after the first price: name the first price day.
+            _loc = book_panel.index.get_loc(_f)
+            _f = book_panel.index[_loc - 1] if _loc > 0 else _f
         _late = _f is not None and _f > pd.Timestamp(start_date) + pd.Timedelta(days=31)
-        st.info(f"Position risk needs at least {_LOOKBACK + 50} days with a price for every position held; this "
+        st.info(f"Position risk needs at least {_LOOKBACK + 50} days with a price for every position held. This "
                 f"book has {len(book_returns)}. "
-                + (f"{_short} has daily returns only from {_f:%d %b %Y}: remove that position or choose a later end date."
+                + (f"{_short} has prices only from {_f:%d %b %Y}: remove that position or choose a later end date."
                    if _late else "Choose an earlier start date or a later end date."))
     else:
         pnl = common.book_pnl(book_returns, positions)

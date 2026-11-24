@@ -426,7 +426,7 @@ def series_return_phrase(ticker, start, rc, px):
     for t, m, _, nr in (rc or {}).get('rolls') or []:
         if pd.Timestamp(t).normalize() == pd.Timestamp(d).normalize():
             return (out + f" in `{ticker}`, which switched to the {_contract_month(m, root)} contract that day, so it "
-                    f"includes the price gap between two contracts; that contract itself moved {nr * 100:+.2f}%")
+                    f"includes the price gap between two contracts, while that contract itself moved {nr * 100:+.2f}%")
     try:
         hc = header_contract(ticker, start, d)
     except Exception:
