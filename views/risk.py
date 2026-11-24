@@ -444,7 +444,7 @@ else:
         if _flagged:
             _fi = [i for i, _ in _flagged]
             ax_fc.scatter([labels_fc[i] for i in _fi], curve['Price'].iloc[_fi], facecolors='white',
-                          edgecolors='black', s=44, zorder=3, label='Not priced with the front month')
+                          edgecolors='black', s=44, zorder=3, label='Price less comparable (see the note below)')
             ax_fc.legend(fontsize=8, loc='upper right')
         for x_fc, y_fc in zip(labels_fc, curve['Price']):
             ax_fc.annotate(f"{y_fc:.2f}", (x_fc, y_fc), textcoords='offset points', xytext=(0, 7),
@@ -455,8 +455,9 @@ else:
         plt.tight_layout()
         st.pyplot(fig_fc)
         if _flagged:
-            st.markdown("⚠️ Hollow points are not priced with the front month, so the gap to them can be timing and "
-                        "not curve shape. "
+            st.markdown("⚠️ Hollow points have a price that is less comparable with the rest of the curve: a single "
+                        "trade that day, a trade at another time or a price from the saved copy. The gap to them can be "
+                        "timing as well as curve shape. "
                         + " ".join(f"{curve.iloc[i]['Delivery']:%b %y}: {w}." for i, w in _flagged))
 
         with st.expander("Contracts used"):
