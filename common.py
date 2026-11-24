@@ -19,7 +19,7 @@ import streamlit as st
 import yfinance as yf
 from arch import arch_model
 from arch.univariate import GARCH, StudentsT, ZeroMean
-from scipy.stats import chi2
+from scipy.stats import chi2, norm
 
 # ─── Carbon Benchmark Resolution ───
 # KEUA (KraneShares European Carbon Allowance ETF) stopped trading on NYSE Arca at the close of 13 March 2026 and
@@ -181,9 +181,12 @@ def _batch_contracts(ticker, today):
     return [f"{root}{MONTH_CODES[p.month - 1]}{p.year % 100:02d}.NYM" for p in months]
 
 
-# Yahoo's CARB.L reaches back to 2017, but WisdomTree's product page gives the ETC's inception as 24 Aug 2021 (read
-# 5 Nov 2026), and Yahoo repeats 15.45 until 31 Aug 2021, then 24.59 on 1 Sep. Earlier rows are not this product.
-_SERIES_FIRST_DAY = {"CARB.L": pd.Timestamp("2021-09-01")}
+# Yahoo's CARB.L reaches back to 4 Jan 2010, but WisdomTree's factsheet gives the ETC's inception as 24 Aug 2021
+# (Inception Date 24/08/2021, factsheet dated 30 Oct 2026). Yahoo repeats 15.4525 from 10 Jun 2020 to 31 Aug 2021,
+# then 24.59 on 1 Sep; the rows before 10 Jun 2020 are the earlier WisdomTree Carbon (ISIN JE00B3CG6315), closed in
+# June 2020. Earlier rows are not this product. CARB.MI is the euro line of the same ETC (ISIN JE00BP2PWW32) on Borsa
+# Italiana; Yahoo's first row is 2 Sep 2021.
+_SERIES_FIRST_DAY = {"CARB.L": pd.Timestamp("2021-09-01"), "CARB.MI": pd.Timestamp("2021-09-01")}
 _MIN_BATCH_ROWS = 250   # fewer rows than this for a series reaching back years means the download came back cut short
 # Saved copy of a series, used only when Yahoo returns too little of it (TTF=F from 1 Nov 2026 on the hosted app).
 _SAVED_COPIES = {"TTF=F": os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ttf_saved.csv")}
@@ -2171,3 +2174,591 @@ def gas_season(delivery):
     if delivery.month <= 3:
         return f"Winter {(y - 1) % 100:02d}/{y:02d}"
     return f"Summer {y:02d}"
+
+
+# ─── Stress tests of the Risk page's book (spec 2026-11-23, third version) ───
+# The book is in euros. Brent and WTI are futures quoted in USD: a position's euro P&L on a day is
+# w x r_USD x X(t-1) / X(t), with X the EUR/USD close (dollars per euro) on the instrument's own trading days, so the
+# exchange rate enters only through the day's P&L. EU Carbon ETC is taken from its euro line (CARB.MI, the same ETC as
+# CARB.L, ISIN JE00BP2PWW32), so no conversion is needed. A USD fund (the carbon proxies KRBN and ICLN) is converted in
+# full: (1 + r_USD) x X(t-1) / X(t) - 1. TTF is quoted in euros. A day without a EUR/USD close gives no return for a
+# USD instrument; nothing is carried forward.
+FX_TICKER = "EURUSD=X"
+BOOK_EUR_LINE = {"CARB.L": "CARB.MI"}
+USD_FUTURES = ("BZ=F", "CL=F")
+USD_FUNDS = ("CARB.L", "KRBN", "ICLN")
+LONG_FROM = dt.date(2007, 7, 30)   # Brent's first Yahoo row: the long history for the 2008 scenario and the 10-day moves
+LONG_TICKERS = ("BZ=F", "CL=F")
+Z95 = float(norm.ppf(0.95))
+TEN_DAYS = 10            # the Basel base horizon (MAR33.4) used by the hypothetical scenarios and the reverse stress test
+TEN_DAY_SPAN = 16        # calendar days that 10 trading days may span at most (as STRESS_MAX_SPAN, against suspensions)
+SCENARIO_DAYS = 30       # a scenario window ends at the extreme close within this many trading days of its first day
+
+
+def quote_kind(ticker):
+    """How a series' daily return becomes a euro P&L per euro of notional: 'eur', 'usd_future' or 'usd_fund'."""
+    if ticker in USD_FUTURES:
+        return "usd_future"
+    if ticker in USD_FUNDS:
+        return "usd_fund"
+    return "eur"
+
+
+def book_panel_tickers(carbon_short, carbon_ticker):
+    """Column name -> Yahoo ticker of the euro book: as panel_tickers, with EU Carbon ETC on its euro line."""
+    return panel_tickers(carbon_short, BOOK_EUR_LINE.get(carbon_ticker, carbon_ticker))
+
+
+def eur_returns(close, kind, fx=None):
+    """Daily euro P&L per euro of notional on the series' own trading days. `close` as load_close (stale repeats NaN,
+    rows kept), `fx` the EUR/USD close. NaN where the return or a EUR/USD close of the day or the day before is
+    missing."""
+    r = simple_returns(close)
+    if kind == "eur":
+        return r
+    x = fx.reindex(close.index)
+    f = x.shift(1) / x
+    return r * f if kind == "usd_future" else (1 + r) * f - 1
+
+
+@st.cache_data(ttl=3600, show_spinner="Computing book returns in euros...")
+def book_returns_panel(start, end, carbon_short, carbon_ticker):
+    """Daily euro P&L per euro of notional of TTF, WTI, Brent and carbon, one column each (not NaN-aligned), as
+    returns_panel. None when EUR/USD or fewer than two series are available."""
+    fx = load_close(FX_TICKER, start, end)
+    if fx.notna().sum() < 30:
+        return None
+    out = {}
+    for name, ticker in book_panel_tickers(carbon_short, carbon_ticker).items():
+        close = load_close(ticker, start, end)
+        if close.notna().sum() > 30:
+            out[name] = eur_returns(close, quote_kind(ticker), fx)
+    return pd.DataFrame(out) if len(out) >= 2 else None
+
+
+def long_close(ticker, end):
+    """Closes for the scenario replay and the 10-day moves: Brent and WTI from LONG_FROM (one extra download each,
+    cached like every other), every other series from the start of the data."""
+    return load_close(ticker, LONG_FROM if ticker in LONG_TICKERS else _DATA_START, end)
+
+
+# Parametric comparison of correlations (spec section 2.3): same volatilities, only the correlation matrix changes.
+def param_var(w, sigma, corr, z=Z95):
+    """Normal parametric VaR with zero mean: z x sqrt(w' D C D w), D = diag(sigma)."""
+    x = np.asarray(w, float) * np.asarray(sigma, float)
+    return float(z * np.sqrt(max(float(x @ np.asarray(corr, float) @ x), 0.0)))
+
+
+def no_div_var(w, sigma, z=Z95):
+    """The parametric VaR with every correlation at its adverse extreme: z x sum |w_i| sigma_i."""
+    return float(z * np.sum(np.abs(np.asarray(w, float)) * np.asarray(sigma, float)))
+
+
+def nearest_corr(a, tol=1e-12, max_iter=2000):
+    """Nearest correlation matrix in the Frobenius norm (Higham 2002, alternating projections with Dykstra's
+    correction): symmetric, unit diagonal, eigenvalues at least zero up to rounding (about -1e-12)."""
+    y = np.array(a, dtype=float)
+    y = (y + y.T) / 2
+    ds = np.zeros_like(y)
+    for _ in range(max_iter):
+        r = y - ds
+        vals, vecs = np.linalg.eigh(r)
+        x = (vecs * np.clip(vals, 0, None)) @ vecs.T
+        ds = x - r
+        y_new = x.copy()
+        np.fill_diagonal(y_new, 1.0)
+        done = np.linalg.norm(y_new - y, 'fro') <= tol * max(1.0, np.linalg.norm(y, 'fro'))
+        y = y_new
+        if done:
+            break
+    return (y + y.T) / 2
+
+
+PSD_TOL = -1e-10
+
+
+def frtb_corr(c, scenario):
+    """The FRTB high or low correlation scenario (MAR21.6) of a correlation matrix: high = 1.25 rho capped at 1
+    (and floored at -1, which MAR21.6 does not need because its rho are regulatory parameters), low =
+    max(2 rho - 1, 0.75 rho). Returns (matrix, repaired): a matrix with an eigenvalue below PSD_TOL is replaced by
+    its nearest correlation matrix."""
+    c = np.asarray(c, float)
+    off = ~np.eye(len(c), dtype=bool)
+    m = c.copy()
+    if scenario == "high":
+        m[off] = np.clip(1.25 * c[off], -1.0, 1.0)
+    elif scenario == "low":
+        m[off] = np.maximum(2 * c[off] - 1, 0.75 * c[off])
+    else:
+        raise ValueError(scenario)
+    repaired = bool(np.linalg.eigvalsh(m).min() < PSD_TOL)
+    return (nearest_corr(m) if repaired else m), repaired
+
+
+def pair_deltas(w, sigma, c_new, c_old):
+    """Variance change of each pair i < j when the correlation matrix changes: 2 w_i w_j s_i s_j (rho_new - rho_old).
+    Summed over the pairs it equals (VaR_new^2 - VaR_old^2) / z^2."""
+    w, s = np.asarray(w, float), np.asarray(sigma, float)
+    n = len(w)
+    return {(i, j): float(2 * w[i] * w[j] * s[i] * s[j] * (c_new[i][j] - c_old[i][j]))
+            for i in range(n) for j in range(i + 1, n)}
+
+
+def diversification_check(rets, positions, stress=None, window=VAR_WINDOW, short=VOL_DAYS, n_hist=CHECK_WINDOW,
+                          min_hist=_MIN_HISTORY):
+    """The diversification alert of the Risk page (spec section 2, as decided on 23 Nov 2026).
+
+    `rets` are the euro daily returns of the instruments held, on the days on which all of them have a return
+    (book_returns_panel from STRESS_FROM, dropna), `positions` maps instrument to euro notional, `stress` is
+    stress_period's dict or None. Volatilities and the 250-day correlations come from the last `window` rows (the
+    rows of the page's historical VaR), the 30-day correlations from the last `short` rows of the same table.
+
+    The history behind the thresholds: for each of the last `n_hist` rows (the Market page's CHECK_WINDOW), the
+    ratio V30 / V250 - 1 with that day's own 250-day volatilities and its own 30-row and 250-row correlations, and
+    each pair's 30-row correlation; today's values are the last ones. WARNING when today's ratio is above its 95th
+    percentile; a pair is outside when its 30-day correlation is above its 95th or below its 5th percentile, and
+    adverse when that side raises the book's variance (same-sign positions above, opposite-sign below). WATCH when
+    WARNING is off and a pair is adverse. With fewer than `min_hist` values nothing is judged.
+
+    Returns None for fewer than two positions or fewer than `window` rows."""
+    names = list(positions)
+    if len(names) < 2:
+        return None
+    sub = rets[names].dropna()
+    X, idx = sub.values, sub.index
+    n = len(X)
+    if n < window:
+        return None
+    w = np.array([positions[k] for k in names], float)
+    sigma = X[-window:].std(axis=0, ddof=1)
+    c250 = np.corrcoef(X[-window:], rowvar=False)
+    c30 = np.corrcoef(X[-short:], rowvar=False)
+    v250, v30, vnodiv = param_var(w, sigma, c250), param_var(w, sigma, c30), no_div_var(w, sigma)
+    hi, hi_fix = frtb_corr(c250, "high")
+    lo, lo_fix = frtb_corr(c250, "low")
+    frtb = {"high": param_var(w, sigma, hi), "250-day": v250, "low": param_var(w, sigma, lo)}
+    frtb_which = max(frtb, key=frtb.get)
+    k = min(n_hist, n - window + 1)
+    pairs_ij = [(i, j) for i in range(len(names)) for j in range(i + 1, len(names))]
+    ratios = np.empty(k)
+    pair_hist = {p: np.empty(k) for p in pairs_ij}
+    for m, t in enumerate(range(n - k, n)):
+        blk = X[t - window + 1:t + 1]
+        ca = np.corrcoef(blk, rowvar=False)
+        cb = np.corrcoef(X[t - short + 1:t + 1], rowvar=False)
+        s_t = blk.std(axis=0, ddof=1)
+        base = param_var(w, s_t, ca)
+        ratios[m] = param_var(w, s_t, cb) / base - 1 if base > 0 else np.nan
+        for p in pairs_ij:
+            pair_hist[p][m] = cb[p]
+    judged = k >= min_hist
+    ratio = v30 / v250 - 1
+    p95 = float(np.nanpercentile(ratios, 95))
+    deltas = pair_deltas(w, sigma, c30, c250)
+    pairs = []
+    for (i, j) in pairs_ij:
+        lo_p, hi_p = (float(v) for v in np.nanpercentile(pair_hist[(i, j)], [5, 95]))
+        r30, r250 = float(c30[i, j]), float(c250[i, j])
+        side = "above" if r30 > hi_p else "below" if r30 < lo_p else None
+        same = w[i] * w[j] > 0
+        adverse = side is not None and ((side == "above") == same)
+        c_pair = c250.copy()
+        c_pair[i, j] = c_pair[j, i] = r30
+        if np.linalg.eigvalsh(c_pair).min() < PSD_TOL:
+            c_pair = nearest_corr(c_pair)
+        pairs.append(dict(a=names[i], b=names[j], rho30=r30, rho250=r250, lo=lo_p, hi=hi_p, side=side,
+                          same_sign=bool(same), adverse=bool(adverse), delta=deltas[(i, j)],
+                          v_pair=param_var(w, sigma, c_pair)))
+    pairs.sort(key=lambda p: -p["delta"])
+    warning = bool(judged and ratio > p95)
+    watch = bool(judged and not warning and any(p["adverse"] for p in pairs))
+    out = dict(names=names, sigma=sigma, c250=c250, c30=c30, v250=v250, v30=v30, vnodiv=vnodiv, ratio=ratio,
+               p95=p95, n_hist=k, judged=judged, hist_start=idx[n - k], hist_end=idx[-1], warning=warning,
+               watch=watch, pairs=pairs, frtb=frtb, frtb_which=frtb_which, frtb_repaired=hi_fix or lo_fix,
+               vstress=None, stress_repaired=False, asof=idx[-1])
+    if stress is not None:
+        blk = sub.loc[stress["start"]:stress["end"]].values
+        if len(blk) > len(names) + 1:
+            cs = np.corrcoef(blk, rowvar=False)
+            if np.linalg.eigvalsh(cs).min() < PSD_TOL:
+                cs, out["stress_repaired"] = nearest_corr(cs), True
+            out["vstress"] = param_var(w, sigma, cs)
+    return out
+
+
+def hist_diversification(rets, positions, conf=0.95):
+    """Historical diversification benefit on a block of daily returns: sum of standalone VaRs minus the book VaR,
+    and the book VaR, both as positive euros."""
+    alone = sum(hist_var(rets[k] * v, conf) for k, v in positions.items())
+    book = hist_var(book_pnl(rets, positions), conf)
+    return alone - book, book, alone
+
+
+# Historical scenarios (spec section 3): fixed quantities, euro P&L.
+def scenario_end(close, first, days=SCENARIO_DAYS, low=True):
+    """The window rule of the scenarios: the first day is `first` (day 1), and the window ends on the lowest (or
+    highest) close within the series' first `days` rows from it. Ties go to the earliest day."""
+    s = close.dropna()
+    s = s[s.index >= pd.Timestamp(first)].iloc[:days]
+    if s.empty:
+        return None
+    return s.idxmin() if low else s.idxmax()
+
+
+def replay_fixed(closes, kinds, fx, positions, first, last, min_cover=0.7, max_base_gap=10):
+    """Replay static positions through one past window with fixed quantities.
+
+    `closes` maps instrument to its closes (load_close or long_close, own trading days), `kinds` to quote_kind,
+    `fx` is the EUR/USD close. Each position's quantity is set at the last close before `first` (within
+    `max_base_gap` calendar days, else the instrument has no data) from its euro notional, and held to the close of
+    `last`. Daily euro P&L per euro of notional: price change / base price for euro series; for USD futures the
+    day's USD price change converted at that day's EUR/USD (days without a EUR/USD close are skipped and their
+    price change falls into the next day with one, so the total is unchanged); for a USD fund the change of the
+    euro value of the holding. A price at or below zero needs no special case: P&L is quantity x price change.
+
+    An instrument with prices on fewer than `min_cover` of the window's trading days (the days on which any
+    instrument has a price) has no data. Returns dict(days, base, end, inst, missing_held, book, worst_day,
+    worst_pnl); inst[name] is None or dict(ret, pnl, pos, daily)."""
+    first, last = pd.Timestamp(first), pd.Timestamp(last)
+    wins = {k: c.dropna()[(c.dropna().index >= first) & (c.dropna().index <= last)] for k, c in closes.items()}
+    union = pd.DatetimeIndex(sorted(set().union(*[set(v.index) for v in wins.values()]))) if wins else pd.DatetimeIndex([])
+    out = {"days": len(union), "base": None, "end": union.max() if len(union) else None, "inst": {}}
+    bases = []
+    for name, close in closes.items():
+        c = close.dropna()
+        before, win = c[c.index < first], wins[name]
+        kind = kinds[name]
+        if (before.empty or win.empty or len(win) < min_cover * len(union) or before.iloc[-1] <= 0
+                or (first - before.index[-1]).days > max_base_gap):
+            out["inst"][name] = None
+            continue
+        d0, p0 = before.index[-1], float(before.iloc[-1])
+        path = pd.concat([pd.Series([p0], index=[d0]), win])
+        if kind == "eur":
+            value = path / p0
+            daily = value.diff().iloc[1:]
+        else:
+            x = fx.reindex(path.index)
+            if pd.isna(x.iloc[0]):
+                out["inst"][name] = None
+                continue
+            keep = x.notna()
+            path, x = path[keep], x[keep]
+            if kind == "usd_future":
+                daily = (path.diff() / p0 * x.iloc[0] / x).iloc[1:]
+            else:
+                value = (path / x) / (p0 / x.iloc[0])
+                daily = value.diff().iloc[1:]
+        pos = positions.get(name, 0.0)
+        ret = float(daily.sum())
+        out["inst"][name] = {"ret": ret, "pnl": pos * ret, "pos": pos, "daily": daily}
+        bases.append(d0)
+    if bases:
+        out["base"] = max(bases)
+    held = [k for k, v in positions.items() if v]
+    out["missing_held"] = [k for k in held if out["inst"].get(k) is None]
+    if held and not out["missing_held"]:
+        daily = pd.concat([out["inst"][k]["daily"] * positions[k] for k in held], axis=1).fillna(0).sum(axis=1)
+        out["book"] = float(daily.sum())
+        out["worst_day"], out["worst_pnl"] = daily.idxmin(), float(daily.min())
+    return out
+
+
+def conditional_moves(cov, names, core):
+    """Moves of the other factors given the core factors' moves: E[r_o | r_c = s_c] = S_oc S_cc^-1 s_c (zero
+    mean). `cov` over `names` (any horizon: the ratio does not depend on it), `core` maps name to move."""
+    cov = np.asarray(cov, float)
+    c = [names.index(k) for k in core]
+    o = [i for i in range(len(names)) if i not in c]
+    out = {names[i]: float(core[names[i]]) for i in c}
+    if o:
+        s = np.array([core[names[i]] for i in c], float)
+        m = cov[np.ix_(o, c)] @ np.linalg.solve(cov[np.ix_(c, c)], s)
+        out.update({names[i]: float(v) for i, v in zip(o, m)})
+    return out
+
+
+def estimate_missing(daily, observed, missing, min_rows=VAR_WINDOW):
+    """Estimate of a missing leg's move over a scenario window from the observed legs' moves: the conditional mean
+    with the daily covariance over the longest history in which the missing leg and the observed legs all have a
+    return. `daily` holds euro daily returns, `observed` maps name to window move. None with fewer than
+    `min_rows` common days."""
+    cols = [missing] + list(observed)
+    sub = daily[cols].dropna()
+    if len(sub) < min_rows:
+        return None
+    move = conditional_moves(sub.cov().values, cols, observed)[missing]
+    return dict(ret=move, start=sub.index[0], end=sub.index[-1], n=len(sub))
+
+
+# Hypothetical scenarios (spec section 4) and the reverse stress test (section 5).
+def ten_day_moves(close, kind, fx=None, days=TEN_DAYS, max_span=TEN_DAY_SPAN):
+    """Euro P&L per euro of notional over every run of `days` consecutive rows of the series' own trading days
+    (overlapping, MAR33.4), indexed by the last day. A run counts only when all its `days` + 1 closes are present
+    and above zero (and, for a USD series, every day has a EUR/USD close) and it spans at most `max_span` calendar
+    days. Futures: sum of daily price changes converted at each day's EUR/USD, on the quantity of the first close.
+    Funds and euro series: change of the euro value."""
+    p = close.astype(float)
+    idx, P = p.index, p.values
+    n = len(P)
+    if n <= days:
+        return pd.Series(dtype=float)
+    X = np.ones(n) if kind == "eur" else fx.reindex(idx).values.astype(float)
+    ok = ~np.isnan(P) & ~np.isnan(X) & (np.nan_to_num(P, nan=-1.0) > 0)
+    cum_ok = np.concatenate([[0], np.cumsum(ok)])
+    s_i = np.arange(0, n - days)
+    e_i = s_i + days
+    full = (cum_ok[e_i + 1] - cum_ok[s_i]) == days + 1
+    span = (idx[e_i] - idx[s_i]).days <= max_span
+    valid = full & np.asarray(span)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if kind == "eur":
+            r = P[e_i] / P[s_i] - 1
+        elif kind == "usd_fund":
+            r = (P[e_i] / X[e_i]) / (P[s_i] / X[s_i]) - 1
+        else:
+            d = np.diff(P, prepend=np.nan) / X
+            cum = np.cumsum(np.where(np.isnan(d), 0.0, d))
+            r = (cum[e_i] - cum[s_i]) * X[s_i] / P[s_i]
+    return pd.Series(np.where(valid, r, np.nan), index=idx[e_i]).dropna()
+
+
+def table_config(df):
+    """Number formats for a Section 5 table, kept as numbers so that sorting by a column stays numeric: columns in
+    euro millions ("(€m)" in the name) with two decimals, whole-number columns with none. Position columns keep
+    Streamlit's default, which shows the position as entered. Returns name -> st.column_config.NumberColumn."""
+    import streamlit as st
+    cfg = {}
+    for c in df.columns:
+        col = df[c]
+        if not pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col):
+            continue
+        name = str(c)
+        if name.startswith("Position"):
+            continue
+        vals = col.dropna()
+        if "(€m)" in name:
+            cfg[c] = st.column_config.NumberColumn(format="%.2f")
+        elif len(vals) and (vals == vals.round()).all():
+            cfg[c] = st.column_config.NumberColumn(format="%d")
+    return cfg
+
+
+def show_table(df):
+    """Show a Section 5 table: missing values as empty cells (placeholder, Streamlit 1.52 and later), numbers
+    kept as numbers with the formats of table_config."""
+    import streamlit as st
+    st.dataframe(df, width="stretch", column_config=table_config(df), placeholder="")
+
+
+def ten_day_summary(close, kind, fx=None):
+    """Worst 10-day rise and fall of one series with their end days, the daily volatility of its euro returns over
+    the whole history, the standardised sizes k = |move| / (sigma x sqrt(10)), and the 99th and 1st percentiles of
+    the 10-day moves. None without 10-day moves."""
+    mv = ten_day_moves(close, kind, fx)
+    if mv.empty:
+        return None
+    sigma = float(eur_returns(close, kind, fx).std())
+    sq = sigma * np.sqrt(TEN_DAYS)
+    return dict(up=float(mv.max()), up_end=mv.idxmax(), down=float(mv.min()), down_end=mv.idxmin(), sigma=sigma,
+                k_up=float(mv.max()) / sq, k_down=abs(float(mv.min())) / sq,
+                p99=float(np.percentile(mv, 99)), p1=float(np.percentile(mv, 1)),
+                first=close.dropna().index[0], last=close.dropna().index[-1], n=len(mv))
+
+
+def severity_shocks(summ, short, ref="Brent Crude Oil"):
+    """Shock sizes per instrument and direction: the worst 10-day move ('W'); for a short-history instrument, the
+    larger of its own and the reference's standardised size times its own 10-day volatility ('B', borrowed).
+    A borrowed fall of 100% or more would need a price at or below zero, so the own worst fall is kept instead and
+    the instrument is listed in `capped`. Returns (name -> dict(up=(move, tag), down=(move, tag)), capped)."""
+    r = summ[ref]
+    out, capped = {}, []
+    for name, s in summ.items():
+        sq = s["sigma"] * np.sqrt(TEN_DAYS)
+        up, down = (s["up"], "W"), (s["down"], "W")
+        if name in short:
+            if r["k_up"] * sq > abs(s["up"]):
+                up = (r["k_up"] * sq, "B")
+            if r["k_down"] * sq > abs(s["down"]):
+                if r["k_down"] * sq >= 1:
+                    capped.append(name)
+                else:
+                    down = (-r["k_down"] * sq, "B")
+        out[name] = dict(up=up, down=down)
+    return out, capped
+
+
+def reverse_stress(cov, w, loss):
+    """The most plausible scenario (smallest Mahalanobis distance under `cov`) in which the linear book `w` loses
+    `loss`: r* = -loss x S w / (w' S w), distance d* = loss / sqrt(w' S w), P&L by leg w_i r*_i (sums to -loss)."""
+    cov, w = np.asarray(cov, float), np.asarray(w, float)
+    sw = cov @ w
+    var = float(w @ sw)
+    r = -loss * sw / var
+    return dict(r=r, d=loss / np.sqrt(var), pnl=w * r, sigma=np.sqrt(var))
+
+
+def joint_ten_day(rets, days=TEN_DAYS, max_span=TEN_DAY_SPAN):
+    """Joint 10-day moves of the book's instruments: sums of `days` consecutive rows of daily euro returns on the
+    days all of them have a return, spanning at most `max_span` calendar days from the day before the first row."""
+    sub = rets.dropna()
+    if len(sub) <= days:
+        return pd.DataFrame(columns=rets.columns)
+    sums = sub.rolling(days).sum().iloc[days:]
+    starts = sub.index[:-days]
+    ok = np.asarray((sums.index - starts).days <= max_span)
+    return sums[ok]
+
+
+def mahalanobis(moves, cov):
+    """Distance sqrt(r' S^-1 r) of each row of `moves`."""
+    m = np.asarray(moves, float)
+    sol = np.linalg.solve(np.asarray(cov, float), m.T).T
+    return np.sqrt(np.einsum("ij,ij->i", m, sol))
+
+
+# Page text of the stress tests, written here so the tests can check it (no forecasts, no dashes, no semicolons).
+def eur_m(x, sign=True):
+    """Euros in millions with the sign before the euro sign: +€1.20m, -€0.45m."""
+    s = ("-" if x < 0 else "+" if sign else "")
+    return f"{s}€{abs(x) / 1e6:,.2f}m"
+
+
+def pct(x):
+    """A move as a signed percentage, with one decimal when it rounds to 0% (no "-0%")."""
+    return f"{x:+.0%}" if abs(x) >= 0.005 else f"{x:+.1%}"
+
+
+def _side_words(same_sign):
+    return "higher" if same_sign else "lower"
+
+
+def _pos_word(v):
+    return "long" if v > 0 else "short"
+
+
+def pair_sentence(p, positions):
+    """One pair of the diversification alert, with its actual position directions."""
+    out = (f"{p['a']} and {p['b']}: 30-day correlation {p['rho30']:.2f} against {p['rho250']:.2f} over 250 days")
+    if p["side"]:
+        out += f", {p['side']} its 3-year range of {p['lo']:.2f} to {p['hi']:.2f}"
+    out += (f". With {p['a']} {_pos_word(positions[p['a']])} and {p['b']} {_pos_word(positions[p['b']])}, a "
+            f"{_side_words(p['same_sign'])} correlation raises the book's VaR.")
+    return out
+
+
+def diversification_box(dc, positions):
+    """(kind, text) of the alert box: kind is 'warning', 'watch' or None."""
+    if dc is None or not dc["judged"]:
+        return None, ""
+    if dc["warning"]:
+        top = dc["pairs"][0]
+        others = [p for p in dc["pairs"][1:] if p["adverse"]]
+        text = (f"⚠️ Diversification is weaker than in most of the past {dc['n_hist']} trading days. With the last 30 days' correlations and the last 250 "
+                f"days' volatilities, the book's parametric VaR 95% is €{dc['v30'] / 1e6:,.2f}m, "
+                f"{dc['ratio']:+.0%} against €{dc['v250'] / 1e6:,.2f}m with the 250-day correlations. The gap is "
+                f"above its 95th percentile over the past {dc['n_hist']} trading days ({dc['p95']:+.0%}). Largest "
+                f"contributor: {pair_sentence(top, positions)}")
+        if others:
+            text += " Also outside its range on the side that raises the book's VaR: " + " ".join(
+                pair_sentence(p, positions) for p in others)
+        text += " The historical VaR above uses the 250-day correlations."
+        return "warning", text
+    if dc["watch"]:
+        bits = []
+        for p in [p for p in dc["pairs"] if p["adverse"]]:
+            bits.append(f"{p['a']} ({_pos_word(positions[p['a']])}) and {p['b']} ({_pos_word(positions[p['b']])}): "
+                        f"30-day correlation {p['rho30']:.2f}, {p['side']} its 3-year range of {p['lo']:.2f} to "
+                        f"{p['hi']:.2f}. With only this pair at its 30-day correlation, the book's parametric VaR 95% "
+                        f"is €{p['v_pair'] / 1e6:,.3f}m, against €{dc['v250'] / 1e6:,.3f}m with the 250-day "
+                        "correlations.")
+        return "watch", "🔵 " + " ".join(bits)
+    return None, ""
+
+
+def favourable_pairs_sentence(dc, positions):
+    """Pairs outside their range on the side that lowers the book's VaR (no alert)."""
+    fav = [p for p in dc["pairs"] if p["side"] and not p["adverse"]] if dc else []
+    if not fav:
+        return ""
+    return " ".join(f"{p['a']} and {p['b']}: 30-day correlation {p['rho30']:.2f}, {p['side']} its 3-year range of "
+                    f"{p['lo']:.2f} to {p['hi']:.2f}. With {p['a']} {_pos_word(positions[p['a']])} and {p['b']} "
+                    f"{_pos_word(positions[p['b']])}, this side lowers the book's VaR, so it helps diversification."
+                    for p in fav)
+
+
+def summary_lines(worst, n_left_out, loss_limit, placeholder, var_limit, rev, names, dmax, dmax_end):
+    """The three lines of the stress-test summary. `worst` is dict(name, type, horizon, pnl, days) or None, `rev` is
+    reverse_stress's dict for `names` or None."""
+    lines = []
+    if worst is not None:
+        line = (f"Worst scenario on this page: {worst['name']} ({worst['type']}, {worst['horizon']}), book P&L "
+                f"{eur_m(worst['pnl'])}, {max(-worst['pnl'], 0) / var_limit:.1f}x the VaR 95% limit (1-day).")
+        if n_left_out:
+            line += (f" {n_left_out} historical scenario{'s are' if n_left_out != 1 else ' is'} left out because a "
+                     "held position has no data in the window.")
+        lines.append(line)
+        gap = -worst["pnl"] - loss_limit
+        line = (f"Against the 10-day loss limit (€{loss_limit / 1e6:,.1f}m" + (", a placeholder" if placeholder else "")
+                + f"), the worst scenario loss is {'above' if gap > 0 else 'below'} it by €{abs(gap) / 1e6:,.2f}m.")
+        if worst["type"] == "historical":
+            line += f" That scenario runs {worst['days']} trading days and the limit is for 10."
+        lines.append(line)
+    if rev is not None:
+        legs = ", ".join(f"{k} {pct(r)} ({eur_m(p)})" for k, r, p in zip(names, rev["r"], rev["pnl"]))
+        biggest = names[int(np.argmin(rev["pnl"]))]
+        line = (f"The most plausible 10-day move that loses €{loss_limit / 1e6:,.1f}m: {legs}. The largest loss in it "
+                f"is on {biggest}. Its distance is {rev['d']:.1f}, against {dmax:.1f} for the largest joint 10-day "
+                f"move in the data (ending {dmax_end:%d %b %Y}).")
+        below = [k for k, r in zip(names, rev["r"]) if r <= -1]
+        if below:
+            line += " " + ", ".join(below) + (" needs" if len(below) == 1 else " need") + " a price below zero for it."
+        lines.append(line)
+    return lines
+
+
+MIN_STRESS_ROWS = 200   # returns an instrument needs in the stress period before its covariance is used
+
+
+def narratives(carbon_short, carbon_ok):
+    """The three narrative scenarios (spec 4.4): core factors and directions. The carbon scenario only when carbon
+    is EU Carbon ETC (a proxy fund is not an allowance price)."""
+    out = [dict(name="Gulf supply disruption", core={"Brent Crude Oil": "up", "TTF Natural Gas": "up"}),
+           dict(name="Demand collapse", core={"Brent Crude Oil": "down"})]
+    if carbon_ok:
+        out.append(dict(name="Carbon market shock", core={carbon_short: "down"}))
+    return out
+
+
+def hypothetical_rows(shocks, stress_rets, positions, carbon_short, carbon_ok):
+    """Rows of the hypothetical-scenario table (spec 4.4 and 4.5). `shocks` from severity_shocks, `stress_rets` the
+    euro daily returns of the stress period (all instruments, not NaN-aligned), `positions` the euro notionals.
+
+    Single-factor rows: one held instrument moves by its shock, the others by zero. Narrative rows: the core
+    factors move by their shocks and every other held instrument by its conditional mean given them, with the
+    stress period's daily covariance x 10 (zero mean). A narrative whose instruments have fewer than
+    MIN_STRESS_ROWS returns in the stress period is not computed. Each row: dict(name, type, moves = name ->
+    (move, tag), pnl, missing)."""
+    held = [k for k, v in positions.items() if v]
+    rows = []
+    for k in held:
+        if k not in shocks:
+            continue
+        for d in ("up", "down"):
+            mv, tag = shocks[k][d]
+            rows.append(dict(name=f"{k} {'rise' if d == 'up' else 'fall'}", type="single factor",
+                             moves={k: (mv, tag)}, pnl=positions[k] * mv, missing=[]))
+    for nar in narratives(carbon_short, carbon_ok):
+        needed = list(dict.fromkeys(list(nar["core"]) + held))
+        short_cols = [k for k in needed if k not in stress_rets or stress_rets[k].notna().sum() < MIN_STRESS_ROWS
+                      or k not in shocks and k in nar["core"]]
+        if short_cols:
+            rows.append(dict(name=nar["name"], type="narrative", moves={}, pnl=None, missing=short_cols))
+            continue
+        blk = stress_rets[needed].dropna()
+        core = {k: shocks[k][d][0] for k, d in nar["core"].items()}
+        mv = conditional_moves(blk.cov().values * TEN_DAYS, needed, core)
+        moves = {k: (mv[k], shocks[k][nar["core"][k]][1] if k in core else "C") for k in needed}
+        rows.append(dict(name=nar["name"], type="narrative", moves=moves,
+                         pnl=sum(positions[k] * mv[k] for k in held), missing=[]))
+    return rows
