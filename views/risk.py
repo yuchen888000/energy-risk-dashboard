@@ -310,7 +310,7 @@ else:
         _asof_pfx = f"{last_trade:%d %b %Y}, " if _past_end else ""
         if _past_end:
             st.markdown(f"⚠️ This curve is today's ({last_trade:%d %b %Y}), not as of the end date "
-                        f"({end_date:%d %b %Y}): Yahoo Finance no longer lists the contracts that were trading then.")
+                        f"({end_date:%d %b %Y}). The page draws the curve from the latest prices only.")
         settled = (f"{last_trade:%d %b %Y}" if first_trade == last_trade
                    else f"{first_trade:%d %b} to {last_trade:%d %b %Y}")
         # A row of today's New York date is a latest price; one of the day before (Monday to Thursday) may not

@@ -512,6 +512,10 @@ def show_price_header(core, ticker, name, unit, end_date, start):
                           "are that contract's own, not the series', which includes the price gap between two "
                           "contracts.")
         rolls = []
+    # Brent switches by the ICE rule on days the roll check cannot always identify once the old contract is gone
+    # from Yahoo (1 Dec 2025: BZ=F moved from Jan 26 to Feb 26, so its -0.05% is not the market's +1.27%).
+    if ticker == "BZ=F" and not own_used and len(price) >= 7:
+        rolls = sorted(set(rolls) | set(brent_roll_days(price.index[-7:])))
     in_5 = [d for d in rolls if len(price) >= 6 and d > price.index[-6]]
     bits = [early_note] if early_note else []
     if last_day in rolls and not early_note:
